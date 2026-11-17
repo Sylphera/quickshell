@@ -87,6 +87,19 @@ void WindowThumbnail::refresh() {
 			this->mSource = source;
 			this->mFrameConnection =
 			    QObject::connect(window, &QQuickWindow::afterAnimating, this, &WindowThumbnail::sync);
+			this->mPlaceConnection = QObject::connect(
+			    window,
+			    &QQuickWindow::beforeSynchronizing,
+			    this,
+			    &WindowThumbnail::place,
+			    Qt::DirectConnection
+			);
+
+			DWM_THUMBNAIL_PROPERTIES hidden {};
+			hidden.dwFlags = DWM_TNP_VISIBLE;
+			hidden.fVisible = FALSE;
+			DwmUpdateThumbnailProperties(thumbnail, &hidden);
+			this->mApplied = hidden;
 		}
 	}
 
@@ -102,11 +115,13 @@ void WindowThumbnail::refresh() {
 
 void WindowThumbnail::unregister() {
 	if (this->mFrameConnection) QObject::disconnect(this->mFrameConnection);
+	if (this->mPlaceConnection) QObject::disconnect(this->mPlaceConnection);
 	if (this->mThumbnail != nullptr) DwmUnregisterThumbnail(this->mThumbnail);
 	this->mThumbnail = nullptr;
 	this->mDestination = nullptr;
 	this->mSource = nullptr;
 	this->mApplied = {};
+	this->mSourcePixels = {};
 }
 
 void WindowThumbnail::sync() {
@@ -121,7 +136,15 @@ void WindowThumbnail::sync() {
 		this->setSourceSize(QSize());
 		return;
 	}
+	this->mSourcePixels = source;
 	this->setSourceSize(QSize(static_cast<int>(source.cx), static_cast<int>(source.cy)));
+}
+
+void WindowThumbnail::place() {
+	if (this->mThumbnail == nullptr) return;
+	auto* window = this->window();
+	if (window == nullptr) return;
+	auto source = this->mSourcePixels;
 
 	qreal opacity = 1;
 	for (const QQuickItem* item = this; item != nullptr; item = item->parentItem()) {
@@ -161,8 +184,14 @@ void WindowThumbnail::sync() {
 
 	if (std::memcmp(&props, &this->mApplied, sizeof(props)) == 0) return;
 	if (FAILED(DwmUpdateThumbnailProperties(this->mThumbnail, &props))) {
-		this->unregister();
-		emit this->hasContentChanged();
+		QMetaObject::invokeMethod(
+		    this,
+		    [this]() {
+			    this->unregister();
+			    emit this->hasContentChanged();
+		    },
+		    Qt::QueuedConnection
+		);
 		return;
 	}
 	this->mApplied = props;

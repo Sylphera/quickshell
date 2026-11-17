@@ -50,6 +50,7 @@ private:
 	void refresh();
 	void unregister();
 	void sync();
+	void place();
 	void setSourceSize(QSize size);
 	void updateImplicitSize();
 
@@ -60,6 +61,8 @@ private:
 	HWND mDestination = nullptr;
 	HWND mSource = nullptr;
 	QMetaObject::Connection mFrameConnection;
+	QMetaObject::Connection mPlaceConnection;
+	SIZE mSourcePixels {};
 	DWM_THUMBNAIL_PROPERTIES mApplied {};
 	bool mCompleted = false;
 };
