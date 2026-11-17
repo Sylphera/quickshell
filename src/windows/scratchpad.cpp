@@ -24,6 +24,11 @@ constexpr auto* SCRATCHPAD_PROP = L"QuickshellScratchpadRect";
 constexpr std::size_t CRASH_SLOTS = 32;
 constexpr qreal DEFAULT_WIDTH = 0.8;
 constexpr qreal DEFAULT_HEIGHT = 0.85;
+constexpr int DIM_ALPHA = 110;
+constexpr int DIM_STEP = 18;
+constexpr int DIM_FRAME_MS = 16;
+constexpr ULONGLONG FOCUS_GRACE_MS = 400;
+constexpr auto* DIM_CLASS = L"QuickshellScratchpadDim";
 
 struct CrashSlot {
 	std::atomic<HWND> hwnd {nullptr};
@@ -134,6 +139,21 @@ Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
 	}
+
+	this->dimTimer.setInterval(DIM_FRAME_MS);
+	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
+
+	auto* tracker = WindowTracker::instance();
+	QObject::connect(tracker, &WindowTracker::windowRemoved, this, &Scratchpad::onWindowRemoved);
+	QObject::connect(
+	    tracker,
+	    &WindowTracker::activeWindowChanged,
+	    this,
+	    &Scratchpad::onActiveWindowChanged
+	);
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::currentChanged, this, [this]() {
+		this->setShown(false);
+	});
 }
 
 bool Scratchpad::contains(const TrackedWindow* window) const {
@@ -195,6 +215,8 @@ void Scratchpad::setShown(bool shown) {
 		POINT cursor {};
 		GetCursorPos(&cursor);
 		this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+		this->shownAt = GetTickCount64();
+		this->showDim();
 		HWND last = nullptr;
 		for (auto& entry: this->entries) {
 			this->unpark(entry, true);
@@ -203,6 +225,7 @@ void Scratchpad::setShown(bool shown) {
 		if (last != nullptr) forceForegroundWindow(last);
 	} else {
 		for (auto& entry: this->entries) this->park(entry);
+		this->hideDim();
 	}
 
 	this->mShown = shown;
@@ -254,7 +277,114 @@ void Scratchpad::unpark(Entry& entry, bool front) {
 	placeAt(entry.hwnd, front ? HWND_TOPMOST : HWND_NOTOPMOST, target);
 }
 
+void Scratchpad::showDim() {
+	if (this->dim == nullptr) {
+		static auto registered = false; // NOLINT
+		auto* instance = GetModuleHandleW(nullptr);
+		if (!registered) {
+			WNDCLASSEXW cls {};
+			cls.cbSize = sizeof(cls);
+			cls.lpfnWndProc = &Scratchpad::dimProc;
+			cls.hInstance = instance;
+			cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+			cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+			cls.lpszClassName = DIM_CLASS;
+			registered = RegisterClassExW(&cls) != 0;
+		}
+		this->dim = CreateWindowExW(
+		    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+		    DIM_CLASS,
+		    L"",
+		    WS_POPUP,
+		    0,
+		    0,
+		    0,
+		    0,
+		    nullptr,
+		    nullptr,
+		    instance,
+		    nullptr
+		);
+		if (this->dim == nullptr) {
+			qCWarning(logScratchpad) << "Couldn't create the dim window:" << GetLastError();
+			return;
+		}
+		SetLayeredWindowAttributes(this->dim, 0, 0, LWA_ALPHA);
+	}
+
+	auto work = monitorRects(this->mMonitor).work;
+	if (work.isEmpty()) return;
+	SetWindowPos(
+	    this->dim,
+	    HWND_TOPMOST,
+	    work.x(),
+	    work.y(),
+	    work.width(),
+	    work.height(),
+	    SWP_NOACTIVATE | SWP_SHOWWINDOW
+	);
+	this->dimTarget = DIM_ALPHA;
+	this->dimTimer.start();
+}
+
+void Scratchpad::hideDim() {
+	if (this->dim == nullptr) return;
+	this->dimTarget = 0;
+	this->dimTimer.start();
+}
+
+void Scratchpad::stepDim() {
+	if (this->dim == nullptr) {
+		this->dimTimer.stop();
+		return;
+	}
+
+	if (this->dimAlpha < this->dimTarget) {
+		this->dimAlpha = qMin(this->dimTarget, this->dimAlpha + DIM_STEP);
+	} else {
+		this->dimAlpha = qMax(this->dimTarget, this->dimAlpha - DIM_STEP);
+	}
+	SetLayeredWindowAttributes(this->dim, 0, static_cast<BYTE>(this->dimAlpha), LWA_ALPHA);
+
+	if (this->dimAlpha == this->dimTarget) {
+		this->dimTimer.stop();
+		if (this->dimAlpha == 0) ShowWindow(this->dim, SW_HIDE);
+	}
+}
+
+LRESULT CALLBACK Scratchpad::dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+	switch (msg) {
+	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+	case WM_LBUTTONDOWN:
+	case WM_RBUTTONDOWN:
+	case WM_MBUTTONDOWN:
+		QMetaObject::invokeMethod(
+		    Scratchpad::instance(),
+		    [] { Scratchpad::instance()->setShown(false); },
+		    Qt::QueuedConnection
+		);
+		return 0;
+	default: return DefWindowProcW(hwnd, msg, wparam, lparam);
+	}
+}
+
+void Scratchpad::onWindowRemoved() {
+	this->prune();
+	if (this->mShown && this->entries.isEmpty()) this->setShown(false);
+}
+
+void Scratchpad::onActiveWindowChanged() {
+	if (!this->mShown || GetTickCount64() - this->shownAt < FOCUS_GRACE_MS) return;
+	auto* active = WindowTracker::instance()->activeWindow();
+	if (active == nullptr || this->contains(active)) return;
+	this->setShown(false);
+}
+
 void Scratchpad::releaseAll() {
+	this->dimTimer.stop();
+	if (this->dim != nullptr) DestroyWindow(this->dim);
+	this->dim = nullptr;
+
 	for (auto& entry: this->entries) {
 		if (!IsWindow(entry.hwnd)) continue;
 		if (!entry.rect.isEmpty()) placeAt(entry.hwnd, HWND_NOTOPMOST, entry.rect);
