@@ -247,6 +247,7 @@ private:
 	HWND pinFailedHwnd = nullptr;
 	HWND stuckHwnd = nullptr;
 	qsizetype stuckDesktop = -1;
+	HWND unboundHwnd = nullptr;
 
 	HWND mEmbedParent = nullptr;
 	HWND mEmbedInsertAfter = nullptr;
