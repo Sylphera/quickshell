@@ -10,6 +10,8 @@
 #include <qfileinfo.h>
 #include <qguiapplication.h>
 #include <qhash.h>
+#include <qelapsedtimer.h>
+#include <qscopeguard.h>
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -487,6 +489,18 @@ WindowTracker::WindowTracker() {
 	this->flushTimer.setSingleShot(true);
 	QObject::connect(&this->flushTimer, &QTimer::timeout, this, &WindowTracker::flush);
 
+	{
+		auto* stall = new QTimer(this);
+		auto* clock = new QElapsedTimer();
+		clock->start();
+		stall->setInterval(5);
+		QObject::connect(stall, &QTimer::timeout, this, [clock]() {
+			auto ms = clock->restart();
+			if (ms > 40) qCWarning(logTracker) << "PROBE GUI stall" << ms << "ms";
+		});
+		stall->start();
+	}
+
 	this->cloakSettleTimer.setSingleShot(true);
 	this->cloakSettleTimer.setInterval(CLOAK_SETTLE_MS);
 	QObject::connect(
@@ -664,6 +678,12 @@ void WindowTracker::schedule() {
 }
 
 void WindowTracker::flush() {
+	QElapsedTimer probe;
+	probe.start();
+	auto probeGuard = qScopeGuard([&probe, this]() {
+		auto us = probe.nsecsElapsed() / 1000;
+		if (us > 3000) qCWarning(logTracker) << "PROBE flush" << us << "us";
+	});
 	// Processing an unordered QSet here changed the Dwindle tree for simultaneous
 	// windows. Preserve their first WinEvent discovery order instead.
 	auto candidates = this->candidates.takeAll();

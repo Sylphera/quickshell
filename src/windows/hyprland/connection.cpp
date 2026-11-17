@@ -309,7 +309,11 @@ void HyprlandIpc::emitEvent(const QByteArray& name, const QByteArray& data) {
 	qCDebug(logHyprlandIpcEvents) << "Event" << name << data;
 	this->event.name = name;
 	this->event.data = data;
+	QElapsedTimer probe;
+	probe.start();
 	emit this->rawEvent(&this->event);
+	auto probeUs = probe.nsecsElapsed() / 1000;
+	if (probeUs > 3000) qCWarning(logHyprlandIpcEvents) << "PROBE event" << name << probeUs << "us";
 }
 
 void HyprlandIpc::emitGeometryEvent() { this->emitEvent("windowgeometry", ""); }

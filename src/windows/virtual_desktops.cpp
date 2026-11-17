@@ -11,6 +11,7 @@
 #include <qstring.h>
 #include <qthread.h>
 #include <qtimer.h>
+#include <qelapsedtimer.h>
 #include <qtypes.h>
 
 #include "keyboard_hook.hpp"
@@ -427,6 +428,8 @@ void VirtualDesktops::noteCloakChange() {
 }
 
 void VirtualDesktops::refresh(bool rereadNames) {
+	QElapsedTimer probe;
+	probe.start();
 	QList<GUID> ids;
 	GUID current {};
 
@@ -447,6 +450,7 @@ void VirtualDesktops::refresh(bool rereadNames) {
 		}
 	}
 
+	auto probeCount = probe.nsecsElapsed() / 1000;
 	if (ids.isEmpty()) ids.append(GUID {});
 
 	auto sameIds = !rereadNames && ids.length() == this->mDesktops.length();
@@ -470,6 +474,7 @@ void VirtualDesktops::refresh(bool rereadNames) {
 		}
 	}
 
+	auto probeBeforeCurrent = probe.nsecsElapsed() / 1000;
 	if (a.loaded) {
 		auto number = this->call(-1, a.getCurrentDesktopNumber);
 		if (number >= 0 && number < desktops.length()) {
@@ -492,7 +497,10 @@ void VirtualDesktops::refresh(bool rereadNames) {
 		}
 	}
 
+	auto probeCurrent = probe.nsecsElapsed() / 1000 - probeBeforeCurrent;
 	auto currentChanged = currentIndex != this->mCurrent || !IsEqualGUID(current, this->mCurrentId);
+	qCWarning(logDesktops).nospace() << "PROBE refresh(" << rereadNames << ") registry+count=" << probeCount
+	                                 << "us current=" << probeCurrent << "us changed=" << currentChanged;
 
 	this->mDesktops = desktops;
 	this->mCurrent = currentIndex;
@@ -505,7 +513,10 @@ void VirtualDesktops::refresh(bool rereadNames) {
 
 	if (currentChanged) {
 		qCDebug(logDesktops) << "Current desktop:" << currentIndex;
+		QElapsedTimer probeEmit;
+		probeEmit.start();
 		emit this->currentChanged();
+		qCWarning(logDesktops) << "PROBE currentChanged handlers" << probeEmit.nsecsElapsed() / 1000 << "us";
 	}
 }
 
