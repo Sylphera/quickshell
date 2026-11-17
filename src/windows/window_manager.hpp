@@ -29,7 +29,7 @@ public:
 	void setBackAndForth(bool enabled);
 	[[nodiscard]] qint32 warpOnChange() const { return this->mWarpOnChange; }
 	void setWarpOnChange(qint32 mode);
-	[[nodiscard]] static bool hideSwitchPopup();
+	[[nodiscard]] bool hideSwitchPopup() const { return this->mHideSwitchPopup; }
 	void setHideSwitchPopup(bool enabled);
 
 	[[nodiscard]] qsizetype previousDesktop() const;
@@ -44,7 +44,7 @@ signals:
 
 private:
 	explicit WorkspaceBehavior(QObject* parent);
-	~WorkspaceBehavior() override = default;
+	~WorkspaceBehavior() override;
 
 	void onCurrentChanged();
 	void tryWarp();
@@ -52,6 +52,7 @@ private:
 	void warpToTopmost();
 	void watchTracker();
 	void repairFocus();
+	void updateSwitchPopup();
 	[[nodiscard]] static bool cursorOverShell();
 	static void warpCursor(HWND hwnd);
 
@@ -60,6 +61,8 @@ private:
 
 	bool mBackAndForth = false;
 	qint32 mWarpOnChange = 0;
+	bool mHideSwitchPopup = false;
+	HWND switchPopup = nullptr;
 
 	GUID currentId {};
 	qsizetype currentIndex = -1;

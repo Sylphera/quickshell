@@ -1,8 +1,6 @@
 #include "window_manager.hpp"
-#include <atomic>
 #include <cstdlib>
 #include <cwchar>
-#include <thread>
 
 #include <qcolor.h>
 #include <qcoreapplication.h>
@@ -21,10 +19,6 @@
 
 #include <dwmapi.h>
 
-#ifndef EVENT_OBJECT_UNCLOAKED
-#define EVENT_OBJECT_UNCLOAKED 0x8018
-#endif
-
 namespace qs::windows {
 
 namespace {
@@ -34,6 +28,7 @@ Q_LOGGING_CATEGORY(logWorkspace, "quickshell.windows.workspace", QtWarningMsg);
 constexpr qint64 WARP_TIMEOUT_MS = 2000;
 constexpr int WARP_FALLBACK_MS = 500;
 constexpr int FOCUS_REPAIR_MS = 150;
+constexpr int SWITCH_POPUP_RETRY_MS = 1500;
 
 bool isNullGuid(const GUID& id) { return IsEqualGUID(id, GUID {}) != FALSE; }
 
@@ -50,19 +45,10 @@ bool isDesktopWindow(HWND hwnd) {
 	return wcscmp(name, L"WorkerW") == 0 || wcscmp(name, L"Progman") == 0;
 }
 
-constexpr ULONGLONG SWITCH_POPUP_WINDOW_MS = 1500;
-
-std::atomic<bool> gHideSwitchPopup = false;      // NOLINT
-std::atomic<ULONGLONG> gLastSwitchTick = 0;      // NOLINT
-std::atomic<HWND> gSwitchPopup = nullptr;        // NOLINT
-std::atomic<bool> gSwitchPopupWatching = false;  // NOLINT
+constexpr auto* SWITCH_POPUP_CLASS = L"XamlExplorerHostIslandWindow";
+constexpr auto* SWITCH_POPUP_PROP = L"QuickshellSwitchPopupMasked";
 
 bool looksLikeSwitchPopup(HWND hwnd) {
-	wchar_t cls[32] {};
-	if (GetClassNameW(hwnd, cls, 32) == 0 || wcscmp(cls, L"XamlExplorerHostIslandWindow") != 0) {
-		return false;
-	}
-
 	auto* taskbar = explorerTaskbarWindow();
 	if (taskbar == nullptr) return false;
 	DWORD popupPid = 0;
@@ -87,70 +73,38 @@ bool looksLikeSwitchPopup(HWND hwnd) {
 	return std::abs(center - screenCenter) <= (screen.right - screen.left) / 5;
 }
 
-bool hideIfSwitchPopup(HWND hwnd, bool recentSwitch, bool remember) {
-	auto* known = gSwitchPopup.load();
-	if (known != nullptr && known != hwnd && !IsWindow(known)) {
-		gSwitchPopup.compare_exchange_strong(known, nullptr);
-		known = nullptr;
-	}
-
-	if (hwnd != known) {
-		if (!recentSwitch || !looksLikeSwitchPopup(hwnd)) return false;
-		if (remember) gSwitchPopup.store(hwnd);
-	}
-
-	if (IsWindowVisible(hwnd)) ShowWindowAsync(hwnd, SW_HIDE);
-	return true;
+bool hasWindowRegion(HWND hwnd) {
+	auto* probe = CreateRectRgn(0, 0, 0, 0);
+	if (probe == nullptr) return true;
+	auto result = GetWindowRgn(hwnd, probe) != ERROR;
+	DeleteObject(probe);
+	return result;
 }
 
-void CALLBACK onSwitchPopupEvent(
-    HWINEVENTHOOK /*hook*/,
-    DWORD /*event*/,
-    HWND hwnd,
-    LONG idObject,
-    LONG idChild,
-    DWORD /*eventThread*/,
-    DWORD /*eventTime*/
-) {
-	if (!gHideSwitchPopup.load() || hwnd == nullptr || idObject != OBJID_WINDOW
-	    || idChild != CHILDID_SELF)
-	{
-		return;
-	}
-
-	auto recent = GetTickCount64() - gLastSwitchTick.load() <= SWITCH_POPUP_WINDOW_MS;
-	hideIfSwitchPopup(hwnd, recent, true);
-}
-
-void switchPopupThreadMain() {
-	MSG msg {};
-	PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-
-	auto flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
-	auto hook = [flags](DWORD event) {
-		return SetWinEventHook(event, event, nullptr, &onSwitchPopupEvent, 0, 0, flags);
-	};
-	auto* shown = hook(EVENT_OBJECT_SHOW);
-	auto* uncloaked = hook(EVENT_OBJECT_UNCLOAKED);
-	if (shown == nullptr || uncloaked == nullptr) {
-		qCWarning(logWorkspace) << "Cannot watch the desktop switch popup";
-	}
-
-	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-		TranslateMessage(&msg);
-		DispatchMessageW(&msg);
-	}
-
-	if (shown != nullptr) UnhookWinEvent(shown);
-	if (uncloaked != nullptr) UnhookWinEvent(uncloaked);
-}
-
-void hideVisibleSwitchPopup() {
+HWND maskSwitchPopup() {
 	HWND hwnd = nullptr;
-	constexpr auto* cls = L"XamlExplorerHostIslandWindow";
-	while ((hwnd = FindWindowExW(nullptr, hwnd, cls, nullptr)) != nullptr) {
-		if (IsWindowVisible(hwnd) && hideIfSwitchPopup(hwnd, true, false)) return;
+	while ((hwnd = FindWindowExW(nullptr, hwnd, SWITCH_POPUP_CLASS, nullptr)) != nullptr) {
+		if (GetPropW(hwnd, SWITCH_POPUP_PROP) != nullptr) return hwnd;
 	}
+
+	while ((hwnd = FindWindowExW(nullptr, hwnd, SWITCH_POPUP_CLASS, nullptr)) != nullptr) {
+		if (!looksLikeSwitchPopup(hwnd) || hasWindowRegion(hwnd)) continue;
+		if (SetPropW(hwnd, SWITCH_POPUP_PROP, reinterpret_cast<HANDLE>(1)) == FALSE) continue;
+
+		auto* empty = CreateRectRgn(0, 0, 0, 0);
+		if (empty != nullptr && SetWindowRgn(hwnd, empty, TRUE) != 0) return hwnd;
+
+		if (empty != nullptr) DeleteObject(empty);
+		RemovePropW(hwnd, SWITCH_POPUP_PROP);
+	}
+
+	return nullptr;
+}
+
+void unmaskSwitchPopup(HWND hwnd) {
+	if (hwnd == nullptr || !IsWindow(hwnd) || GetPropW(hwnd, SWITCH_POPUP_PROP) == nullptr) return;
+	SetWindowRgn(hwnd, nullptr, TRUE);
+	RemovePropW(hwnd, SWITCH_POPUP_PROP);
 }
 
 } // namespace
@@ -204,20 +158,38 @@ void WorkspaceBehavior::setWarpOnChange(qint32 mode) {
 	emit this->warpOnChangeChanged();
 }
 
-bool WorkspaceBehavior::hideSwitchPopup() { return gHideSwitchPopup.load(); }
+WorkspaceBehavior::~WorkspaceBehavior() { unmaskSwitchPopup(this->switchPopup); }
 
 void WorkspaceBehavior::setHideSwitchPopup(bool enabled) {
-	if (enabled == gHideSwitchPopup.load()) return;
-	gHideSwitchPopup.store(enabled);
-	if (enabled && !gSwitchPopupWatching.exchange(true)) {
-		std::thread(&switchPopupThreadMain).detach();
+	if (enabled == this->mHideSwitchPopup) return;
+	this->mHideSwitchPopup = enabled;
+
+	if (enabled) {
+		this->updateSwitchPopup();
+	} else {
+		unmaskSwitchPopup(this->switchPopup);
+		this->switchPopup = nullptr;
 	}
+
 	emit this->hideSwitchPopupChanged();
 }
 
+void WorkspaceBehavior::updateSwitchPopup() {
+	if (!this->mHideSwitchPopup) return;
+	if (this->switchPopup != nullptr && IsWindow(this->switchPopup)
+	    && GetPropW(this->switchPopup, SWITCH_POPUP_PROP) != nullptr)
+	{
+		return;
+	}
+
+	this->switchPopup = maskSwitchPopup();
+}
+
 void WorkspaceBehavior::onCurrentChanged() {
-	gLastSwitchTick.store(GetTickCount64());
-	if (gHideSwitchPopup.load()) hideVisibleSwitchPopup();
+	this->updateSwitchPopup();
+	if (this->mHideSwitchPopup && this->switchPopup == nullptr) {
+		QTimer::singleShot(SWITCH_POPUP_RETRY_MS, this, &WorkspaceBehavior::updateSwitchPopup);
+	}
 
 	auto index = this->desktops->currentIndex();
 	const auto& list = this->desktops->desktops();
@@ -471,7 +443,9 @@ void WindowManager::setWarpOnChangeWorkspace(qint32 mode) {
 	WorkspaceBehavior::instance()->setWarpOnChange(mode);
 }
 
-bool WindowManager::hideDesktopPopup() const { return WorkspaceBehavior::hideSwitchPopup(); }
+bool WindowManager::hideDesktopPopup() const {
+	return WorkspaceBehavior::instance()->hideSwitchPopup();
+}
 void WindowManager::setHideDesktopPopup(bool enabled) {
 	WorkspaceBehavior::instance()->setHideSwitchPopup(enabled);
 }
