@@ -194,6 +194,12 @@ VirtualDesktops::VirtualDesktops() {
 	this->cloakTimer.setInterval(CLOAK_REFRESH_DELAY_MS);
 	QObject::connect(&this->cloakTimer, &QTimer::timeout, this, [this]() { this->refresh(); });
 
+	this->refreshTimer.setSingleShot(true);
+	this->refreshTimer.setInterval(0);
+	QObject::connect(&this->refreshTimer, &QTimer::timeout, this, [this]() {
+		this->refresh(std::exchange(this->refreshNames, false));
+	});
+
 	this->creationTimer.setInterval(CREATION_POLL_MS);
 	QObject::connect(&this->creationTimer, &QTimer::timeout, this, &VirtualDesktops::pollCreation);
 
@@ -207,7 +213,7 @@ VirtualDesktops::VirtualDesktops() {
 	auto sessionKey = QString::fromWCharArray(SESSION_KEY_FORMAT).arg(this->sessionId);
 	this->watcher = new RegistryWatcher({QString::fromWCharArray(DESKTOPS_KEY), sessionKey}, this);
 	QObject::connect(this->watcher, &RegistryWatcher::changed, this, [this]() {
-		this->refresh(true);
+		this->requestRefresh(true);
 	});
 	this->watcher->start();
 
@@ -311,7 +317,7 @@ void VirtualDesktops::loadAccessor() {
 
 LRESULT CALLBACK VirtualDesktops::listenerProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	if (msg == ACCESSOR_MESSAGE) {
-		VirtualDesktops::instance()->refresh();
+		VirtualDesktops::instance()->requestRefresh();
 		return 0;
 	}
 
@@ -409,16 +415,30 @@ void VirtualDesktops::noteCloakChange() {
 	if (!this->cloakTimer.isActive()) this->cloakTimer.start();
 }
 
+void VirtualDesktops::requestRefresh(bool rereadNames) {
+	this->refreshNames = this->refreshNames || rereadNames;
+	if (!this->refreshTimer.isActive()) this->refreshTimer.start();
+}
+
 void VirtualDesktops::refresh(bool rereadNames) {
+	this->refreshTimer.stop();
+	rereadNames = std::exchange(this->refreshNames, false) || rereadNames;
+
 	QList<GUID> ids;
 	GUID current {};
 
-	if (!this->readRegistry(ids, current)) {
+	auto registryRead = this->readRegistry(ids, current);
+	if (!registryRead) {
 		qCWarning(logDesktops) << "Unable to read the virtual desktop registry keys.";
 	}
 
+	auto registryUsable = registryRead && !ids.isEmpty() && !guidIsNull(current)
+	                   && std::ranges::any_of(ids, [&current](const GUID& id) {
+		                      return IsEqualGUID(id, current) != FALSE;
+	                      });
+
 	const auto& a = this->accessor;
-	if (a.loaded) {
+	if (a.loaded && !registryUsable) {
 		auto count = this->call(-1, a.getDesktopCount);
 		if (count > 0) {
 			ids.resize(count);
@@ -453,7 +473,7 @@ void VirtualDesktops::refresh(bool rereadNames) {
 		}
 	}
 
-	if (a.loaded) {
+	if (a.loaded && !registryUsable) {
 		auto number = this->call(-1, a.getCurrentDesktopNumber);
 		if (number >= 0 && number < desktops.length()) {
 			currentIndex = number;
