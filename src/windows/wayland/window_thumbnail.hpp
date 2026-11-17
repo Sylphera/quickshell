@@ -21,6 +21,7 @@ class WindowThumbnail: public QQuickItem {
 	Q_PROPERTY(QSizeF constraintSize READ constraintSize WRITE setConstraintSize NOTIFY constraintSizeChanged);
 	Q_PROPERTY(QSize sourceSize READ sourceSize NOTIFY sourceSizeChanged);
 	Q_PROPERTY(bool hasContent READ hasContent NOTIFY hasContentChanged);
+	Q_PROPERTY(qreal radius READ radius WRITE setRadius NOTIFY radiusChanged);
 	// clang-format on
 
 public:
@@ -32,6 +33,8 @@ public:
 	void setCaptureSource(QObject* source);
 	[[nodiscard]] QSizeF constraintSize() const { return this->mConstraintSize; }
 	void setConstraintSize(QSizeF size);
+	[[nodiscard]] qreal radius() const { return this->mRadius; }
+	void setRadius(qreal radius);
 	[[nodiscard]] QSize sourceSize() const { return this->mSourceSize; }
 	[[nodiscard]] bool hasContent() const { return this->mThumbnail != nullptr; }
 
@@ -40,6 +43,7 @@ signals:
 	void constraintSizeChanged();
 	void sourceSizeChanged();
 	void hasContentChanged();
+	void radiusChanged();
 
 protected:
 	void componentComplete() override;
@@ -51,6 +55,7 @@ private:
 	void unregister();
 	void sync();
 	void place();
+	void shapeHost(QSize size, QPoint corner, QSize full, int radius);
 	void setSourceSize(QSize size);
 	void updateImplicitSize();
 
@@ -60,6 +65,11 @@ private:
 	HTHUMBNAIL mThumbnail = nullptr;
 	HWND mDestination = nullptr;
 	HWND mSource = nullptr;
+	HWND mHost = nullptr;
+	QRect mHostShape;
+	int mHostRadius = -1;
+	QSize mHostSize;
+	qreal mRadius = 0;
 	QMetaObject::Connection mFrameConnection;
 	QMetaObject::Connection mPlaceConnection;
 	SIZE mSourcePixels {};
