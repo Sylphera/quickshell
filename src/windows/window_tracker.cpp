@@ -50,6 +50,7 @@ constexpr auto EVENT_WINDOW_CLASS = L"QuickshellWindowTrackerEvents";
 constexpr UINT WM_QS_WINEVENTS = WM_APP + 1;
 constexpr int MOVING_FLUSH_MS = 50;
 constexpr int SWEEP_INTERVAL_MS = 10000;
+constexpr int CLOAK_SETTLE_MS = 250;
 
 std::mutex gEventMutex;                       // NOLINT
 std::vector<WindowEvent> gEvents;             // NOLINT
@@ -486,6 +487,15 @@ WindowTracker::WindowTracker() {
 	this->flushTimer.setSingleShot(true);
 	QObject::connect(&this->flushTimer, &QTimer::timeout, this, &WindowTracker::flush);
 
+	this->cloakSettleTimer.setSingleShot(true);
+	this->cloakSettleTimer.setInterval(CLOAK_SETTLE_MS);
+	QObject::connect(
+	    &this->cloakSettleTimer,
+	    &QTimer::timeout,
+	    this,
+	    &WindowTracker::settleCloakChanges
+	);
+
 	this->sweepTimer.setInterval(SWEEP_INTERVAL_MS);
 	QObject::connect(&this->sweepTimer, &QTimer::timeout, this, [this]() {
 		if (this->sweepDestroyed()) {
@@ -612,11 +622,10 @@ void WindowTracker::onEvent(DWORD event, HWND hwnd, DWORD time) {
 		this->mDesktops->noteCloakChange();
 		this->foregroundDirty = true;
 		if (tracked) {
-			auto& d = this->dirty[hwnd];
-			d.eligibility = true;
-			d.desktop = true;
-			if (event == EVENT_OBJECT_CLOAKED) d.askShell = true;
-			d.state = true;
+			this->dirty[hwnd].state = true;
+			auto& askShell = this->cloakSettling[hwnd];
+			askShell = askShell || event == EVENT_OBJECT_CLOAKED;
+			this->cloakSettleTimer.start();
 		} else {
 			this->candidates.insert(hwnd);
 		}
@@ -880,6 +889,18 @@ void TrackedWindow::forgetScreen(QScreen* screen) {
 void WindowTracker::onScreensChanged() {
 	this->updateScreens();
 	for (auto* window: this->mWindows) this->dirty[window->hwnd()].state = true;
+	this->schedule();
+}
+
+void WindowTracker::settleCloakChanges() {
+	auto settling = std::exchange(this->cloakSettling, {});
+	for (auto iter = settling.constBegin(); iter != settling.constEnd(); ++iter) {
+		if (!this->byHwnd.contains(iter.key())) continue;
+		auto& d = this->dirty[iter.key()];
+		d.eligibility = true;
+		d.desktop = true;
+		d.askShell = d.askShell || iter.value();
+	}
 	this->schedule();
 }
 
