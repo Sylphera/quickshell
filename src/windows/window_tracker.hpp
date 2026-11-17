@@ -171,6 +171,7 @@ private:
 	void onEvent(DWORD event, HWND hwnd, DWORD time);
 	void schedule();
 	void flush();
+	void settleCloakChanges();
 
 	bool isEligible(HWND hwnd) const;
 	void addWindow(HWND hwnd);
@@ -190,6 +191,8 @@ private:
 	QHash<HWND, Dirty> dirty;
 	QSet<HWND> candidates;
 	QSet<HWND> moving;
+	QHash<HWND, bool> cloakSettling;
+	QTimer cloakSettleTimer;
 	bool foregroundDirty = false;
 	QTimer flushTimer;
 	QTimer sweepTimer;
