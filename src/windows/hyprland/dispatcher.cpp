@@ -532,7 +532,7 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 
 	behavior->prepareWarp(index);
 	behavior->expectFocus(index);
-	desktops->switchTo(index);
+	desktops->switchToAsync(index);
 }
 
 void Dispatcher::moveToWorkspace(TrackedWindow* window, const QString& arg, bool follow) {

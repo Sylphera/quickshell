@@ -217,6 +217,15 @@ VirtualDesktops::VirtualDesktops() {
 }
 
 VirtualDesktops::~VirtualDesktops() {
+	if (this->switchThread.joinable()) {
+		{
+			auto lock = std::lock_guard(this->switchMutex);
+			this->switchStop = true;
+		}
+		this->switchWake.notify_one();
+		this->switchThread.join();
+	}
+
 	if (this->watcher != nullptr) this->watcher->stop();
 
 	if (this->listener != nullptr) {
@@ -583,6 +592,61 @@ bool VirtualDesktops::switchTo(qsizetype index) {
 	auto delta = index - this->mCurrent;
 	this->sendShortcut(delta > 0 ? VK_RIGHT : VK_LEFT, static_cast<int>(qAbs(delta)));
 	return true;
+}
+
+void VirtualDesktops::switchToAsync(qsizetype index) {
+	if (index < 0 || index >= this->count()) return;
+
+	if (!this->accessor.loaded || this->accessor.goToDesktopNumber == nullptr
+	    || windowsBuild() < 22000)
+	{
+		this->switchTo(index);
+		return;
+	}
+
+	{
+		auto lock = std::lock_guard(this->switchMutex);
+		this->switchTarget = index;
+		if (!this->switchThread.joinable()) {
+			this->switchThread = std::thread(&VirtualDesktops::switchThreadMain, this);
+		}
+	}
+	this->switchWake.notify_one();
+}
+
+void VirtualDesktops::switchThreadMain() {
+	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	auto* goTo = this->accessor.goToDesktopNumber;
+
+	while (true) {
+		qsizetype target = -1;
+		{
+			auto lock = std::unique_lock(this->switchMutex);
+			this->switchWake.wait(lock, [this]() {
+				return this->switchStop || this->switchTarget != -1;
+			});
+			if (this->switchStop) break;
+			target = std::exchange(this->switchTarget, -1);
+		}
+
+		int result = -1;
+		auto ok = sehCall(goTo, result, static_cast<int>(target));
+
+		QMetaObject::invokeMethod(
+		    this,
+		    [this, ok, result, target]() {
+			    if (!ok) {
+				    this->accessorFailed();
+			    } else if (result == -1) {
+				    qCWarning(logDesktops) << "GoToDesktopNumber" << target << "failed";
+			    }
+			    this->refresh();
+		    },
+		    Qt::QueuedConnection
+		);
+	}
+
+	CoUninitialize();
 }
 
 void VirtualDesktops::ensureCount(qsizetype count, std::function<void(bool)> done) {
