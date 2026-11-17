@@ -6,8 +6,6 @@
 #include <ranges>
 #include <utility>
 
-#include <qscopeguard.h>
-#include <qelapsedtimer.h>
 #include <qt_windows.h>
 
 #include <dwmapi.h>
@@ -31,6 +29,7 @@
 #include <qsgrendererinterface.h>
 #include <qtenvironmentvariables.h>
 #include <qtimer.h>
+#include <qelapsedtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
 #include <qvariant.h>
@@ -246,6 +245,9 @@ HRGN toHrgn(const QRegion& region) {
 } // namespace
 
 class WinPanelStack {
+	static constexpr int UNBOUND_VERIFY_MS = 500;
+	quint64 verifyGeneration = 0;
+
 public:
 	static WinPanelStack* instance() {
 		static WinPanelStack* stack = nullptr; // NOLINT
@@ -257,36 +259,49 @@ public:
 			    VirtualDesktops::instance(),
 			    &VirtualDesktops::currentChanged,
 			    VirtualDesktops::instance(),
-			    [] { stack->followCurrentDesktop(); }
+			    [] {
+				    QElapsedTimer probe;
+				    probe.start();
+				    stack->followCurrentDesktop();
+				    qWarning() << "PROBE panels follow" << probe.nsecsElapsed() / 1000 << "us";
+			    }
 			);
 		}
 
 		return stack;
 	}
 
-	void followCurrentDesktop() {
-		QElapsedTimer probe;
-		probe.start();
-		auto probeQueried = 0;
-		auto probeMoved = 0;
-		auto probeGuard = qScopeGuard([&]() {
-			qWarning().nospace() << "PROBE panels follow " << probe.nsecsElapsed() / 1000 << "us queried="
-			                     << probeQueried << " moved=" << probeMoved;
-		});
+	void followCurrentDesktop(bool verify = false) {
 		auto* desktops = VirtualDesktops::instance();
+		auto current = desktops->currentIndex();
+		auto deferred = false;
 
 		for (auto* panel: this->mPanels) {
 			if (panel->pinnedToAllDesktops || panel->isEmbedded()) continue;
 			auto* hwnd = panel->hwnd();
 			if (hwnd == nullptr) continue;
-			probeQueried++;
+
+			if (!verify && panel->unboundHwnd == hwnd) {
+				deferred = true;
+				continue;
+			}
+
+			auto previous = panel->stuckHwnd == hwnd ? panel->stuckDesktop : -1;
 			if (!desktops->isWindowOnCurrent(hwnd)) {
-				probeMoved++;
-				desktops->moveWindow(hwnd, desktops->currentIndex());
+				desktops->moveWindow(hwnd, current);
+				panel->unboundHwnd = nullptr;
+			} else if (previous != -1 && previous != current) {
+				panel->unboundHwnd = hwnd;
 			}
 			panel->stuckHwnd = hwnd;
-			panel->stuckDesktop = desktops->currentIndex();
+			panel->stuckDesktop = current;
 		}
+
+		if (!deferred) return;
+		auto generation = ++this->verifyGeneration;
+		QTimer::singleShot(UNBOUND_VERIFY_MS, VirtualDesktops::instance(), [this, generation] {
+			if (generation == this->verifyGeneration) this->followCurrentDesktop(true);
+		});
 	}
 
 	void addPanel(WinPanelWindow* panel) {
