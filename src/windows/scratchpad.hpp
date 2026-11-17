@@ -7,6 +7,7 @@
 #include <qpointer.h>
 #include <qrect.h>
 #include <qtclasshelpermacros.h>
+#include <qtimer.h>
 #include <qtmetamacros.h>
 
 namespace qs::windows {
@@ -48,10 +49,21 @@ private:
 	void unpark(Entry& entry, bool front);
 	void releaseAll();
 	void prune();
+	void showDim();
+	void hideDim();
+	void stepDim();
+	void onWindowRemoved();
+	void onActiveWindowChanged();
+	static LRESULT CALLBACK dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 	QList<Entry> entries;
 	bool mShown = false;
 	HMONITOR mMonitor = nullptr;
+	ULONGLONG shownAt = 0;
+	HWND dim = nullptr;
+	int dimAlpha = 0;
+	int dimTarget = 0;
+	QTimer dimTimer;
 };
 
 } // namespace qs::windows
