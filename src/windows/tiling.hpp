@@ -38,6 +38,7 @@ public:
 
 	static TilingManager* instance();
 	static TilingManager* active();
+	void markWindow(TrackedWindow* window);
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
@@ -200,7 +201,6 @@ private:
 	[[nodiscard]] tiling::Options options() const;
 	void rebuildLayouts();
 
-	void markWindow(TrackedWindow* window);
 	void markLayout(Layout* layout);
 	void schedule();
 	void sync();

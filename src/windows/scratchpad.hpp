@@ -29,6 +29,7 @@ public:
 	[[nodiscard]] bool shown() const { return this->mShown; }
 	[[nodiscard]] HMONITOR monitor() const { return this->mMonitor; }
 	[[nodiscard]] bool contains(const TrackedWindow* window) const;
+	[[nodiscard]] static bool holds(const TrackedWindow* window);
 
 	void toggle();
 	void add(TrackedWindow* window, bool follow);
@@ -70,6 +71,7 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
+	QTimer settleTimer;
 	std::unique_ptr<tiling::DwindleLayout> layout;
 };
 
