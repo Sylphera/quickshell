@@ -51,7 +51,8 @@ constexpr int HUNG_RETRY_MS = 500;
 constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
-constexpr int TINY_CORNER_LIMIT = 0;
+constexpr int TINY_CORNER_LIMIT = 80;
+constexpr int SYSTEM_CAPTION_MIN = 8;
 constexpr int TINY_CORNER_RADIUS = 12;
 constexpr qint32 SPECIAL_GAPS_OUT = 30;
 constexpr GUID SPECIAL_DESKTOP = {0x5ec1a100, 0x0000, 0x0000, {0x73, 0x70, 0x65, 0x63, 0x69, 0x61, 0x6c, 0x00}};
@@ -206,6 +207,15 @@ void setRawRect(HWND hwnd, const QRect& rect) {
 	    rect.height(),
 	    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
 	);
+}
+
+bool hasSystemCaption(HWND hwnd) {
+	RECT window {};
+	RECT client {};
+	if (!GetWindowRect(hwnd, &window) || !GetClientRect(hwnd, &client)) return false;
+	POINT origin {client.left, client.top};
+	if (!ClientToScreen(hwnd, &origin)) return false;
+	return origin.y - window.top >= SYSTEM_CAPTION_MIN;
 }
 
 QPoint cursorPos() {
@@ -1249,6 +1259,7 @@ void TilingManager::updateTinyCorners(Managed& m, const QRect& frame) {
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindow(hwnd) || IsHungAppWindow(hwnd)) return;
+	if (!m.tinyCornersApplied && hasSystemCaption(hwnd)) return;
 	QRect raw;
 	QRect visible;
 	if (!readFrame(hwnd, raw, visible)) return;
