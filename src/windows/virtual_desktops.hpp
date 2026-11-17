@@ -71,6 +71,7 @@ public:
 	[[nodiscard]] bool isWindowPinned(HWND hwnd) const;
 
 	void refresh(bool rereadNames = false);
+	void requestRefresh(bool rereadNames = false);
 	void noteCloakChange();
 
 	static QString guidToString(const GUID& guid);
@@ -111,6 +112,8 @@ private:
 	RegistryWatcher* watcher = nullptr;
 	HWND listener = nullptr;
 	QTimer cloakTimer;
+	QTimer refreshTimer;
+	bool refreshNames = false;
 	QTimer creationTimer;
 	qsizetype creationTarget = 0;
 	qsizetype creationBefore = 0;
