@@ -153,6 +153,9 @@ void WindowThumbnail::place() {
 
 	auto rect = this->mapRectToScene(QRectF(0, 0, this->width(), this->height()));
 	auto shown = rect.intersected(QRectF(0, 0, window->width(), window->height()));
+	for (const QQuickItem* item = this->parentItem(); item != nullptr; item = item->parentItem()) {
+		if (item->clip()) shown = shown.intersected(item->mapRectToScene(item->boundingRect()));
+	}
 	auto visible = this->isVisible() && window->isVisible() && !shown.isEmpty() && opacity > 0
 	            && source.cx > 0 && source.cy > 0;
 
