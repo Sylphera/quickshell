@@ -524,8 +524,10 @@ WindowTracker::WindowTracker() {
 
 	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, [this]() {
 		for (auto* window: this->mWindows) {
-			if (isShown(window->hwnd())) window->refreshDesktop(false);
+			auto* hwnd = window->hwnd();
+			if (isShown(hwnd) && !this->cloakSettling.contains(hwnd)) this->cloakSettling.insert(hwnd, false);
 		}
+		this->cloakSettleTimer.start();
 
 		this->foregroundDirty = true;
 		this->schedule();
