@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include <qscopeguard.h>
+#include <qelapsedtimer.h>
 #include <qbytearray.h>
 #include <qbytearrayview.h>
 #include <qcontainerfwd.h>
@@ -565,6 +567,11 @@ void HyprlandIpc::onTrackerFlushed() {
 void HyprlandIpc::onDesktopsChanged() { this->syncWorkspaces(false); }
 
 void HyprlandIpc::onCurrentDesktopChanged() {
+	QElapsedTimer probe;
+	probe.start();
+	auto probeGuard = qScopeGuard([&probe]() {
+		qCWarning(logHyprlandIpcEvents) << "PROBE ipc currentChanged" << probe.nsecsElapsed() / 1000 << "us";
+	});
 	auto* previous = this->bFocusedWorkspace.value();
 	this->updateFocusedWorkspace();
 	this->updateVisibleWorkspaces();

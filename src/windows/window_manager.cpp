@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <cwchar>
 
+#include <qscopeguard.h>
+#include <qelapsedtimer.h>
 #include <qcolor.h>
 #include <qcoreapplication.h>
 #include <qdatetime.h>
@@ -186,6 +188,11 @@ void WorkspaceBehavior::updateSwitchPopup() {
 }
 
 void WorkspaceBehavior::onCurrentChanged() {
+	QElapsedTimer probe;
+	probe.start();
+	auto probeGuard = qScopeGuard([&probe]() {
+		qCWarning(logWorkspace) << "PROBE behavior currentChanged" << probe.nsecsElapsed() / 1000 << "us";
+	});
 	this->updateSwitchPopup();
 	if (this->mHideSwitchPopup && this->switchPopup == nullptr) {
 		QTimer::singleShot(SWITCH_POPUP_RETRY_MS, this, &WorkspaceBehavior::updateSwitchPopup);

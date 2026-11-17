@@ -6,6 +6,8 @@
 #include <ranges>
 #include <utility>
 
+#include <qscopeguard.h>
+#include <qelapsedtimer.h>
 #include <qt_windows.h>
 
 #include <dwmapi.h>
@@ -263,13 +265,25 @@ public:
 	}
 
 	void followCurrentDesktop() {
+		QElapsedTimer probe;
+		probe.start();
+		auto probeQueried = 0;
+		auto probeMoved = 0;
+		auto probeGuard = qScopeGuard([&]() {
+			qWarning().nospace() << "PROBE panels follow " << probe.nsecsElapsed() / 1000 << "us queried="
+			                     << probeQueried << " moved=" << probeMoved;
+		});
 		auto* desktops = VirtualDesktops::instance();
 
 		for (auto* panel: this->mPanels) {
 			if (panel->pinnedToAllDesktops || panel->isEmbedded()) continue;
 			auto* hwnd = panel->hwnd();
 			if (hwnd == nullptr) continue;
-			if (!desktops->isWindowOnCurrent(hwnd)) desktops->moveWindow(hwnd, desktops->currentIndex());
+			probeQueried++;
+			if (!desktops->isWindowOnCurrent(hwnd)) {
+				probeMoved++;
+				desktops->moveWindow(hwnd, desktops->currentIndex());
+			}
 			panel->stuckHwnd = hwnd;
 			panel->stuckDesktop = desktops->currentIndex();
 		}

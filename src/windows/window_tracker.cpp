@@ -537,6 +537,11 @@ WindowTracker::WindowTracker() {
 	);
 
 	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, [this]() {
+		QElapsedTimer probe;
+		probe.start();
+		auto probeGuard = qScopeGuard([&probe]() {
+			qCWarning(logTracker) << "PROBE tracker currentChanged" << probe.nsecsElapsed() / 1000 << "us";
+		});
 		for (auto* window: this->mWindows) {
 			if (isShown(window->hwnd())) window->refreshDesktop(false);
 		}
