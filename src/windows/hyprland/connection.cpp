@@ -1,5 +1,6 @@
 #include "connection.hpp"
 
+#include <algorithm>
 #include <utility>
 
 #include <qbytearray.h>
@@ -166,6 +167,7 @@ HyprlandIpc::HyprlandIpc()
 	this->syncWorkspaces(true);
 
 	for (auto* window: this->mTracker->windows()) this->onWindowAdded(window);
+	this->sortFocusOrderByStacking();
 	this->onActiveWindowChanged();
 
 	emit this->connected();
@@ -223,6 +225,34 @@ HyprlandToplevel* HyprlandIpc::findToplevelByAddress(quint64 address) const {
 
 HyprlandToplevel* HyprlandIpc::toplevelForWindow(TrackedWindow* window) const {
 	return window == nullptr ? nullptr : this->byWindow.value(window);
+}
+
+qint32 HyprlandIpc::focusHistoryId(const HyprlandToplevel* toplevel) const {
+	return static_cast<qint32>(this->focusOrder.indexOf(const_cast<HyprlandToplevel*>(toplevel)));
+}
+
+void HyprlandIpc::sortFocusOrderByStacking() {
+	QHash<HWND, qsizetype> stacking;
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    auto* order = reinterpret_cast<QHash<HWND, qsizetype>*>(param); // NOLINT(performance-no-int-to-ptr)
+		    order->insert(hwnd, order->size());
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&stacking)
+	);
+
+	auto last = stacking.size();
+	std::ranges::stable_sort(this->focusOrder, {}, [&stacking, last](HyprlandToplevel* toplevel) {
+		return stacking.value(toplevel->window()->hwnd(), last);
+	});
+	this->markFocusOrderDirty(0, this->focusOrder.size());
+}
+
+void HyprlandIpc::markFocusOrderDirty(qsizetype from, qsizetype to) {
+	for (auto i = from; i < to && i < this->focusOrder.size(); i++) {
+		this->focusOrder.at(i)->markIpcObjectDirty();
+	}
 }
 
 void HyprlandIpc::refreshMonitors() {
@@ -440,6 +470,7 @@ void HyprlandIpc::onWindowAdded(TrackedWindow* window) {
 	auto* toplevel = new HyprlandToplevel(this, window);
 	this->byWindow.insert(window, toplevel);
 	this->mToplevels.insertObject(toplevel);
+	this->focusOrder.append(toplevel);
 
 	auto address = toplevel->addressStr().toUtf8();
 
@@ -482,6 +513,11 @@ void HyprlandIpc::onWindowRemoved(TrackedWindow* window) {
 
 	if (this->bActiveToplevel.value() == toplevel) this->bActiveToplevel = nullptr;
 	this->mToplevels.removeObject(toplevel);
+	auto focusIndex = this->focusOrder.indexOf(toplevel);
+	if (focusIndex != -1) {
+		this->focusOrder.removeAt(focusIndex);
+		this->markFocusOrderDirty(focusIndex, this->focusOrder.size());
+	}
 	toplevel->leaveWorkspace();
 	this->pendingTitles.removeAll(toplevel);
 	this->dirtyIpcObjects.removeAll(toplevel);
@@ -500,6 +536,12 @@ void HyprlandIpc::onActiveWindowChanged() {
 		this->emitEvent("activewindowv2", "");
 		this->emitEvent("activewindow", ",");
 		return;
+	}
+
+	auto focusIndex = this->focusOrder.indexOf(toplevel);
+	if (focusIndex > 0) {
+		this->focusOrder.move(focusIndex, 0);
+		this->markFocusOrderDirty(0, focusIndex + 1);
 	}
 
 	this->emitEvent("activewindowv2", toplevel->addressStr().toUtf8());
