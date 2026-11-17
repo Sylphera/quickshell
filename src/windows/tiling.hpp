@@ -40,6 +40,7 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
+	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);

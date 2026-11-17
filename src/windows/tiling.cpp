@@ -1547,6 +1547,31 @@ void TilingManager::settle(Layout* layout) {
 	window->activate();
 }
 
+TrackedWindow* TilingManager::tileAt(const QPoint& point) {
+	if (this->tracker == nullptr || this->desktops == nullptr) return nullptr;
+	auto* screen = this->tracker->screenFor(MonitorFromPoint({point.x(), point.y()}, MONITOR_DEFAULTTONEAREST));
+	if (screen == nullptr) return nullptr;
+
+	Layout* layout = nullptr;
+	auto* scratchpad = Scratchpad::instance();
+	if (scratchpad->shown() && screenForMonitor(scratchpad->monitor()) == screen) {
+		layout = this->layoutAt(SPECIAL_DESKTOP, screen, false);
+	} else {
+		auto current = this->desktops->currentIndex();
+		if (current < 0 || current >= this->desktops->count()) return nullptr;
+		layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	}
+	if (layout == nullptr) return nullptr;
+
+	for (auto id: layout->tree->ids()) {
+		if (layout->tree->isHidden(id) || layout->tree->isParked(id)) continue;
+		if (!layout->tree->box(id).contains(point)) continue;
+		auto* window = this->windowOf(id);
+		if (window != nullptr && this->stateOf(this->managed.at(window)) == State::Tiled) return window;
+	}
+	return nullptr;
+}
+
 bool TilingManager::focusIdleStrip() {
 	if (this->tracker == nullptr || this->desktops == nullptr) return false;
 	if (this->tracker->windowFor(GetForegroundWindow()) != nullptr) return false;

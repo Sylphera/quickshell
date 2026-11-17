@@ -211,6 +211,12 @@ bool closeUnderPointer(WindowTracker* tracker, POINT cursor) {
 		window->close();
 		return true;
 	}
+	if (auto* tiling = TilingManager::active()) {
+		if (auto* window = tiling->tileAt(QPoint(cursor.x, cursor.y))) {
+			window->close();
+			return true;
+		}
+	}
 	return closeShellWindow(root);
 }
 
