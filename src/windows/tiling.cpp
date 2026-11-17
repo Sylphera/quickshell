@@ -27,6 +27,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "scratchpad.hpp"
 #include "super_drag.hpp"
 #include "tiling_target.hpp"
 #include "util.hpp"
@@ -804,6 +805,7 @@ void TilingManager::unmanage(TrackedWindow* window) {
 TilingManager::State TilingManager::stateOf(const Managed& m) const {
 	auto* window = m.window;
 
+	if (Scratchpad::holds(window)) return State::Out;
 	if (window->desktop() < 0 || window->screen() == nullptr) return State::Out;
 	if (!QGuiApplication::screens().contains(window->screen())) return State::Out;
 	if (m.elevated) return State::Out;
@@ -981,6 +983,10 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 	if (state == State::Out) {
 		if (m.layout == nullptr) return;
+		if (Scratchpad::holds(window)) {
+			this->takeOut(m);
+			return;
+		}
 
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);

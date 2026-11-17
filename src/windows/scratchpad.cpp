@@ -32,6 +32,7 @@ constexpr int DIM_ALPHA = 51;
 constexpr int DIM_STEP = 18;
 constexpr int DIM_FRAME_MS = 16;
 constexpr ULONGLONG FOCUS_GRACE_MS = 400;
+constexpr int SETTLE_MS = 60;
 constexpr auto* DIM_CLASS = L"QuickshellScratchpadDim";
 
 struct CrashSlot {
@@ -152,10 +153,17 @@ void recoverOrphans() {
 
 } // namespace
 
+namespace {
+QPointer<Scratchpad> SCRATCHPAD; // NOLINT
+}
+
 Scratchpad* Scratchpad::instance() {
-	static QPointer<Scratchpad> scratchpad; // NOLINT
-	if (scratchpad.isNull()) scratchpad = new Scratchpad(QCoreApplication::instance());
-	return scratchpad.data();
+	if (SCRATCHPAD.isNull()) SCRATCHPAD = new Scratchpad(QCoreApplication::instance());
+	return SCRATCHPAD.data();
+}
+
+bool Scratchpad::holds(const TrackedWindow* window) {
+	return !SCRATCHPAD.isNull() && SCRATCHPAD->contains(window);
 }
 
 Scratchpad::~Scratchpad() = default;
@@ -171,6 +179,10 @@ Scratchpad::Scratchpad(QObject* parent)
 
 	this->dimTimer.setInterval(DIM_FRAME_MS);
 	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
+
+	this->settleTimer.setSingleShot(true);
+	this->settleTimer.setInterval(SETTLE_MS);
+	QObject::connect(&this->settleTimer, &QTimer::timeout, this, &Scratchpad::relayout);
 
 	auto* tracker = WindowTracker::instance();
 	QObject::connect(tracker, &WindowTracker::windowAdded, this, &Scratchpad::onWindowAdded);
@@ -208,7 +220,10 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		if (!VirtualDesktops::instance()->pinWindow(hwnd, true)) {
 			qCWarning(logScratchpad) << "Couldn't pin" << window << "to all desktops";
 		}
-		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, true, false);
+		if (auto* tiling = TilingManager::active()) tiling->markWindow(window);
+		QObject::connect(window, &TrackedWindow::rectChanged, this, [this]() {
+			if (this->mShown) this->settleTimer.start();
+		});
 
 		auto target = this->entries.isEmpty() ? tiling::LayoutEngine::Id(0)
 		                                      : reinterpret_cast<quintptr>(this->entries.last().hwnd);
@@ -242,7 +257,8 @@ void Scratchpad::remove(TrackedWindow* window) {
 		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
 		forget(entry.hwnd);
 		this->entries.removeAt(i);
-		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, false, false);
+		if (window != nullptr) QObject::disconnect(window, &TrackedWindow::rectChanged, this, nullptr);
+		if (auto* tiling = TilingManager::active()) tiling->markWindow(window);
 		this->relayout();
 		return;
 	}
