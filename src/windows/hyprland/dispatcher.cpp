@@ -169,6 +169,20 @@ void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
 	window->activate();
 }
 
+void closeFocused(WindowTracker* tracker) {
+	if (auto* window = tracker->activeWindow()) {
+		window->close();
+		return;
+	}
+
+	auto* foreground = GetForegroundWindow();
+	if (foreground == nullptr || !isOwnProcessWindow(foreground)) return;
+	auto exStyle = GetWindowLongPtrW(foreground, GWL_EXSTYLE);
+	if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return;
+	if (GetWindow(foreground, GW_OWNER) != nullptr) return;
+	PostMessageW(foreground, WM_CLOSE, 0, 0);
+}
+
 } // namespace
 
 void Dispatcher::dispatch(const QString& request) {
@@ -291,7 +305,7 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 	} else if (fn == "hl.dsp.window.close") {
 		if (auto* window = this->resolveWindow(windowArg)) window->close();
 	} else if (fn == "hl.dsp.window.kill_active" || fn == "hl.dsp.kill_active") {
-		if (auto* window = this->ipc->tracker()->activeWindow()) window->close();
+		closeFocused(this->ipc->tracker());
 	} else if (fn == "hl.dsp.window.pin") {
 		this->pin(this->resolveWindow(windowArg));
 	} else if (fn == "hl.dsp.window.fullscreen") {
@@ -348,7 +362,7 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		auto window = comma == -1 ? QString() : args.mid(comma + 1);
 		this->moveToWorkspace(this->resolveWindow(window), workspace, name == "movetoworkspace");
 	} else if (name == "killactive") {
-		if (auto* window = tracker->activeWindow()) window->close();
+		closeFocused(tracker);
 	} else if (name == "closewindow") {
 		if (auto* window = this->resolveWindow(args)) window->close();
 	} else if (name == "focuswindow") {
