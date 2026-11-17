@@ -1,7 +1,10 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <thread>
 
 #include <qlist.h>
 #include <qobject.h>
@@ -60,6 +63,7 @@ public:
 	[[nodiscard]] bool isWindowOnCurrent(HWND hwnd) const;
 
 	bool switchTo(qsizetype index);
+	void switchToAsync(qsizetype index);
 	void ensureCount(qsizetype count, std::function<void(bool)> done);
 	bool removeDesktop(qsizetype index, qsizetype fallback);
 	bool moveWindow(HWND hwnd, qsizetype index);
@@ -114,6 +118,13 @@ private:
 	QList<QPair<qsizetype, std::function<void(bool)>>> creationWaiters;
 
 	mutable ULONGLONG accessorRestartedAt = 0;
+
+	void switchThreadMain();
+	std::thread switchThread;
+	std::mutex switchMutex;
+	std::condition_variable switchWake;
+	qsizetype switchTarget = -1;
+	bool switchStop = false;
 
 	mutable struct Accessor {
 		HMODULE module = nullptr;
