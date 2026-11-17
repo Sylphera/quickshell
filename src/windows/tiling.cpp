@@ -1211,6 +1211,16 @@ QRect TilingManager::managedFrame(const Managed& m) const {
 }
 
 void TilingManager::restoreTinyCorners(Managed& m) {
+	if (m.tinySmallCorners) {
+		auto* hwnd = m.window->hwnd();
+		if (IsWindow(hwnd)) {
+			auto previous = static_cast<DWM_WINDOW_CORNER_PREFERENCE>(m.previousCornerPreference);
+			DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous));
+			RemovePropW(hwnd, TINY_CORNER_PROP);
+		}
+		forgetTinyCorners(hwnd);
+		m.tinySmallCorners = false;
+	}
 	if (!m.tinyCornersApplied) return;
 	auto* hwnd = m.window->hwnd();
 	if (IsWindow(hwnd)) {
@@ -1259,7 +1269,25 @@ void TilingManager::updateTinyCorners(Managed& m, const QRect& frame) {
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindow(hwnd) || IsHungAppWindow(hwnd)) return;
-	if (!m.tinyCornersApplied && hasSystemCaption(hwnd)) return;
+	if (!m.tinyCornersApplied && hasSystemCaption(hwnd)) {
+		// A region takes the DWM frame away from windows with a system title
+		// bar, so they keep their frame and only ask DWM for small corners.
+		if (m.tinySmallCorners) return;
+		auto previous = DWM_WINDOW_CORNER_PREFERENCE {};
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous)))) {
+			previous = DWMWCP_DEFAULT;
+		}
+		if (!markTinyCornerOwner(hwnd, static_cast<int>(previous))) return;
+		auto smallCorners = DWMWCP_ROUNDSMALL;
+		if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &smallCorners, sizeof(smallCorners)))) {
+			RemovePropW(hwnd, TINY_CORNER_PROP);
+			return;
+		}
+		m.previousCornerPreference = static_cast<int>(previous);
+		m.tinySmallCorners = true;
+		rememberTinyCorners(hwnd, m.previousCornerPreference);
+		return;
+	}
 	QRect raw;
 	QRect visible;
 	if (!readFrame(hwnd, raw, visible)) return;

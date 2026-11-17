@@ -186,6 +186,7 @@ private:
 		bool offscreen = false;
 		QRect restore;
 		bool tinyCornersApplied = false;
+		bool tinySmallCorners = false;
 		bool tinyBorderSuppressed = false;
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
