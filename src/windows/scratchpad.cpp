@@ -180,7 +180,7 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		}
 		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, true, false);
 
-		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = visibleRect(hwnd)});
+		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = QRect()});
 		auto& entry = this->entries.last();
 
 		if (this->mShown) {
