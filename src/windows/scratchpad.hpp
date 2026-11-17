@@ -59,7 +59,7 @@ private:
 	void stepDim();
 	void relayout();
 	void onWindowAdded(TrackedWindow* window);
-	void onWindowRemoved();
+	void onWindowRemoved(TrackedWindow* window);
 	void onActiveWindowChanged();
 	static LRESULT CALLBACK dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
