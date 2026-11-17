@@ -94,6 +94,7 @@ public:
 	[[nodiscard]] HyprlandWorkspace* workspaceByName(const QString& name) const;
 	[[nodiscard]] HyprlandToplevel* findToplevelByAddress(quint64 address) const;
 	[[nodiscard]] HyprlandToplevel* toplevelForWindow(qs::windows::TrackedWindow* window) const;
+	[[nodiscard]] qint32 focusHistoryId(const HyprlandToplevel* toplevel) const;
 
 	[[nodiscard]] qs::windows::WindowTracker* tracker() const { return this->mTracker; }
 	[[nodiscard]] qs::windows::VirtualDesktops* desktops() const { return this->mDesktops; }
@@ -146,6 +147,8 @@ private:
 	void updateFocusedMonitor(HyprlandMonitor* monitor);
 	void updateFocusedWorkspace();
 	void scheduleGeometryEvent(bool prompt);
+	void sortFocusOrderByStacking();
+	void markFocusOrderDirty(qsizetype from, qsizetype to);
 
 	qs::windows::WindowTracker* mTracker = nullptr;
 	qs::windows::VirtualDesktops* mDesktops = nullptr;
@@ -156,6 +159,7 @@ private:
 	ObjectModel<HyprlandWorkspace> mWorkspaces {this};
 	ObjectModel<HyprlandToplevel> mToplevels {this};
 	QHash<qs::windows::TrackedWindow*, HyprlandToplevel*> byWindow;
+	QList<HyprlandToplevel*> focusOrder;
 
 	HyprlandIpcEvent event {this};
 	QTimer geometryTimer;

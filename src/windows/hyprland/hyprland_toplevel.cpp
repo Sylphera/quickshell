@@ -241,7 +241,7 @@ void HyprlandToplevel::refreshIpcObject() {
 	    {"grouped", QVariantList {}},
 	    {"tags", QVariantList {}},
 	    {"swallowing", "0x0"},
-	    {"focusHistoryID", window->activated() ? 0 : -1},
+	    {"focusHistoryID", this->ipc->focusHistoryId(this)},
 	    {"inhibitingIdle", false},
 	    {"minimized", window->minimized()},
 	    {"exe", window->exePath()},
