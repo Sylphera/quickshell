@@ -169,6 +169,21 @@ void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
 	window->activate();
 }
 
+TrackedWindow* closeTargetUnderPointer(WindowTracker* tracker) {
+	POINT cursor {};
+	if (!GetCursorPos(&cursor)) return nullptr;
+
+	// Unlike insertion, closing must hit an actual window. Never close the
+	// keyboard-focused or nearest tile when the pointer is over a gap, panel,
+	// desktop or a different (untracked) window.
+	auto* hit = WindowFromPoint(cursor);
+	if (hit == nullptr) return nullptr;
+
+	auto* root = GetAncestor(hit, GA_ROOT);
+	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return nullptr;
+	return tracker->windowFor(root);
+}
+
 } // namespace
 
 void Dispatcher::dispatch(const QString& request) {
@@ -289,9 +304,11 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 			this->unsupported(fn);
 		}
 	} else if (fn == "hl.dsp.window.close") {
-		if (auto* window = this->resolveWindow(windowArg)) window->close();
+			auto* window = t.contains("window") ? this->resolveWindow(windowArg)
+			                                    : closeTargetUnderPointer(this->ipc->tracker());
+			if (window != nullptr) window->close();
 	} else if (fn == "hl.dsp.window.kill_active" || fn == "hl.dsp.kill_active") {
-		if (auto* window = this->ipc->tracker()->activeWindow()) window->close();
+			if (auto* window = closeTargetUnderPointer(this->ipc->tracker())) window->close();
 	} else if (fn == "hl.dsp.window.pin") {
 		this->pin(this->resolveWindow(windowArg));
 	} else if (fn == "hl.dsp.window.fullscreen") {
@@ -348,9 +365,11 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		auto window = comma == -1 ? QString() : args.mid(comma + 1);
 		this->moveToWorkspace(this->resolveWindow(window), workspace, name == "movetoworkspace");
 	} else if (name == "killactive") {
-		if (auto* window = tracker->activeWindow()) window->close();
+			if (auto* window = closeTargetUnderPointer(tracker)) window->close();
 	} else if (name == "closewindow") {
-		if (auto* window = this->resolveWindow(args)) window->close();
+			auto* window = args.isEmpty() ? closeTargetUnderPointer(tracker)
+			                              : this->resolveWindow(args);
+			if (window != nullptr) window->close();
 	} else if (name == "focuswindow") {
 		if (auto* window = this->resolveWindow(args)) window->activate();
 	} else if (name == "fullscreen" || name == "fullscreenstate") {

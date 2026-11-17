@@ -1,5 +1,8 @@
 #include "window_manager.hpp"
+#include <atomic>
+#include <cstdlib>
 #include <cwchar>
+#include <thread>
 
 #include <qcolor.h>
 #include <qcoreapplication.h>
@@ -17,6 +20,10 @@
 #include "window_tracker.hpp"
 
 #include <dwmapi.h>
+
+#ifndef EVENT_OBJECT_UNCLOAKED
+#define EVENT_OBJECT_UNCLOAKED 0x8018
+#endif
 
 namespace qs::windows {
 
@@ -41,6 +48,109 @@ bool isDesktopWindow(HWND hwnd) {
 	wchar_t name[16] {};
 	GetClassNameW(hwnd, name, 16);
 	return wcscmp(name, L"WorkerW") == 0 || wcscmp(name, L"Progman") == 0;
+}
+
+constexpr ULONGLONG SWITCH_POPUP_WINDOW_MS = 1500;
+
+std::atomic<bool> gHideSwitchPopup = false;      // NOLINT
+std::atomic<ULONGLONG> gLastSwitchTick = 0;      // NOLINT
+std::atomic<HWND> gSwitchPopup = nullptr;        // NOLINT
+std::atomic<bool> gSwitchPopupWatching = false;  // NOLINT
+
+bool looksLikeSwitchPopup(HWND hwnd) {
+	wchar_t cls[32] {};
+	if (GetClassNameW(hwnd, cls, 32) == 0 || wcscmp(cls, L"XamlExplorerHostIslandWindow") != 0) {
+		return false;
+	}
+
+	auto* taskbar = explorerTaskbarWindow();
+	if (taskbar == nullptr) return false;
+	DWORD popupPid = 0;
+	DWORD explorerPid = 0;
+	GetWindowThreadProcessId(hwnd, &popupPid);
+	GetWindowThreadProcessId(taskbar, &explorerPid);
+	if (popupPid == 0 || popupPid != explorerPid) return false;
+
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return false;
+	auto width = rect.right - rect.left;
+	auto height = rect.bottom - rect.top;
+	if (width < 65 || width > 650 || height < 25 || height > 150) return false;
+
+	MONITORINFO monitor {.cbSize = sizeof(MONITORINFO)};
+	auto* screenHandle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+	if (!GetMonitorInfoW(screenHandle, &monitor)) return false;
+	const auto& screen = monitor.rcMonitor;
+	if (rect.bottom < screen.bottom - 180 || rect.bottom > screen.bottom + 25) return false;
+	auto center = (rect.left + rect.right) / 2;
+	auto screenCenter = (screen.left + screen.right) / 2;
+	return std::abs(center - screenCenter) <= (screen.right - screen.left) / 5;
+}
+
+bool hideIfSwitchPopup(HWND hwnd, bool recentSwitch, bool remember) {
+	auto* known = gSwitchPopup.load();
+	if (known != nullptr && known != hwnd && !IsWindow(known)) {
+		gSwitchPopup.compare_exchange_strong(known, nullptr);
+		known = nullptr;
+	}
+
+	if (hwnd != known) {
+		if (!recentSwitch || !looksLikeSwitchPopup(hwnd)) return false;
+		if (remember) gSwitchPopup.store(hwnd);
+	}
+
+	if (IsWindowVisible(hwnd)) ShowWindowAsync(hwnd, SW_HIDE);
+	return true;
+}
+
+void CALLBACK onSwitchPopupEvent(
+    HWINEVENTHOOK /*hook*/,
+    DWORD /*event*/,
+    HWND hwnd,
+    LONG idObject,
+    LONG idChild,
+    DWORD /*eventThread*/,
+    DWORD /*eventTime*/
+) {
+	if (!gHideSwitchPopup.load() || hwnd == nullptr || idObject != OBJID_WINDOW
+	    || idChild != CHILDID_SELF)
+	{
+		return;
+	}
+
+	auto recent = GetTickCount64() - gLastSwitchTick.load() <= SWITCH_POPUP_WINDOW_MS;
+	hideIfSwitchPopup(hwnd, recent, true);
+}
+
+void switchPopupThreadMain() {
+	MSG msg {};
+	PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+	auto flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+	auto hook = [flags](DWORD event) {
+		return SetWinEventHook(event, event, nullptr, &onSwitchPopupEvent, 0, 0, flags);
+	};
+	auto* shown = hook(EVENT_OBJECT_SHOW);
+	auto* uncloaked = hook(EVENT_OBJECT_UNCLOAKED);
+	if (shown == nullptr || uncloaked == nullptr) {
+		qCWarning(logWorkspace) << "Cannot watch the desktop switch popup";
+	}
+
+	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+		TranslateMessage(&msg);
+		DispatchMessageW(&msg);
+	}
+
+	if (shown != nullptr) UnhookWinEvent(shown);
+	if (uncloaked != nullptr) UnhookWinEvent(uncloaked);
+}
+
+void hideVisibleSwitchPopup() {
+	HWND hwnd = nullptr;
+	constexpr auto* cls = L"XamlExplorerHostIslandWindow";
+	while ((hwnd = FindWindowExW(nullptr, hwnd, cls, nullptr)) != nullptr) {
+		if (IsWindowVisible(hwnd) && hideIfSwitchPopup(hwnd, true, false)) return;
+	}
 }
 
 } // namespace
@@ -94,7 +204,21 @@ void WorkspaceBehavior::setWarpOnChange(qint32 mode) {
 	emit this->warpOnChangeChanged();
 }
 
+bool WorkspaceBehavior::hideSwitchPopup() { return gHideSwitchPopup.load(); }
+
+void WorkspaceBehavior::setHideSwitchPopup(bool enabled) {
+	if (enabled == gHideSwitchPopup.load()) return;
+	gHideSwitchPopup.store(enabled);
+	if (enabled && !gSwitchPopupWatching.exchange(true)) {
+		std::thread(&switchPopupThreadMain).detach();
+	}
+	emit this->hideSwitchPopupChanged();
+}
+
 void WorkspaceBehavior::onCurrentChanged() {
+	gLastSwitchTick.store(GetTickCount64());
+	if (gHideSwitchPopup.load()) hideVisibleSwitchPopup();
+
 	auto index = this->desktops->currentIndex();
 	const auto& list = this->desktops->desktops();
 	auto id = index >= 0 && index < list.length() ? list[index].id : GUID {};
@@ -293,6 +417,7 @@ WindowManager::WindowManager(QObject* parent): QObject(parent) {
 	QObject::connect(decorations, &DecorationManager::inactiveOpacityChanged, this, &WindowManager::inactiveOpacityChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::backAndForthChanged, this, &WindowManager::workspaceBackAndForthChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::warpOnChangeChanged, this, &WindowManager::warpOnChangeWorkspaceChanged);
+	QObject::connect(behavior, &WorkspaceBehavior::hideSwitchPopupChanged, this, &WindowManager::hideDesktopPopupChanged);
 	// clang-format on
 }
 
@@ -344,6 +469,11 @@ qint32 WindowManager::warpOnChangeWorkspace() const {
 }
 void WindowManager::setWarpOnChangeWorkspace(qint32 mode) {
 	WorkspaceBehavior::instance()->setWarpOnChange(mode);
+}
+
+bool WindowManager::hideDesktopPopup() const { return WorkspaceBehavior::hideSwitchPopup(); }
+void WindowManager::setHideDesktopPopup(bool enabled) {
+	WorkspaceBehavior::instance()->setHideSwitchPopup(enabled);
 }
 
 } // namespace qs::windows

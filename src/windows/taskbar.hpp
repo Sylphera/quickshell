@@ -25,12 +25,15 @@ public:
 
 	[[nodiscard]] bool hoverOnly() const { return this->mHoverOnly; }
 	void setHoverOnly(bool hoverOnly);
+	[[nodiscard]] bool alwaysHidden() const { return this->mAlwaysHidden; }
+	void setAlwaysHidden(bool alwaysHidden);
 	void turnOffAutoHide();
 
 	static void restoreForCrash();
 
 signals:
 	void hoverOnlyChanged();
+	void alwaysHiddenChanged();
 
 private:
 	explicit TaskbarManager(QObject* parent);
@@ -44,6 +47,7 @@ private:
 
 	void enable();
 	void disable(bool restoreAutoHide);
+	void refreshMode();
 	void releaseStaleAutoHide();
 	void findBars();
 	void onCursorMoved(QPoint position);
@@ -68,6 +72,7 @@ private:
 	);
 
 	bool mHoverOnly = false;
+	bool mAlwaysHidden = false;
 	bool enabled = false;
 	bool revealed = false;
 	qint64 leftAt = 0;
@@ -86,6 +91,7 @@ class Taskbar: public QObject {
 	QML_SINGLETON;
 	// clang-format off
 	Q_PROPERTY(bool hoverOnly READ hoverOnly WRITE setHoverOnly NOTIFY hoverOnlyChanged);
+	Q_PROPERTY(bool alwaysHidden READ alwaysHidden WRITE setAlwaysHidden NOTIFY alwaysHiddenChanged);
 	// clang-format on
 
 public:
@@ -93,10 +99,13 @@ public:
 
 	[[nodiscard]] bool hoverOnly() const;
 	void setHoverOnly(bool hoverOnly);
+	[[nodiscard]] bool alwaysHidden() const;
+	void setAlwaysHidden(bool alwaysHidden);
 	Q_INVOKABLE void turnOffAutoHide();
 
 signals:
 	void hoverOnlyChanged();
+	void alwaysHiddenChanged();
 };
 
 } // namespace qs::windows

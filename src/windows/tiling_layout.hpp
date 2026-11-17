@@ -127,6 +127,7 @@ private:
 		bool splitPinned = false;
 		double ratio = 0.5;
 		QRect box;
+		QRectF idealBox;
 
 		[[nodiscard]] bool isLeaf() const { return this->first == nullptr; }
 	};
@@ -135,7 +136,7 @@ private:
 	[[nodiscard]] Node* lastLeaf() const;
 	[[nodiscard]] Node* dividerAncestor(Node* leaf, Edge edge) const;
 	static void setDivider(Node* node, int position);
-	void computeNode(Node* node, const QRect& box) const;
+		void computeNode(Node* node, const QRect& box, const QRectF& ideal) const;
 	[[nodiscard]] bool hasVisible(const Node* node) const;
 	static void collect(const Node* node, QList<Id>& out);
 

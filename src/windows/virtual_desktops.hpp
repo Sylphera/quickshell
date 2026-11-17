@@ -51,6 +51,7 @@ public:
 	[[nodiscard]] const QList<Desktop>& desktops() const { return this->mDesktops; }
 	[[nodiscard]] qsizetype count() const { return this->mDesktops.length(); }
 	[[nodiscard]] qsizetype currentIndex() const { return this->mCurrent; }
+	[[nodiscard]] qsizetype nativeCurrentIndex() const;
 	[[nodiscard]] qsizetype indexOf(const GUID& id) const;
 	[[nodiscard]] bool accessorLoaded() const { return this->accessor.loaded; }
 

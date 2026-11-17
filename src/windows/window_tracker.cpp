@@ -655,8 +655,9 @@ void WindowTracker::schedule() {
 }
 
 void WindowTracker::flush() {
-	auto candidates = std::move(this->candidates);
-	this->candidates.clear();
+	// Processing an unordered QSet here changed the Dwindle tree for simultaneous
+	// windows. Preserve their first WinEvent discovery order instead.
+	auto candidates = this->candidates.takeAll();
 
 	for (auto* hwnd: candidates) {
 		if (!this->byHwnd.contains(hwnd) && this->isEligible(hwnd)) {

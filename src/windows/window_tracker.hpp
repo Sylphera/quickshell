@@ -18,6 +18,8 @@
 #include <qtmetamacros.h>
 #include <qtypes.h>
 
+#include "window_event_order.hpp"
+
 namespace qs::windows {
 
 class WindowTracker;
@@ -188,7 +190,7 @@ private:
 	VirtualDesktops* mDesktops = nullptr;
 
 	QHash<HWND, Dirty> dirty;
-	QSet<HWND> candidates;
+	OrderedWindowCandidates<HWND> candidates;
 	QSet<HWND> moving;
 	bool foregroundDirty = false;
 	QTimer flushTimer;

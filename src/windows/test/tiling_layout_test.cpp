@@ -8,8 +8,12 @@
 #include <qtestcase.h>
 
 #include "tiling_layout.hpp"
+#include "tiling_target.hpp"
+#include "window_event_order.hpp"
 
 using qs::windows::tiling::CenterMode;
+using qs::windows::tiling::cursorInsertionTarget;
+using qs::windows::tiling::DwindleLayout;
 using qs::windows::tiling::Edge;
 using qs::windows::tiling::FitMode;
 using qs::windows::tiling::LayoutEngine;
@@ -90,6 +94,15 @@ private slots:
 	void neighboursWrapOnRequest();
 	void swapKeepsTheView();
 	void adoptedWindowsHaveNeighbours();
+	void mouseChoosesDwindleInsertionLeaf();
+	void mouseChoosesLeafAfterClosingOne();
+	void mouseSkipsHiddenLeaves();
+	void squareDwindleMatchesHyprland();
+	void dwindleUsesHyprlandHalfCellBoundary();
+	void discoveryQueuePreservesWinEventOrder();
+	void closingNestedDwindleBranchesMatchesHyprland();
+	void dwindleSplitCommandsPreserveTreeStructure();
+	void subpixelDwindleSplitMatchesHyprland();
 };
 
 void TestTilingLayout::newColumnsGoRightOfTheFocusedOne() {
@@ -703,6 +716,223 @@ void TestTilingLayout::adoptedWindowsHaveNeighbours() {
 	layout.compute(AREA);
 	QCOMPARE(layout.box(D), QRect(500, 0, 500, 800));
 	QVERIFY(layout.isParked(A));
+}
+
+void TestTilingLayout::mouseChoosesDwindleInsertionLeaf() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	layout.insert(A, 0, nullptr);
+	layout.compute(AREA);
+	layout.insert(B, A, nullptr);
+	layout.compute(AREA);
+
+	QCOMPARE(cursorInsertionTarget(layout, QPoint(100, 200)), A);
+	QCOMPARE(cursorInsertionTarget(layout, QPoint(900, 200)), B);
+	QCOMPARE(cursorInsertionTarget(layout, QPoint(-30, 200)), A);
+	QCOMPARE(cursorInsertionTarget(layout, QPoint(1200, 200)), B);
+
+	const auto pointer = QPoint(90, 120);
+	const auto hovered = cursorInsertionTarget(layout, pointer);
+	layout.insert(C, hovered, &pointer);
+	layout.compute(AREA);
+	QVERIFY(layout.box(C).contains(pointer));
+	QCOMPARE(cursorInsertionTarget(layout, layout.box(B).center()), B);
+	QCOMPARE(layout.count(), qsizetype(3));
+}
+
+void TestTilingLayout::mouseChoosesLeafAfterClosingOne() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	layout.insert(A, 0, nullptr);
+	layout.compute(AREA);
+	layout.insert(B, A, nullptr);
+	layout.compute(AREA);
+	const auto leftPoint = layout.box(A).center();
+	layout.insert(C, cursorInsertionTarget(layout, leftPoint), &leftPoint);
+	layout.compute(AREA);
+	layout.remove(C);
+	layout.compute(AREA);
+	QCOMPARE(cursorInsertionTarget(layout, layout.box(A).center()), A);
+	QCOMPARE(cursorInsertionTarget(layout, layout.box(B).center()), B);
+	QCOMPARE(layout.count(), qsizetype(2));
+}
+
+void TestTilingLayout::mouseSkipsHiddenLeaves() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	layout.insert(A, 0, nullptr);
+	layout.compute(AREA);
+	layout.insert(B, A, nullptr);
+	layout.compute(AREA);
+	layout.setHidden(A, true);
+	layout.compute(AREA);
+	QCOMPARE(cursorInsertionTarget(layout, layout.area().center()), B);
+	layout.setHidden(B, true);
+	layout.compute(AREA);
+	QCOMPARE(cursorInsertionTarget(layout, layout.area().center()), Id(0));
+}
+
+void TestTilingLayout::squareDwindleMatchesHyprland() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	const auto square = QRect(0, 0, 800, 800);
+	layout.insert(A, 0, nullptr);
+	layout.compute(square);
+	const auto pointer = QPoint(120, 120);
+	layout.insert(B, A, &pointer);
+	layout.compute(square);
+	// end-4 uses the Hyprland default split_width_multiplier=1.0:
+	// a square is divided vertically, preserving the child order on close.
+	QCOMPARE(layout.box(B), QRect(0, 0, 800, 400));
+	QCOMPARE(layout.box(A), QRect(0, 400, 800, 400));
+	layout.remove(B);
+	layout.compute(square);
+	QCOMPARE(layout.box(A), square);
+}
+
+void TestTilingLayout::dwindleUsesHyprlandHalfCellBoundary() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	layout.insert(A, 0, nullptr);
+	layout.compute(QRect(0, 0, 1000, 800));
+	// The Hyprland midpoint is x=500, not QRect::center().x()=499.
+	const auto point = QPoint(499, 100);
+	layout.insert(B, A, &point);
+	layout.compute(QRect(0, 0, 1000, 800));
+	QCOMPARE(layout.box(B), QRect(0, 0, 500, 800));
+	QCOMPARE(layout.box(A), QRect(500, 0, 500, 800));
+
+	layout.remove(B);
+	layout.compute(QRect(0, 0, 1000, 800));
+	const auto outside = QPoint(-15, 100);
+	layout.insert(C, A, &outside);
+	layout.compute(QRect(0, 0, 1000, 800));
+	QCOMPARE(layout.box(C), QRect(0, 0, 500, 800));
+	QCOMPARE(layout.box(A), QRect(500, 0, 500, 800));
+}
+
+void TestTilingLayout::discoveryQueuePreservesWinEventOrder() {
+	qs::windows::OrderedWindowCandidates<Id> candidates;
+	candidates.insert(C);
+	candidates.insert(A);
+	candidates.insert(C);
+	candidates.insert(B);
+	candidates.insert(A);
+	QCOMPARE(candidates.takeAll(), (QList<Id> {C, A, B}));
+	QVERIFY(candidates.takeAll().isEmpty());
+	candidates.insert(B);
+	candidates.insert(C);
+	QCOMPARE(candidates.takeAll(), (QList<Id> {B, C}));
+}
+
+void TestTilingLayout::closingNestedDwindleBranchesMatchesHyprland() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	const auto area = QRect(0, 0, 1200, 800);
+	layout.insert(A, 0, nullptr);
+	layout.compute(area);
+
+	const auto right = QPoint(900, 100);
+	layout.insert(B, A, &right);
+	layout.compute(area);
+	QCOMPARE(layout.box(A), QRect(0, 0, 600, 800));
+	QCOMPARE(layout.box(B), QRect(600, 0, 600, 800));
+
+	const auto top = QPoint(800, 100);
+	layout.insert(C, B, &top);
+	layout.compute(area);
+	QCOMPARE(layout.box(C), QRect(600, 0, 600, 400));
+	QCOMPARE(layout.box(B), QRect(600, 400, 600, 400));
+
+	const auto rightTop = QPoint(950, 300);
+	layout.insert(D, C, &rightTop);
+	layout.compute(area);
+	QCOMPARE(layout.box(C), QRect(600, 0, 300, 400));
+	QCOMPARE(layout.box(D), QRect(900, 0, 300, 400));
+
+	// Hyprland removes a leaf and its split-parent, promoting the sibling,
+	// without balancing other branches or changing their split direction.
+	layout.remove(C);
+	layout.compute(area);
+	QCOMPARE(layout.box(D), QRect(600, 0, 600, 400));
+	QCOMPARE(layout.box(B), QRect(600, 400, 600, 400));
+	QCOMPARE(layout.box(A), QRect(0, 0, 600, 800));
+
+	layout.remove(B);
+	layout.compute(area);
+	QCOMPARE(layout.box(D), QRect(600, 0, 600, 800));
+	QCOMPARE(layout.box(A), QRect(0, 0, 600, 800));
+
+	const auto bottomLeft = QPoint(30, 500);
+	layout.insert(5, A, &bottomLeft);
+	layout.compute(area);
+	QCOMPARE(layout.box(A), QRect(0, 0, 600, 400));
+	QCOMPARE(layout.box(5), QRect(0, 400, 600, 400));
+
+	layout.remove(D);
+	layout.compute(area);
+	QCOMPARE(layout.box(A), QRect(0, 0, 1200, 400));
+	QCOMPARE(layout.box(5), QRect(0, 400, 1200, 400));
+	layout.remove(A);
+	layout.compute(area);
+	QCOMPARE(layout.box(5), area);
+}
+
+void TestTilingLayout::dwindleSplitCommandsPreserveTreeStructure() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	const auto area = QRect(0, 0, 1200, 800);
+	layout.insert(A, 0, nullptr);
+	layout.compute(area);
+	const auto right = QPoint(900, 100);
+	layout.insert(B, A, &right);
+	layout.compute(area);
+	QCOMPARE(layout.box(A), QRect(0, 0, 600, 800));
+	QCOMPARE(layout.box(B), QRect(600, 0, 600, 800));
+
+	QVERIFY(layout.toggleSplit(A));
+	layout.compute(area);
+	QCOMPARE(layout.box(A), QRect(0, 0, 1200, 400));
+	QCOMPARE(layout.box(B), QRect(0, 400, 1200, 400));
+
+	QVERIFY(layout.swapSplit(A));
+	layout.compute(area);
+	QCOMPARE(layout.box(B), QRect(0, 0, 1200, 400));
+	QCOMPARE(layout.box(A), QRect(0, 400, 1200, 400));
+
+	QVERIFY(layout.splitRatio(B, 1.5, true));
+	layout.compute(area);
+	QCOMPARE(layout.box(B), QRect(0, 0, 1200, 600));
+	QCOMPARE(layout.box(A), QRect(0, 600, 1200, 200));
+
+	layout.remove(A);
+	layout.compute(area);
+	QCOMPARE(layout.box(B), area);
+}
+
+void TestTilingLayout::subpixelDwindleSplitMatchesHyprland() {
+	DwindleLayout layout;
+	layout.configure(Options {});
+	const auto area = QRect(0, 0, 7, 5);
+	layout.insert(A, 0, nullptr);
+	layout.compute(area);
+
+	const auto right = QPoint(6, 4);
+	layout.insert(B, A, &right);
+	layout.compute(area);
+	QCOMPARE(layout.box(B), QRect(4, 0, 3, 5));
+	const auto upper = QPoint(4, 0);
+	layout.insert(C, B, &upper);
+	layout.compute(area);
+	QCOMPARE(layout.box(C), QRect(4, 0, 3, 3));
+
+	// The rounded physical box of C is 3x3, but Hyprland's fractional
+	// layout box is 3.5x2.5. Its next split must therefore be horizontal.
+	const auto innerLeft = QPoint(5, 1);
+	layout.insert(D, C, &innerLeft);
+	layout.compute(area);
+	QCOMPARE(layout.box(D), QRect(4, 0, 2, 3));
+	QCOMPARE(layout.box(C), QRect(6, 0, 1, 3));
 }
 
 QTEST_APPLESS_MAIN(TestTilingLayout)
