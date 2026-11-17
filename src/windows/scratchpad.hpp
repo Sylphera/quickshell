@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <memory>
 
 #include <qlist.h>
 #include <qobject.h>
@@ -13,6 +14,10 @@
 namespace qs::windows {
 
 class TrackedWindow;
+
+namespace tiling {
+class DwindleLayout;
+}
 
 class Scratchpad: public QObject {
 	Q_OBJECT;
@@ -36,7 +41,7 @@ signals:
 
 private:
 	explicit Scratchpad(QObject* parent);
-	~Scratchpad() override = default;
+	~Scratchpad() override;
 
 	struct Entry {
 		QPointer<TrackedWindow> window;
@@ -46,12 +51,13 @@ private:
 
 	void setShown(bool shown);
 	void park(Entry& entry);
-	void unpark(Entry& entry, bool front);
 	void releaseAll();
 	void prune();
 	void showDim();
 	void hideDim();
 	void stepDim();
+	void relayout();
+	void onWindowAdded(TrackedWindow* window);
 	void onWindowRemoved();
 	void onActiveWindowChanged();
 	static LRESULT CALLBACK dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -64,6 +70,7 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
+	std::unique_ptr<tiling::DwindleLayout> layout;
 };
 
 } // namespace qs::windows

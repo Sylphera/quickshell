@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <qcoreapplication.h>
+#include <qscreen.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpointer.h>
@@ -10,9 +11,12 @@
 #include <qtypes.h>
 
 #include "tiling.hpp"
+#include "tiling_layout.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_tracker.hpp"
+
+#include <dwmapi.h>
 
 namespace qs::windows {
 
@@ -22,9 +26,9 @@ Q_LOGGING_CATEGORY(logScratchpad, "quickshell.windows.scratchpad", QtWarningMsg)
 
 constexpr auto* SCRATCHPAD_PROP = L"QuickshellScratchpadRect";
 constexpr std::size_t CRASH_SLOTS = 32;
-constexpr qreal DEFAULT_WIDTH = 0.8;
-constexpr qreal DEFAULT_HEIGHT = 0.85;
-constexpr int DIM_ALPHA = 110;
+constexpr int GAPS_OUT = 30;
+constexpr int GAPS_IN = 4;
+constexpr int DIM_ALPHA = 51;
 constexpr int DIM_STEP = 18;
 constexpr int DIM_FRAME_MS = 16;
 constexpr ULONGLONG FOCUS_GRACE_MS = 400;
@@ -87,6 +91,26 @@ void placeAt(HWND hwnd, HWND insertAfter, const QRect& rect) {
 	);
 }
 
+void placeFrame(HWND hwnd, HWND insertAfter, const QRect& target) {
+	RECT raw {};
+	if (!GetWindowRect(hwnd, &raw)) return;
+	RECT frame = raw;
+	DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame));
+	auto left = frame.left - raw.left;
+	auto top = frame.top - raw.top;
+	auto right = raw.right - frame.right;
+	auto bottom = raw.bottom - frame.bottom;
+	SetWindowPos(
+	    hwnd,
+	    insertAfter,
+	    target.x() - left,
+	    target.y() - top,
+	    target.width() + left + right,
+	    target.height() + top + bottom,
+	    SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+	);
+}
+
 QPoint parkPosition() {
 	return QPoint(
 	    GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100,
@@ -134,7 +158,12 @@ Scratchpad* Scratchpad::instance() {
 	return scratchpad.data();
 }
 
-Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
+Scratchpad::~Scratchpad() = default;
+
+Scratchpad::Scratchpad(QObject* parent)
+    : QObject(parent)
+    , layout(std::make_unique<tiling::DwindleLayout>()) {
+	this->layout->configure(tiling::Options {});
 	recoverOrphans();
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
@@ -144,6 +173,7 @@ Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
 
 	auto* tracker = WindowTracker::instance();
+	QObject::connect(tracker, &WindowTracker::windowAdded, this, &Scratchpad::onWindowAdded);
 	QObject::connect(tracker, &WindowTracker::windowRemoved, this, &Scratchpad::onWindowRemoved);
 	QObject::connect(
 	    tracker,
@@ -180,11 +210,19 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		}
 		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, true, false);
 
-		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = QRect()});
+		auto target = this->entries.isEmpty() ? tiling::LayoutEngine::Id(0)
+		                                      : reinterpret_cast<quintptr>(this->entries.last().hwnd);
+		POINT cursor {};
+		GetCursorPos(&cursor);
+		auto point = QPoint(cursor.x, cursor.y);
+		this->layout->insert(reinterpret_cast<quintptr>(hwnd), target, &point);
+
+		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = visibleRect(hwnd)});
 		auto& entry = this->entries.last();
+		remember(hwnd, entry.rect);
 
 		if (this->mShown) {
-			this->unpark(entry, true);
+			this->relayout();
 			forceForegroundWindow(hwnd);
 		} else if (!follow) {
 			this->park(entry);
@@ -199,11 +237,13 @@ void Scratchpad::remove(TrackedWindow* window) {
 		auto& entry = this->entries[i];
 		if (entry.window != window) continue;
 
-		this->unpark(entry, false);
+		this->layout->remove(reinterpret_cast<quintptr>(entry.hwnd));
+		if (!entry.rect.isEmpty()) placeAt(entry.hwnd, HWND_NOTOPMOST, entry.rect);
 		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
 		forget(entry.hwnd);
 		this->entries.removeAt(i);
 		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, false, false);
+		this->relayout();
 		return;
 	}
 }
@@ -216,28 +256,21 @@ void Scratchpad::setShown(bool shown) {
 		GetCursorPos(&cursor);
 		this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
 		this->shownAt = GetTickCount64();
+		this->mShown = true;
 		this->showDim();
-		HWND last = nullptr;
-		for (auto& entry: this->entries) {
-			this->unpark(entry, true);
-			last = entry.hwnd;
-		}
-		if (last != nullptr) forceForegroundWindow(last);
+		this->relayout();
+		if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
 	} else {
+		this->mShown = false;
 		for (auto& entry: this->entries) this->park(entry);
 		this->hideDim();
 	}
 
-	this->mShown = shown;
 	emit this->shownChanged();
 }
 
 void Scratchpad::park(Entry& entry) {
 	if (!IsWindow(entry.hwnd)) return;
-
-	auto rect = visibleRect(entry.hwnd);
-	if (!rect.isEmpty()) entry.rect = rect;
-	remember(entry.hwnd, entry.rect);
 
 	if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
 	auto position = parkPosition();
@@ -252,29 +285,24 @@ void Scratchpad::park(Entry& entry) {
 	);
 }
 
-void Scratchpad::unpark(Entry& entry, bool front) {
-	if (!IsWindow(entry.hwnd)) return;
+void Scratchpad::relayout() {
+	if (!this->mShown) return;
+	auto rects = monitorRects(this->mMonitor);
+	if (!rects.valid) return;
 
-	POINT cursor {};
-	GetCursorPos(&cursor);
-	auto* monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-	auto work = monitorRects(monitor).work;
+	auto* screen = screenForMonitor(this->mMonitor);
+	auto dpr = screen != nullptr ? screen->devicePixelRatio() : 1.0;
+	auto outer = qRound(GAPS_OUT * dpr);
+	auto inner = qRound(GAPS_IN * dpr / 2.0);
+	this->layout->compute(rects.work.adjusted(outer, outer, -outer, -outer));
 
-	auto target = entry.rect;
-	RECT asRect {target.left(), target.top(), target.right() + 1, target.bottom() + 1};
-	if (!work.isEmpty()
-	    && (target.isEmpty() || MonitorFromRect(&asRect, MONITOR_DEFAULTTONULL) != monitor))
-	{
-		auto size = target.isEmpty()
-		              ? QSize(qRound(work.width() * DEFAULT_WIDTH), qRound(work.height() * DEFAULT_HEIGHT))
-		              : target.size().boundedTo(work.size());
-		target = QRect(QPoint(), size);
-		target.moveCenter(work.center());
+	for (auto& entry: this->entries) {
+		if (!IsWindow(entry.hwnd)) continue;
+		auto box = this->layout->box(reinterpret_cast<quintptr>(entry.hwnd));
+		if (box.isEmpty()) continue;
+		if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
+		placeFrame(entry.hwnd, HWND_TOPMOST, box.adjusted(inner, inner, -inner, -inner));
 	}
-
-	entry.rect = target;
-	remember(entry.hwnd, target);
-	placeAt(entry.hwnd, front ? HWND_TOPMOST : HWND_NOTOPMOST, target);
 }
 
 void Scratchpad::showDim() {
@@ -368,9 +396,14 @@ LRESULT CALLBACK Scratchpad::dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 	}
 }
 
+void Scratchpad::onWindowAdded(TrackedWindow* window) {
+	if (this->mShown) this->add(window, false);
+}
+
 void Scratchpad::onWindowRemoved() {
 	this->prune();
 	if (this->mShown && this->entries.isEmpty()) this->setShown(false);
+	else this->relayout();
 }
 
 void Scratchpad::onActiveWindowChanged() {
@@ -398,6 +431,7 @@ void Scratchpad::prune() {
 	for (auto i = this->entries.size() - 1; i >= 0; i--) {
 		const auto& entry = this->entries[i];
 		if (entry.window != nullptr && IsWindow(entry.hwnd)) continue;
+		this->layout->remove(reinterpret_cast<quintptr>(entry.hwnd));
 		forget(entry.hwnd);
 		this->entries.removeAt(i);
 	}
