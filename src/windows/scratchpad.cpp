@@ -416,7 +416,14 @@ void Scratchpad::onWindowAdded(TrackedWindow* window) {
 	if (this->mShown) this->add(window, false);
 }
 
-void Scratchpad::onWindowRemoved() {
+void Scratchpad::onWindowRemoved(TrackedWindow* window) {
+	for (auto i = this->entries.size() - 1; i >= 0; i--) {
+		const auto& entry = this->entries[i];
+		if (entry.window != window) continue;
+		this->layout->remove(reinterpret_cast<quintptr>(entry.hwnd));
+		forget(entry.hwnd);
+		this->entries.removeAt(i);
+	}
 	this->prune();
 	if (this->mShown && this->entries.isEmpty()) this->setShown(false);
 	else this->relayout();
