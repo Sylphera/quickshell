@@ -205,6 +205,7 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = visibleRect(hwnd)});
 		auto& entry = this->entries.last();
 		remember(hwnd, entry.rect);
+		emit this->membershipChanged();
 
 		if (this->mShown) {
 			this->relayout();
@@ -226,6 +227,7 @@ void Scratchpad::remove(TrackedWindow* window) {
 		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
 		forget(entry.hwnd);
 		this->entries.removeAt(i);
+		emit this->membershipChanged();
 		if (auto* tiling = TilingManager::active()) tiling->markWindow(window);
 		return;
 	}

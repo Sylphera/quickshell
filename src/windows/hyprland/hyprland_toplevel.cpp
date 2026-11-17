@@ -9,6 +9,7 @@
 #include <qtypes.h>
 #include <qvariant.h>
 
+#include "../scratchpad.hpp"
 #include "../tiling.hpp"
 #include "../wayland/toplevel.hpp"
 #include "../window_tracker.hpp"
@@ -239,7 +240,9 @@ void HyprlandToplevel::refreshIpcObject() {
 	    {"fullscreen", fullscreen},
 	    {"fullscreenClient", fullscreen},
 	    {"grouped", QVariantList {}},
-	    {"tags", QVariantList {}},
+	    {"tags", qs::windows::Scratchpad::instance()->contains(window)
+	                 ? QVariantList {QStringLiteral("quickshell:scratchpad")}
+	                 : QVariantList {}},
 	    {"swallowing", "0x0"},
 	    {"focusHistoryID", this->ipc->focusHistoryId(this)},
 	    {"inhibitingIdle", false},

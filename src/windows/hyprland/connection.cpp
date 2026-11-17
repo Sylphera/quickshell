@@ -156,6 +156,10 @@ HyprlandIpc::HyprlandIpc()
 	);
 
 	auto* scratchpad = qs::windows::Scratchpad::instance();
+	QObject::connect(scratchpad, &qs::windows::Scratchpad::membershipChanged, this, [this]() {
+		this->refreshToplevels();
+		this->emitEvent("scratchpad", "");
+	});
 	QObject::connect(scratchpad, &qs::windows::Scratchpad::shownChanged, this, [this, scratchpad]() {
 		this->refreshMonitors();
 		auto* monitor = this->bFocusedMonitor.value();

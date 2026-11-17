@@ -35,6 +35,7 @@ public:
 
 signals:
 	void shownChanged();
+	void membershipChanged();
 
 private:
 	explicit Scratchpad(QObject* parent);
