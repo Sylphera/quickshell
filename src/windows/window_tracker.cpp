@@ -543,8 +543,10 @@ WindowTracker::WindowTracker() {
 			qCWarning(logTracker) << "PROBE tracker currentChanged" << probe.nsecsElapsed() / 1000 << "us";
 		});
 		for (auto* window: this->mWindows) {
-			if (isShown(window->hwnd())) window->refreshDesktop(false);
+			auto* hwnd = window->hwnd();
+			if (isShown(hwnd) && !this->cloakSettling.contains(hwnd)) this->cloakSettling.insert(hwnd, false);
 		}
+		this->cloakSettleTimer.start();
 
 		this->foregroundDirty = true;
 		this->schedule();
