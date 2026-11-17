@@ -22,6 +22,7 @@
 #include "../../core/qmlscreen.hpp"
 #include "../hotkeys.hpp"
 #include "../input_mask.hpp"
+#include "../scratchpad.hpp"
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_tracker.hpp"
@@ -152,6 +153,20 @@ HyprlandIpc::HyprlandIpc()
 	    this,
 	    &HyprlandIpc::onButtonPressed
 	);
+
+	auto* scratchpad = qs::windows::Scratchpad::instance();
+	QObject::connect(scratchpad, &qs::windows::Scratchpad::shownChanged, this, [this, scratchpad]() {
+		this->refreshMonitors();
+		auto* monitor = this->bFocusedMonitor.value();
+		auto name = monitor == nullptr ? QByteArray() : monitor->bindableName().value().toUtf8();
+		if (scratchpad->shown()) {
+			this->emitEvent("activespecial", "special:special," + name);
+			this->emitEvent("activespecialv2", "-98,special:special," + name);
+		} else {
+			this->emitEvent("activespecial", "," + name);
+			this->emitEvent("activespecialv2", ",," + name);
+		}
+	});
 
 	QObject::connect(this, &HyprlandIpc::dispatchGlobal, this, [](const QString& name) {
 		qs::windows::hotkeys::HotkeyManager::instance()->triggerGlobal(name);

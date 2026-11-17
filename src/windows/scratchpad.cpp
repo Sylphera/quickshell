@@ -1,0 +1,286 @@
+#include "scratchpad.hpp"
+#include <array>
+#include <atomic>
+
+#include <qcoreapplication.h>
+#include <qlogging.h>
+#include <qloggingcategory.h>
+#include <qpointer.h>
+#include <qrect.h>
+#include <qtypes.h>
+
+#include "tiling.hpp"
+#include "util.hpp"
+#include "virtual_desktops.hpp"
+#include "window_tracker.hpp"
+
+namespace qs::windows {
+
+namespace {
+
+Q_LOGGING_CATEGORY(logScratchpad, "quickshell.windows.scratchpad", QtWarningMsg);
+
+constexpr auto* SCRATCHPAD_PROP = L"QuickshellScratchpadRect";
+constexpr std::size_t CRASH_SLOTS = 32;
+constexpr qreal DEFAULT_WIDTH = 0.8;
+constexpr qreal DEFAULT_HEIGHT = 0.85;
+
+struct CrashSlot {
+	std::atomic<HWND> hwnd {nullptr};
+	std::atomic<quint64> rect {0};
+};
+std::array<CrashSlot, CRASH_SLOTS> gCrashSlots {}; // NOLINT
+
+quint64 packRect(const QRect& rect) {
+	auto part = [](int value) { return static_cast<quint64>(static_cast<quint16>(value)); };
+	auto packed = (part(rect.x()) << 48) | (part(rect.y()) << 32) | (part(rect.width()) << 16)
+	            | part(rect.height());
+	return packed == 0 ? 1 : packed;
+}
+
+QRect unpackRect(quint64 packed) {
+	auto part = [packed](int shift) { return static_cast<qint16>((packed >> shift) & 0xffff); };
+	return QRect(part(48), part(32), static_cast<quint16>(part(16)), static_cast<quint16>(part(0)));
+}
+
+void remember(HWND hwnd, const QRect& rect) {
+	auto packed = packRect(rect);
+	SetPropW(hwnd, SCRATCHPAD_PROP, reinterpret_cast<HANDLE>(static_cast<quintptr>(packed)));
+
+	for (auto& slot: gCrashSlots) {
+		if (slot.hwnd.load() == hwnd) {
+			slot.rect.store(packed);
+			return;
+		}
+	}
+	for (auto& slot: gCrashSlots) {
+		HWND empty = nullptr;
+		if (slot.hwnd.compare_exchange_strong(empty, hwnd)) {
+			slot.rect.store(packed);
+			return;
+		}
+	}
+}
+
+void forget(HWND hwnd) {
+	RemovePropW(hwnd, SCRATCHPAD_PROP);
+	for (auto& slot: gCrashSlots) {
+		auto* current = hwnd;
+		slot.hwnd.compare_exchange_strong(current, nullptr);
+	}
+}
+
+void placeAt(HWND hwnd, HWND insertAfter, const QRect& rect) {
+	SetWindowPos(
+	    hwnd,
+	    insertAfter,
+	    rect.x(),
+	    rect.y(),
+	    rect.width(),
+	    rect.height(),
+	    SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+	);
+}
+
+QPoint parkPosition() {
+	return QPoint(
+	    GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100,
+	    GetSystemMetrics(SM_YVIRTUALSCREEN)
+	);
+}
+
+bool isParked(const RECT& rect) { return rect.left >= parkPosition().x() - 10; }
+
+QRect visibleRect(HWND hwnd) {
+	if (IsZoomed(hwnd)) {
+		WINDOWPLACEMENT placement {};
+		placement.length = sizeof(placement);
+		if (GetWindowPlacement(hwnd, &placement)) {
+			const auto& r = placement.rcNormalPosition;
+			return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+		}
+	}
+
+	RECT r {};
+	if (!GetWindowRect(hwnd, &r) || isParked(r)) return QRect();
+	return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+}
+
+void recoverOrphans() {
+	EnumWindows(
+	    [](HWND hwnd, LPARAM /*param*/) -> BOOL {
+		    auto packed = reinterpret_cast<quintptr>(GetPropW(hwnd, SCRATCHPAD_PROP));
+		    if (packed == 0) return TRUE;
+		    auto rect = unpackRect(packed);
+		    if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
+		    VirtualDesktops::instance()->pinWindow(hwnd, false);
+		    RemovePropW(hwnd, SCRATCHPAD_PROP);
+		    return TRUE;
+	    },
+	    0
+	);
+}
+
+} // namespace
+
+Scratchpad* Scratchpad::instance() {
+	static QPointer<Scratchpad> scratchpad; // NOLINT
+	if (scratchpad.isNull()) scratchpad = new Scratchpad(QCoreApplication::instance());
+	return scratchpad.data();
+}
+
+Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
+	recoverOrphans();
+	if (auto* app = QCoreApplication::instance()) {
+		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
+	}
+}
+
+bool Scratchpad::contains(const TrackedWindow* window) const {
+	if (window == nullptr) return false;
+	for (const auto& entry: this->entries) {
+		if (entry.window == window) return true;
+	}
+	return false;
+}
+
+void Scratchpad::toggle() {
+	this->prune();
+	this->setShown(!this->mShown);
+}
+
+void Scratchpad::add(TrackedWindow* window, bool follow) {
+	this->prune();
+	if (window == nullptr) return;
+
+	if (!this->contains(window)) {
+		auto* hwnd = window->hwnd();
+		if (!VirtualDesktops::instance()->pinWindow(hwnd, true)) {
+			qCWarning(logScratchpad) << "Couldn't pin" << window << "to all desktops";
+		}
+		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, true, false);
+
+		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = visibleRect(hwnd)});
+		auto& entry = this->entries.last();
+
+		if (this->mShown) {
+			this->unpark(entry, true);
+			forceForegroundWindow(hwnd);
+		} else if (!follow) {
+			this->park(entry);
+		}
+	}
+
+	if (follow) this->setShown(true);
+}
+
+void Scratchpad::remove(TrackedWindow* window) {
+	for (auto i = 0; i < this->entries.size(); i++) {
+		auto& entry = this->entries[i];
+		if (entry.window != window) continue;
+
+		this->unpark(entry, false);
+		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
+		forget(entry.hwnd);
+		this->entries.removeAt(i);
+		if (auto* tiling = TilingManager::active()) tiling->setFloating(window, false, false);
+		return;
+	}
+}
+
+void Scratchpad::setShown(bool shown) {
+	if (shown == this->mShown) return;
+
+	if (shown) {
+		POINT cursor {};
+		GetCursorPos(&cursor);
+		this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+		HWND last = nullptr;
+		for (auto& entry: this->entries) {
+			this->unpark(entry, true);
+			last = entry.hwnd;
+		}
+		if (last != nullptr) forceForegroundWindow(last);
+	} else {
+		for (auto& entry: this->entries) this->park(entry);
+	}
+
+	this->mShown = shown;
+	emit this->shownChanged();
+}
+
+void Scratchpad::park(Entry& entry) {
+	if (!IsWindow(entry.hwnd)) return;
+
+	auto rect = visibleRect(entry.hwnd);
+	if (!rect.isEmpty()) entry.rect = rect;
+	remember(entry.hwnd, entry.rect);
+
+	if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
+	auto position = parkPosition();
+	SetWindowPos(
+	    entry.hwnd,
+	    HWND_NOTOPMOST,
+	    position.x(),
+	    position.y(),
+	    0,
+	    0,
+	    SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+	);
+}
+
+void Scratchpad::unpark(Entry& entry, bool front) {
+	if (!IsWindow(entry.hwnd)) return;
+
+	POINT cursor {};
+	GetCursorPos(&cursor);
+	auto* monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+	auto work = monitorRects(monitor).work;
+
+	auto target = entry.rect;
+	RECT asRect {target.left(), target.top(), target.right() + 1, target.bottom() + 1};
+	if (!work.isEmpty()
+	    && (target.isEmpty() || MonitorFromRect(&asRect, MONITOR_DEFAULTTONULL) != monitor))
+	{
+		auto size = target.isEmpty()
+		              ? QSize(qRound(work.width() * DEFAULT_WIDTH), qRound(work.height() * DEFAULT_HEIGHT))
+		              : target.size().boundedTo(work.size());
+		target = QRect(QPoint(), size);
+		target.moveCenter(work.center());
+	}
+
+	entry.rect = target;
+	remember(entry.hwnd, target);
+	placeAt(entry.hwnd, front ? HWND_TOPMOST : HWND_NOTOPMOST, target);
+}
+
+void Scratchpad::releaseAll() {
+	for (auto& entry: this->entries) {
+		if (!IsWindow(entry.hwnd)) continue;
+		if (!entry.rect.isEmpty()) placeAt(entry.hwnd, HWND_NOTOPMOST, entry.rect);
+		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
+		forget(entry.hwnd);
+	}
+	this->entries.clear();
+}
+
+void Scratchpad::prune() {
+	for (auto i = this->entries.size() - 1; i >= 0; i--) {
+		const auto& entry = this->entries[i];
+		if (entry.window != nullptr && IsWindow(entry.hwnd)) continue;
+		forget(entry.hwnd);
+		this->entries.removeAt(i);
+	}
+}
+
+void Scratchpad::restoreForCrash() {
+	for (auto& slot: gCrashSlots) {
+		auto* hwnd = slot.hwnd.exchange(nullptr);
+		if (hwnd == nullptr || !IsWindow(hwnd)) continue;
+		auto rect = unpackRect(slot.rect.load());
+		if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
+		RemovePropW(hwnd, SCRATCHPAD_PROP);
+	}
+}
+
+} // namespace qs::windows

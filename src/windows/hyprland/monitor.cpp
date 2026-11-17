@@ -9,6 +9,7 @@
 #include <qtypes.h>
 #include <qvariant.h>
 
+#include "../scratchpad.hpp"
 #include "../util.hpp"
 #include "connection.hpp"
 #include "workspace.hpp"
@@ -68,6 +69,9 @@ void HyprlandMonitor::refreshIpcObject() {
 	}
 
 	auto* workspace = this->bActiveWorkspace.value();
+	auto* scratchpad = qs::windows::Scratchpad::instance();
+	auto special = scratchpad->shown()
+	            && scratchpad->monitor() == qs::windows::monitorForScreen(this->mScreen);
 
 	QVariantMap object {
 	    {"id", this->bId.value()},
@@ -86,7 +90,8 @@ void HyprlandMonitor::refreshIpcObject() {
 	         {"id", workspace == nullptr ? -1 : workspace->bindableId().value()},
 	         {"name", workspace == nullptr ? QString() : workspace->bindableName().value()},
 	     }},
-	    {"specialWorkspace", QVariantMap {{"id", 0}, {"name", QString()}}},
+	    {"specialWorkspace", special ? QVariantMap {{"id", -98}, {"name", QStringLiteral("special:special")}}
+	                                 : QVariantMap {{"id", 0}, {"name", QString()}}},
 	    {"reserved", reserved},
 	    {"scale", this->bScale.value()},
 	    {"transform", 0},
