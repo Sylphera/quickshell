@@ -29,6 +29,8 @@ public:
 	void setBackAndForth(bool enabled);
 	[[nodiscard]] qint32 warpOnChange() const { return this->mWarpOnChange; }
 	void setWarpOnChange(qint32 mode);
+	[[nodiscard]] bool hideSwitchPopup() const { return this->mHideSwitchPopup; }
+	void setHideSwitchPopup(bool enabled);
 
 	[[nodiscard]] qsizetype previousDesktop() const;
 	void prepareWarp(qsizetype desktop, bool fromActive = false);
@@ -38,10 +40,11 @@ public:
 signals:
 	void backAndForthChanged();
 	void warpOnChangeChanged();
+	void hideSwitchPopupChanged();
 
 private:
 	explicit WorkspaceBehavior(QObject* parent);
-	~WorkspaceBehavior() override = default;
+	~WorkspaceBehavior() override;
 
 	void onCurrentChanged();
 	void tryWarp();
@@ -49,6 +52,7 @@ private:
 	void warpToTopmost();
 	void watchTracker();
 	void repairFocus();
+	void updateSwitchPopup();
 	[[nodiscard]] static bool cursorOverShell();
 	static void warpCursor(HWND hwnd);
 
@@ -57,6 +61,8 @@ private:
 
 	bool mBackAndForth = false;
 	qint32 mWarpOnChange = 0;
+	bool mHideSwitchPopup = false;
+	HWND switchPopup = nullptr;
 
 	GUID currentId {};
 	qsizetype currentIndex = -1;
@@ -86,6 +92,7 @@ class WindowManager: public QObject {
 	Q_PROPERTY(qreal inactiveOpacity READ inactiveOpacity WRITE setInactiveOpacity NOTIFY inactiveOpacityChanged);
 	Q_PROPERTY(bool workspaceBackAndForth READ workspaceBackAndForth WRITE setWorkspaceBackAndForth NOTIFY workspaceBackAndForthChanged);
 	Q_PROPERTY(qint32 warpOnChangeWorkspace READ warpOnChangeWorkspace WRITE setWarpOnChangeWorkspace NOTIFY warpOnChangeWorkspaceChanged);
+	Q_PROPERTY(bool hideDesktopPopup READ hideDesktopPopup WRITE setHideDesktopPopup NOTIFY hideDesktopPopupChanged);
 	// clang-format on
 
 public:
@@ -108,6 +115,8 @@ public:
 	void setWorkspaceBackAndForth(bool enabled);
 	[[nodiscard]] qint32 warpOnChangeWorkspace() const;
 	void setWarpOnChangeWorkspace(qint32 mode);
+	[[nodiscard]] bool hideDesktopPopup() const;
+	void setHideDesktopPopup(bool enabled);
 
 signals:
 	void bordersChanged();
@@ -118,6 +127,7 @@ signals:
 	void inactiveOpacityChanged();
 	void workspaceBackAndForthChanged();
 	void warpOnChangeWorkspaceChanged();
+	void hideDesktopPopupChanged();
 };
 
 } // namespace qs::windows

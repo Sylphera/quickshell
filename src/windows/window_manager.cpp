@@ -1,4 +1,5 @@
 #include "window_manager.hpp"
+#include <cstdlib>
 #include <cwchar>
 
 #include <qcolor.h>
@@ -27,6 +28,7 @@ Q_LOGGING_CATEGORY(logWorkspace, "quickshell.windows.workspace", QtWarningMsg);
 constexpr qint64 WARP_TIMEOUT_MS = 2000;
 constexpr int WARP_FALLBACK_MS = 500;
 constexpr int FOCUS_REPAIR_MS = 150;
+constexpr int SWITCH_POPUP_RETRY_MS = 1500;
 
 bool isNullGuid(const GUID& id) { return IsEqualGUID(id, GUID {}) != FALSE; }
 
@@ -41,6 +43,68 @@ bool isDesktopWindow(HWND hwnd) {
 	wchar_t name[16] {};
 	GetClassNameW(hwnd, name, 16);
 	return wcscmp(name, L"WorkerW") == 0 || wcscmp(name, L"Progman") == 0;
+}
+
+constexpr auto* SWITCH_POPUP_CLASS = L"XamlExplorerHostIslandWindow";
+constexpr auto* SWITCH_POPUP_PROP = L"QuickshellSwitchPopupMasked";
+
+bool looksLikeSwitchPopup(HWND hwnd) {
+	auto* taskbar = explorerTaskbarWindow();
+	if (taskbar == nullptr) return false;
+	DWORD popupPid = 0;
+	DWORD explorerPid = 0;
+	GetWindowThreadProcessId(hwnd, &popupPid);
+	GetWindowThreadProcessId(taskbar, &explorerPid);
+	if (popupPid == 0 || popupPid != explorerPid) return false;
+
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return false;
+	auto width = rect.right - rect.left;
+	auto height = rect.bottom - rect.top;
+	if (width < 65 || width > 650 || height < 25 || height > 150) return false;
+
+	MONITORINFO monitor {.cbSize = sizeof(MONITORINFO)};
+	auto* screenHandle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+	if (!GetMonitorInfoW(screenHandle, &monitor)) return false;
+	const auto& screen = monitor.rcMonitor;
+	if (rect.bottom < screen.bottom - 180 || rect.bottom > screen.bottom + 25) return false;
+	auto center = (rect.left + rect.right) / 2;
+	auto screenCenter = (screen.left + screen.right) / 2;
+	return std::abs(center - screenCenter) <= (screen.right - screen.left) / 5;
+}
+
+bool hasWindowRegion(HWND hwnd) {
+	auto* probe = CreateRectRgn(0, 0, 0, 0);
+	if (probe == nullptr) return true;
+	auto result = GetWindowRgn(hwnd, probe) != ERROR;
+	DeleteObject(probe);
+	return result;
+}
+
+HWND maskSwitchPopup() {
+	HWND hwnd = nullptr;
+	while ((hwnd = FindWindowExW(nullptr, hwnd, SWITCH_POPUP_CLASS, nullptr)) != nullptr) {
+		if (GetPropW(hwnd, SWITCH_POPUP_PROP) != nullptr) return hwnd;
+	}
+
+	while ((hwnd = FindWindowExW(nullptr, hwnd, SWITCH_POPUP_CLASS, nullptr)) != nullptr) {
+		if (!looksLikeSwitchPopup(hwnd) || hasWindowRegion(hwnd)) continue;
+		if (SetPropW(hwnd, SWITCH_POPUP_PROP, reinterpret_cast<HANDLE>(1)) == FALSE) continue;
+
+		auto* empty = CreateRectRgn(0, 0, 0, 0);
+		if (empty != nullptr && SetWindowRgn(hwnd, empty, TRUE) != 0) return hwnd;
+
+		if (empty != nullptr) DeleteObject(empty);
+		RemovePropW(hwnd, SWITCH_POPUP_PROP);
+	}
+
+	return nullptr;
+}
+
+void unmaskSwitchPopup(HWND hwnd) {
+	if (hwnd == nullptr || !IsWindow(hwnd) || GetPropW(hwnd, SWITCH_POPUP_PROP) == nullptr) return;
+	SetWindowRgn(hwnd, nullptr, TRUE);
+	RemovePropW(hwnd, SWITCH_POPUP_PROP);
 }
 
 } // namespace
@@ -94,7 +158,39 @@ void WorkspaceBehavior::setWarpOnChange(qint32 mode) {
 	emit this->warpOnChangeChanged();
 }
 
+WorkspaceBehavior::~WorkspaceBehavior() { unmaskSwitchPopup(this->switchPopup); }
+
+void WorkspaceBehavior::setHideSwitchPopup(bool enabled) {
+	if (enabled == this->mHideSwitchPopup) return;
+	this->mHideSwitchPopup = enabled;
+
+	if (enabled) {
+		this->updateSwitchPopup();
+	} else {
+		unmaskSwitchPopup(this->switchPopup);
+		this->switchPopup = nullptr;
+	}
+
+	emit this->hideSwitchPopupChanged();
+}
+
+void WorkspaceBehavior::updateSwitchPopup() {
+	if (!this->mHideSwitchPopup) return;
+	if (this->switchPopup != nullptr && IsWindow(this->switchPopup)
+	    && GetPropW(this->switchPopup, SWITCH_POPUP_PROP) != nullptr)
+	{
+		return;
+	}
+
+	this->switchPopup = maskSwitchPopup();
+}
+
 void WorkspaceBehavior::onCurrentChanged() {
+	this->updateSwitchPopup();
+	if (this->mHideSwitchPopup && this->switchPopup == nullptr) {
+		QTimer::singleShot(SWITCH_POPUP_RETRY_MS, this, &WorkspaceBehavior::updateSwitchPopup);
+	}
+
 	auto index = this->desktops->currentIndex();
 	const auto& list = this->desktops->desktops();
 	auto id = index >= 0 && index < list.length() ? list[index].id : GUID {};
@@ -293,6 +389,7 @@ WindowManager::WindowManager(QObject* parent): QObject(parent) {
 	QObject::connect(decorations, &DecorationManager::inactiveOpacityChanged, this, &WindowManager::inactiveOpacityChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::backAndForthChanged, this, &WindowManager::workspaceBackAndForthChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::warpOnChangeChanged, this, &WindowManager::warpOnChangeWorkspaceChanged);
+	QObject::connect(behavior, &WorkspaceBehavior::hideSwitchPopupChanged, this, &WindowManager::hideDesktopPopupChanged);
 	// clang-format on
 }
 
@@ -344,6 +441,13 @@ qint32 WindowManager::warpOnChangeWorkspace() const {
 }
 void WindowManager::setWarpOnChangeWorkspace(qint32 mode) {
 	WorkspaceBehavior::instance()->setWarpOnChange(mode);
+}
+
+bool WindowManager::hideDesktopPopup() const {
+	return WorkspaceBehavior::instance()->hideSwitchPopup();
+}
+void WindowManager::setHideDesktopPopup(bool enabled) {
+	WorkspaceBehavior::instance()->setHideSwitchPopup(enabled);
 }
 
 } // namespace qs::windows
