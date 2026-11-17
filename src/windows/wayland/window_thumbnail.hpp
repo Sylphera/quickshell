@@ -55,7 +55,7 @@ private:
 	void unregister();
 	void sync();
 	void place();
-	void shapeHost(QSize size, QPoint corner, QSize full, int radius);
+	void shapeHost(bool rounded);
 	void setSourceSize(QSize size);
 	void updateImplicitSize();
 
@@ -66,9 +66,7 @@ private:
 	HWND mDestination = nullptr;
 	HWND mSource = nullptr;
 	HWND mHost = nullptr;
-	QRect mHostShape;
-	int mHostRadius = -1;
-	QSize mHostSize;
+	int mHostRounded = -1;
 	qreal mRadius = 0;
 	QMetaObject::Connection mFrameConnection;
 	QMetaObject::Connection mPlaceConnection;

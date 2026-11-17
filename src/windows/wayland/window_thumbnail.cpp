@@ -159,9 +159,7 @@ void WindowThumbnail::unregister() {
 	if (this->mThumbnail != nullptr) DwmUnregisterThumbnail(this->mThumbnail);
 	if (this->mHost != nullptr) DestroyWindow(this->mHost);
 	this->mHost = nullptr;
-	this->mHostShape = QRect();
-	this->mHostRadius = -1;
-	this->mHostSize = QSize();
+	this->mHostRounded = -1;
 	this->mThumbnail = nullptr;
 	this->mDestination = nullptr;
 	this->mSource = nullptr;
@@ -249,17 +247,12 @@ void WindowThumbnail::place() {
 		    host.height(),
 		    SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
 		);
-		auto corner = QPoint(rounded((rect.left() - shown.left()) * dpr), rounded((rect.top() - shown.top()) * dpr));
-		auto full = QSize(rounded(rect.width() * dpr), rounded(rect.height() * dpr));
-		auto radius = static_cast<int>(std::lround(this->mRadius * dpr));
-		auto shape = QRect(corner, full);
-		if (shape != this->mHostShape || radius != this->mHostRadius || host.size() != this->mHostSize) {
-			this->mHostShape = shape;
-			this->mHostRadius = radius;
-			this->mHostSize = host.size();
+		auto wantRounded = this->mRadius > 0 ? 1 : 0;
+		if (wantRounded != this->mHostRounded) {
+			this->mHostRounded = wantRounded;
 			QMetaObject::invokeMethod(
 			    this,
-			    [this, size = host.size(), corner, full, radius]() { this->shapeHost(size, corner, full, radius); },
+			    [this, wantRounded]() { this->shapeHost(wantRounded != 0); },
 			    Qt::QueuedConnection
 			);
 		}
@@ -282,24 +275,14 @@ void WindowThumbnail::place() {
 	this->mApplied = props;
 }
 
-void WindowThumbnail::shapeHost(QSize size, QPoint corner, QSize full, int radius) {
+void WindowThumbnail::shapeHost(bool rounded) {
 	if (this->mHost == nullptr) return;
-	if (radius <= 0) {
-		SetWindowRgn(this->mHost, nullptr, TRUE);
-		return;
-	}
-	auto* region = CreateRoundRectRgn(
-	    corner.x(),
-	    corner.y(),
-	    corner.x() + full.width() + 1,
-	    corner.y() + full.height() + 1,
-	    radius * 2,
-	    radius * 2
-	);
-	auto* clip = CreateRectRgn(0, 0, size.width(), size.height());
-	CombineRgn(region, region, clip, RGN_AND);
-	DeleteObject(clip);
-	if (SetWindowRgn(this->mHost, region, TRUE) == 0) DeleteObject(region);
+	// DWM ignores window regions when it draws a thumbnail, but it does clip
+	// it to the rounded corners it gives the window itself.
+	auto corners = rounded ? DWMWCP_ROUND : DWMWCP_DONOTROUND;
+	DwmSetWindowAttribute(this->mHost, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+	COLORREF border = DWMWA_COLOR_NONE;
+	DwmSetWindowAttribute(this->mHost, DWMWA_BORDER_COLOR, &border, sizeof(border));
 }
 
 void WindowThumbnail::setRadius(qreal radius) {
