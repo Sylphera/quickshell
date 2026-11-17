@@ -45,6 +45,7 @@ std::atomic<bool> gShuttingDown = false;
 const wchar_t* const kPersonalizeKey =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const wchar_t* const kDwmKey = L"Software\\Microsoft\\Windows\\DWM";
+const wchar_t* const kDesktopKey = L"Control Panel\\Desktop";
 const wchar_t* const kContentDeliveryKey =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager";
 const wchar_t* const kLockScreenKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Lock Screen";
@@ -520,13 +521,19 @@ bool Wallpaper::setAccentColor(const QString& hex) {
 	                         | (static_cast<DWORD>(color.green()) << 8) | static_cast<DWORD>(color.blue());
 
 	DWORD current = 0;
-	auto unchanged = readDword(HKEY_CURRENT_USER, kDwmKey, L"AccentColor", current)
+	auto unchanged = readDword(HKEY_CURRENT_USER, kDesktopKey, L"AutoColorization", current)
+	              && current == 0
+	              && readDword(HKEY_CURRENT_USER, kDwmKey, L"AccentColor", current)
 	              && current == accentColor
 	              && readDword(HKEY_CURRENT_USER, kDwmKey, L"ColorizationColor", current)
 	              && current == colorizationColor
 	              && readDword(HKEY_CURRENT_USER, kDwmKey, L"ColorizationAfterglow", current)
 	              && current == colorizationColor;
 	if (unchanged) return true;
+
+	if (!writeDword(HKEY_CURRENT_USER, kDesktopKey, L"AutoColorization", 0)) {
+		qCWarning(logWallpaper) << "failed turning off the automatic accent color";
+	}
 
 	auto ok1 = writeDword(HKEY_CURRENT_USER, kDwmKey, L"AccentColor", accentColor);
 	auto ok2 = writeDword(HKEY_CURRENT_USER, kDwmKey, L"ColorizationColor", colorizationColor);
