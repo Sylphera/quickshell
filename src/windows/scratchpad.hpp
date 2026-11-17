@@ -15,10 +15,6 @@ namespace qs::windows {
 
 class TrackedWindow;
 
-namespace tiling {
-class DwindleLayout;
-}
-
 class Scratchpad: public QObject {
 	Q_OBJECT;
 
@@ -71,8 +67,6 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
-	QTimer settleTimer;
-	std::unique_ptr<tiling::DwindleLayout> layout;
 };
 
 } // namespace qs::windows

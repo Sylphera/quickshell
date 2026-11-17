@@ -53,6 +53,8 @@ constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
 constexpr int TINY_CORNER_LIMIT = 0;
 constexpr int TINY_CORNER_RADIUS = 12;
+constexpr qint32 SPECIAL_GAPS_OUT = 30;
+constexpr GUID SPECIAL_DESKTOP = {0x5ec1a100, 0x0000, 0x0000, {0x73, 0x70, 0x65, 0x63, 0x69, 0x61, 0x6c, 0x00}};
 constexpr std::size_t TINY_CORNER_SLOTS = 256;
 constexpr auto* TINY_CORNER_PROP = L"QuickshellTilingTinyRounded";
 
@@ -805,7 +807,11 @@ void TilingManager::unmanage(TrackedWindow* window) {
 TilingManager::State TilingManager::stateOf(const Managed& m) const {
 	auto* window = m.window;
 
-	if (Scratchpad::holds(window)) return State::Out;
+	if (Scratchpad::holds(window)) {
+		if (m.elevated) return State::Out;
+		if (window->minimized() || !Scratchpad::instance()->shown()) return State::Hidden;
+		return State::Tiled;
+	}
 	if (window->desktop() < 0 || window->screen() == nullptr) return State::Out;
 	if (!QGuiApplication::screens().contains(window->screen())) return State::Out;
 	if (m.elevated) return State::Out;
@@ -876,6 +882,11 @@ TrackedWindow* TilingManager::windowOf(tiling::LayoutEngine::Id id) const {
 }
 
 TilingManager::Layout* TilingManager::layoutFor(TrackedWindow* window, bool create) {
+	if (Scratchpad::holds(window)) {
+		auto* screen = screenForMonitor(Scratchpad::instance()->monitor());
+		if (screen == nullptr) screen = QGuiApplication::primaryScreen();
+		return this->layoutAt(SPECIAL_DESKTOP, screen, create);
+	}
 	auto index = window->desktop();
 	if (index < 0 || index >= this->desktops->count()) return nullptr;
 	return this->layoutAt(this->desktops->desktops().at(index).id, window->screen(), create);
@@ -893,6 +904,7 @@ TilingManager::Layout* TilingManager::layoutAt(const GUID& desktop, QScreen* scr
 	auto layout = std::make_unique<Layout>();
 	layout->desktop = desktop;
 	layout->screen = screen;
+	layout->special = IsEqualGUID(desktop, SPECIAL_DESKTOP) != 0;
 	layout->tree = tiling::LayoutEngine::create(this->layoutKind());
 	layout->tree->configure(this->options());
 	this->prepareScrolling(layout.get());
@@ -907,7 +919,7 @@ TilingManager::Layout* TilingManager::layoutAt(const GUID& desktop, QScreen* scr
 bool TilingManager::layoutAlive(const Layout* layout) const {
 	if (layout->screen == nullptr) return false;
 	if (!QGuiApplication::screens().contains(layout->screen.data())) return false;
-	return this->desktops->indexOf(layout->desktop) != -1;
+	return layout->special || this->desktops->indexOf(layout->desktop) != -1;
 }
 
 void TilingManager::markWindow(TrackedWindow* window) {
@@ -983,10 +995,6 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 	if (state == State::Out) {
 		if (m.layout == nullptr) return;
-		if (Scratchpad::holds(window)) {
-			this->takeOut(m);
-			return;
-		}
 
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);
@@ -995,16 +1003,17 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 		return;
 	}
 
+	auto special = Scratchpad::holds(window);
 	auto index = window->desktop();
-	if (index >= this->desktops->count()) return;
-	auto desktop = this->desktops->desktops().at(index).id;
+	if (!special && index >= this->desktops->count()) return;
+	auto desktop = special ? SPECIAL_DESKTOP : this->desktops->desktops().at(index).id;
 
 	Layout* want = nullptr;
 	auto* current = m.layout;
 	if (current != nullptr && this->layoutAlive(current) && IsEqualGUID(current->desktop, desktop)) {
 		want = current;
 
-		if (state == State::Tiled && !m.verifying && !m.offscreen
+		if (!special && state == State::Tiled && !m.verifying && !m.offscreen
 		    && window->screen() != current->screen)
 		{
 			this->moveToLayout(m, this->layoutFor(window, true), nullptr);
@@ -1160,7 +1169,7 @@ QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const
 	auto area = layout->tree->area();
 	auto dpr = layout->screen->devicePixelRatio();
 	auto in = toPhysical(this->mGapsIn, dpr);
-	auto out = toPhysical(this->mGapsOut, dpr);
+	auto out = toPhysical(layout->special ? SPECIAL_GAPS_OUT : this->mGapsOut, dpr);
 
 	if (layout->tree->kind() == tiling::Kind::Scrolling) {
 		return QRect(

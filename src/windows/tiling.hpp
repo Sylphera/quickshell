@@ -145,6 +145,7 @@ private:
 		QPointer<QScreen> screen;
 		std::unique_ptr<tiling::LayoutEngine> tree;
 		TrackedWindow* lastFocused = nullptr;
+		bool special = false;
 	};
 
 	enum class State : quint8 {
