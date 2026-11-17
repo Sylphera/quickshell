@@ -24,6 +24,7 @@
 #include "../../core/instanceinfo.hpp"
 #include "../../core/logcat.hpp"
 #include "../../core/paths.hpp"
+#include "../scratchpad.hpp"
 #include "../taskbar.hpp"
 #include "../tiling.hpp"
 #include "../window_decorations.hpp"
@@ -176,6 +177,7 @@ void handleCrash(const wchar_t* reason, EXCEPTION_POINTERS* ep) {
 		qs::windows::TaskbarManager::restoreForCrash();
 		qs::windows::DecorationManager::restoreForCrash();
 		qs::windows::TilingManager::restoreForCrash();
+		qs::windows::Scratchpad::restoreForCrash();
 
 		auto elapsed = currentEpochMs() - gLaunchTimeMs;
 		if (gLaunchTimeMs == 0 || elapsed >= 10000) {

@@ -17,6 +17,7 @@
 #include <qtypes.h>
 
 #include "../keyboard_hook.hpp"
+#include "../scratchpad.hpp"
 #include "../tiling.hpp"
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
@@ -347,7 +348,9 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 		this->centerWindow();
 	} else if (fn == "hl.dsp.layout") {
 		this->layoutMessage(call.scalar);
-	} else if (fn == "hl.dsp.workspace.toggle_special" || fn == "hl.dsp.window.drag") {
+	} else if (fn == "hl.dsp.workspace.toggle_special") {
+		Scratchpad::instance()->toggle();
+	} else if (fn == "hl.dsp.window.drag") {
 		this->unsupported(fn);
 	} else {
 		this->unknown(fn);
@@ -409,7 +412,9 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		this->resizeActive(args);
 	} else if (name == "centerwindow") {
 		this->centerWindow();
-	} else if (name == "togglespecialworkspace" || name == "pseudo" || name == "focusmonitor"
+	} else if (name == "togglespecialworkspace") {
+		Scratchpad::instance()->toggle();
+	} else if (name == "pseudo" || name == "focusmonitor"
 	           || name == "cyclenext" || name == "movecurrentworkspacetomonitor"
 	           || name == "swapnext" || name == "togglegroup" || name == "submap")
 	{
@@ -556,6 +561,13 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 
 void Dispatcher::moveToWorkspace(TrackedWindow* window, const QString& arg, bool follow) {
 	if (window == nullptr) return;
+
+	auto* scratchpad = Scratchpad::instance();
+	if (arg.trimmed().startsWith("special")) {
+		scratchpad->add(window, follow);
+		return;
+	}
+	if (scratchpad->contains(window)) scratchpad->remove(window);
 
 	auto create = false;
 	auto index = this->resolveWorkspace(arg, create);
