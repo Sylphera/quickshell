@@ -1,4 +1,5 @@
 #include "dispatcher.hpp"
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <string>
@@ -169,18 +170,70 @@ void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
 	window->activate();
 }
 
-void closeFocused(WindowTracker* tracker) {
-	if (auto* window = tracker->activeWindow()) {
+constexpr LONG POINTER_SLOP = 2;
+constexpr ULONGLONG CLOSE_REFOCUS_MS = 500;
+
+struct FocusMark {
+	POINT cursor {};
+	bool valid = false;
+	ULONGLONG closedAt = 0;
+};
+
+FocusMark& focusMark(WindowTracker* tracker) {
+	static FocusMark mark;       // NOLINT
+	static auto connected = false; // NOLINT
+	if (!connected && tracker != nullptr) {
+		connected = true;
+		QObject::connect(tracker, &WindowTracker::activeWindowChanged, tracker, [] {
+			if (GetTickCount64() - mark.closedAt < CLOSE_REFOCUS_MS) return;
+			mark.valid = GetCursorPos(&mark.cursor) != 0;
+		});
+	}
+	return mark;
+}
+
+bool closeShellWindow(HWND hwnd) {
+	if (hwnd == nullptr || !isOwnProcessWindow(hwnd)) return false;
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return false;
+	if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+	PostMessageW(hwnd, WM_CLOSE, 0, 0);
+	return true;
+}
+
+bool closeUnderPointer(WindowTracker* tracker, POINT cursor) {
+	auto* hit = WindowFromPoint(cursor);
+	if (hit == nullptr) return false;
+	auto* root = GetAncestor(hit, GA_ROOT);
+	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return false;
+	if (auto* window = tracker->windowFor(root)) {
 		window->close();
-		return;
+		return true;
+	}
+	return closeShellWindow(root);
+}
+
+void closeFocused(WindowTracker* tracker) {
+	auto& mark = focusMark(tracker);
+	POINT cursor {};
+	GetCursorPos(&cursor);
+	auto moved = !mark.valid || std::abs(cursor.x - mark.cursor.x) > POINTER_SLOP
+	          || std::abs(cursor.y - mark.cursor.y) > POINTER_SLOP;
+
+	auto closed = moved && closeUnderPointer(tracker, cursor);
+	if (!closed) {
+		if (auto* window = tracker->activeWindow()) {
+			window->close();
+			closed = true;
+		} else {
+			closed = closeShellWindow(GetForegroundWindow());
+		}
 	}
 
-	auto* foreground = GetForegroundWindow();
-	if (foreground == nullptr || !isOwnProcessWindow(foreground)) return;
-	auto exStyle = GetWindowLongPtrW(foreground, GWL_EXSTYLE);
-	if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return;
-	if (GetWindow(foreground, GW_OWNER) != nullptr) return;
-	PostMessageW(foreground, WM_CLOSE, 0, 0);
+	if (closed) {
+		mark.valid = false;
+		mark.closedAt = GetTickCount64();
+	}
 }
 
 } // namespace
@@ -190,6 +243,7 @@ void Dispatcher::dispatch(const QString& request) {
 	if (trimmed.isEmpty()) return;
 
 	qCDebug(logDispatch) << "dispatch" << trimmed;
+	focusMark(this->ipc->tracker());
 
 	if (trimmed.startsWith("hl.")) {
 		auto call = Dispatcher::parseLua(trimmed);
