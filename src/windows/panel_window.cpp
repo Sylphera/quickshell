@@ -244,6 +244,9 @@ HRGN toHrgn(const QRegion& region) {
 } // namespace
 
 class WinPanelStack {
+	static constexpr int UNBOUND_VERIFY_MS = 500;
+	quint64 verifyGeneration = 0;
+
 public:
 	static WinPanelStack* instance() {
 		static WinPanelStack* stack = nullptr; // NOLINT
@@ -262,17 +265,37 @@ public:
 		return stack;
 	}
 
-	void followCurrentDesktop() {
+	void followCurrentDesktop(bool verify = false) {
 		auto* desktops = VirtualDesktops::instance();
+		auto current = desktops->currentIndex();
+		auto deferred = false;
 
 		for (auto* panel: this->mPanels) {
 			if (panel->pinnedToAllDesktops || panel->isEmbedded()) continue;
 			auto* hwnd = panel->hwnd();
 			if (hwnd == nullptr) continue;
-			if (!desktops->isWindowOnCurrent(hwnd)) desktops->moveWindow(hwnd, desktops->currentIndex());
+
+			if (!verify && panel->unboundHwnd == hwnd) {
+				deferred = true;
+				continue;
+			}
+
+			auto previous = panel->stuckHwnd == hwnd ? panel->stuckDesktop : -1;
+			if (!desktops->isWindowOnCurrent(hwnd)) {
+				desktops->moveWindow(hwnd, current);
+				panel->unboundHwnd = nullptr;
+			} else if (previous != -1 && previous != current) {
+				panel->unboundHwnd = hwnd;
+			}
 			panel->stuckHwnd = hwnd;
-			panel->stuckDesktop = desktops->currentIndex();
+			panel->stuckDesktop = current;
 		}
+
+		if (!deferred) return;
+		auto generation = ++this->verifyGeneration;
+		QTimer::singleShot(UNBOUND_VERIFY_MS, VirtualDesktops::instance(), [this, generation] {
+			if (generation == this->verifyGeneration) this->followCurrentDesktop(true);
+		});
 	}
 
 	void addPanel(WinPanelWindow* panel) {
