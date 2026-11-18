@@ -45,9 +45,10 @@ private:
 	void retarget(qsizetype to);
 	void addDesktop(qsizetype desktop);
 	void run();
+	void layoutThumbs(double camera);
 	void onSettled();
 	void finish();
-	void raisePanels();
+	void placeUnderPanels();
 
 	HWND overlay = nullptr;
 	QRect monitor;
@@ -65,6 +66,7 @@ private:
 	std::thread worker;
 	std::atomic<bool> stop = false;
 	int settleRetries = 0;
+	QList<HWND> raised;
 };
 
 } // namespace qs::windows

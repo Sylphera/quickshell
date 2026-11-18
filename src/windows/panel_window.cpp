@@ -1006,8 +1006,23 @@ QList<HWND> WinPanelWindow::aboveWindowHandles() {
 
 void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }
 
-void WinPanelWindow::restackAll() {
-	for (auto* panel: WinPanelStack::instance()->panels()) panel->updateLayer();
+QList<HWND> WinPanelWindow::raiseDemoted() {
+	QList<HWND> raised;
+	for (auto* panel: WinPanelStack::instance()->panels()) {
+		if (panel->isEmbedded() || !panel->aboveWindows()) continue;
+		auto* hwnd = panel->hwnd();
+		if (hwnd == nullptr || !IsWindowVisible(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		panel->updateLayer();
+		raised.append(hwnd);
+	}
+	return raised;
+}
+
+void WinPanelWindow::restack(const QList<HWND>& hwnds) {
+	for (auto* panel: WinPanelStack::instance()->panels()) {
+		if (hwnds.contains(panel->hwnd())) panel->updateLayer();
+	}
 }
 
 bool WinPanelWindow::reservesSpace() const {

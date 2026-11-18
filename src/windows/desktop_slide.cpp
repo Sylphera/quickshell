@@ -22,6 +22,7 @@ constexpr double SLIDE_MS = 700;
 constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
+constexpr int HOLD_MS = 150;
 
 // end-4's menu_decel curve for the workspaces animation.
 constexpr double CURVE_X1 = 0.1;
@@ -49,7 +50,6 @@ LRESULT CALLBACK overlayProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
 	switch (msg) {
 	case WM_NCHITTEST: return HTTRANSPARENT;
 	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-	case WM_ERASEBKGND: return 1;
 	case WM_PAINT: {
 		PAINTSTRUCT paint {};
 		auto* dc = BeginPaint(hwnd, &paint);
@@ -69,11 +69,12 @@ HWND createOverlay(const QRect& rect) {
 		cls.cbSize = sizeof(cls);
 		cls.lpfnWndProc = &overlayProc;
 		cls.hInstance = instance;
+		cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
 		cls.lpszClassName = OVERLAY_CLASS;
 		registered = RegisterClassExW(&cls) != 0;
 	}
 	return CreateWindowExW(
-	    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+	    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED,
 	    OVERLAY_CLASS,
 	    L"",
 	    WS_POPUP,
@@ -108,12 +109,6 @@ QList<HWND> topLevelWindows() {
 	return list;
 }
 
-bool desktopWindow(HWND hwnd) {
-	wchar_t name[16] {};
-	GetClassNameW(hwnd, name, 16);
-	return wcscmp(name, L"Progman") == 0 || wcscmp(name, L"WorkerW") == 0;
-}
-
 bool ownWindow(HWND hwnd) {
 	DWORD pid = 0;
 	GetWindowThreadProcessId(hwnd, &pid);
@@ -129,6 +124,74 @@ QRect sourceOf(HWND hwnd, const QRect& rect) {
 		return {box.left, box.top, box.right - box.left, box.bottom - box.top};
 	}
 	return {0, 0, rect.width(), rect.height()};
+}
+
+// Wait for the next compositor frame, the way wiri paces its animations
+// (MIT, jolionlands/wiri: src/animation/clock.rs): Windows 11's compositor
+// clock when dcomp.dll exports it, DwmFlush otherwise.
+void waitForFrame() {
+	using WaitFn = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
+	static auto wait = []() -> WaitFn {
+		auto* dcomp = LoadLibraryW(L"dcomp.dll");
+		if (dcomp == nullptr) return nullptr;
+		return reinterpret_cast<WaitFn>(GetProcAddress(dcomp, "DCompositionWaitForCompositorClock"));
+	}();
+	if (wait != nullptr && wait(0, nullptr, 100) != WAIT_FAILED) return;
+	DwmFlush();
+}
+
+double refreshPeriodMs() {
+	DWM_TIMING_INFO timing {.cbSize = sizeof(DWM_TIMING_INFO)};
+	LARGE_INTEGER frequency {};
+	if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing)) && timing.qpcRefreshPeriod > 0
+	    && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+	{
+		return static_cast<double>(timing.qpcRefreshPeriod) * 1000.0 / static_cast<double>(frequency.QuadPart);
+	}
+	return 1000.0 / 60.0;
+}
+
+// The desktop window repaints its wallpaper when the desktop changes and shows
+// white for a frame, so the backdrop is a still copy put in place on show.
+void paintBackdrop(HWND overlay, const QRect& monitor) {
+	auto* screen = GetDC(nullptr);
+	auto* memory = CreateCompatibleDC(screen);
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = monitor.width();
+	info.bmiHeader.biHeight = -monitor.height();
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	void* bits = nullptr;
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+	auto* previous = SelectObject(memory, bitmap);
+
+	RECT fill {0, 0, monitor.width(), monitor.height()};
+	FillRect(memory, &fill, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+	if (auto* desktop = GetShellWindow()) {
+		RECT r {};
+		GetWindowRect(desktop, &r);
+		auto* full = CreateCompatibleDC(screen);
+		auto* fullBitmap = CreateCompatibleBitmap(screen, r.right - r.left, r.bottom - r.top);
+		auto* fullPrevious = SelectObject(full, fullBitmap);
+		if (PrintWindow(desktop, full, PW_RENDERFULLCONTENT)) {
+			BitBlt(memory, 0, 0, monitor.width(), monitor.height(), full, monitor.x() - r.left, monitor.y() - r.top, SRCCOPY);
+		}
+		SelectObject(full, fullPrevious);
+		DeleteObject(fullBitmap);
+		DeleteDC(full);
+	}
+
+	POINT origin {monitor.x(), monitor.y()};
+	SIZE size {monitor.width(), monitor.height()};
+	POINT source {0, 0};
+	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, 0};
+	UpdateLayeredWindow(overlay, screen, &origin, &size, memory, &source, 0, &blend, ULW_OPAQUE);
+
+	SelectObject(memory, previous);
+	DeleteObject(bitmap);
+	DeleteDC(memory);
+	ReleaseDC(nullptr, screen);
 }
 
 RECT toRect(const QRect& rect) { return {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1}; }
@@ -171,14 +234,15 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 
 	this->overlay = createOverlay(this->monitor);
 	if (this->overlay == nullptr) return false;
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(this->overlay, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
 	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
 	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
 
 	auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
 		auto* hwnd = windows[i];
-		if (hwnd == this->overlay || topmost(hwnd)) continue;
-		if (!desktopWindow(hwnd) && !ownWindow(hwnd)) continue;
+		if (hwnd == this->overlay || topmost(hwnd) || !ownWindow(hwnd)) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.contains(this->monitor)) continue;
 
@@ -203,9 +267,15 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	this->retarget(to);
 
 	WinPanelWindow::setCoverActive(true);
+	this->raised = WinPanelWindow::raiseDemoted();
+	{
+		// The first frame on screen must already match what was there.
+		auto lock = std::lock_guard(this->mutex);
+		this->layoutThumbs(0);
+	}
+	paintBackdrop(this->overlay, this->monitor);
+	this->placeUnderPanels();
 	ShowWindow(this->overlay, SW_SHOWNOACTIVATE);
-	SetWindowPos(this->overlay, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-	this->raisePanels();
 	DwmFlush();
 	DwmFlush();
 
@@ -226,8 +296,22 @@ void DesktopSlide::retarget(qsizetype to) {
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
 		if (!this->bases.contains(to)) {
-			auto base = this->bases.value(this->target);
-			this->bases.insert(to, base + (to > this->target ? this->travel : -this->travel));
+			auto base = this->bases.value(this->target) + (to > this->target ? this->travel : -this->travel);
+			// Like Hyprland, a desktop that held this slot leaves the strip.
+			for (auto iter = this->bases.begin(); iter != this->bases.end();) {
+				if (iter.value() != base) {
+					++iter;
+					continue;
+				}
+				auto gone = iter.key();
+				for (auto i = this->thumbs.size() - 1; i >= 0; i--) {
+					if (this->thumbs[i].desktop != gone) continue;
+					DwmUnregisterThumbnail(this->thumbs[i].thumbnail);
+					this->thumbs.removeAt(i);
+				}
+				iter = this->bases.erase(iter);
+			}
+			this->bases.insert(to, base);
 		}
 
 		this->cameraFrom = camera;
@@ -236,6 +320,7 @@ void DesktopSlide::retarget(qsizetype to) {
 		this->target = to;
 		this->settledSent = false;
 	}
+	this->settleRetries = 0;
 	this->addDesktop(to);
 }
 
@@ -279,28 +364,41 @@ void DesktopSlide::addDesktop(qsizetype desktop) {
 }
 
 void DesktopSlide::run() {
+	auto last = std::chrono::steady_clock::now();
+	auto period = refreshPeriodMs();
 	while (!this->stop.load()) {
-		DwmFlush();
+		// The clock can wake early; never step faster than the display refreshes.
+		do {
+			waitForFrame();
+		} while (!this->stop.load()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+		                < period * 0.75);
+		last = std::chrono::steady_clock::now();
 		auto lock = std::lock_guard(this->mutex);
 		auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - this->startedAt).count();
 		auto progress = std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
-		for (const auto& thumb: this->thumbs) {
-			if (thumb.desktop < 0) continue;
-			auto offset = static_cast<int>(std::lround(this->bases.value(thumb.desktop) - camera));
-			auto rect = thumb.rect.translated(offset, 0);
-			DWM_THUMBNAIL_PROPERTIES props {};
-			props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE;
-			props.fVisible = rect.intersects(QRect(QPoint(), this->monitor.size())) ? TRUE : FALSE;
-			props.rcDestination = toRect(rect);
-			DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
-		}
+		this->layoutThumbs(camera);
 
 		if (progress >= 1.0 && !this->settledSent) {
 			this->settledSent = true;
 			QMetaObject::invokeMethod(this, &DesktopSlide::onSettled, Qt::QueuedConnection);
 		}
+	}
+}
+
+// Called with the mutex held.
+void DesktopSlide::layoutThumbs(double camera) {
+	for (const auto& thumb: this->thumbs) {
+		if (thumb.desktop < 0) continue;
+		auto offset = static_cast<int>(std::lround(this->bases.value(thumb.desktop) - camera));
+		auto rect = thumb.rect.translated(offset, 0);
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE;
+		props.fVisible = rect.intersects(QRect(QPoint(), this->monitor.size())) ? TRUE : FALSE;
+		props.rcDestination = toRect(rect);
+		DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
 	}
 }
 
@@ -317,18 +415,34 @@ void DesktopSlide::onSettled() {
 		QTimer::singleShot(SETTLE_RETRY_MS, this, &DesktopSlide::onSettled);
 		return;
 	}
-	this->finish();
+
+	// Keystrokes a moment apart keep the same cover instead of rebuilding it.
+	QTimer::singleShot(HOLD_MS, this, [this, target]() {
+		{
+			auto lock = std::lock_guard(this->mutex);
+			if (!this->settledSent || this->target != target) return;
+		}
+		this->finish();
+	});
 }
 
-void DesktopSlide::raisePanels() {
-	auto above = WinPanelWindow::aboveWindowHandles();
-	auto windows = topLevelWindows();
-	for (auto i = windows.size() - 1; i >= 0; i--) {
-		auto* hwnd = windows[i];
-		if (hwnd == this->overlay || !ownWindow(hwnd)) continue;
-		if (!topmost(hwnd) && !above.contains(hwnd)) continue;
-		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+// Panels are left alone: repainting their full-screen transparent windows to
+// restack them can flash a frame. The cover slides in just under the lowest.
+void DesktopSlide::placeUnderPanels() {
+	HWND lowest = nullptr;
+	for (auto* hwnd: topLevelWindows()) {
+		if (hwnd == this->overlay || !ownWindow(hwnd) || !topmost(hwnd)) continue;
+		lowest = hwnd;
 	}
+	SetWindowPos(
+	    this->overlay,
+	    lowest != nullptr ? lowest : HWND_TOPMOST,
+	    0,
+	    0,
+	    0,
+	    0,
+	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+	);
 }
 
 void DesktopSlide::finish() {
@@ -343,7 +457,8 @@ void DesktopSlide::finish() {
 	DestroyWindow(this->overlay);
 	this->overlay = nullptr;
 	WinPanelWindow::setCoverActive(false);
-	WinPanelWindow::restackAll();
+	WinPanelWindow::restack(this->raised);
+	this->raised.clear();
 }
 
 } // namespace qs::windows

@@ -92,7 +92,8 @@ public:
 	// Visible panels that sit above app windows, and a way to put every panel
 	// back in its layer after something was stacked over them for a while.
 	static QList<HWND> aboveWindowHandles();
-	static void restackAll();
+	static QList<HWND> raiseDemoted();
+	static void restack(const QList<HWND>& hwnds);
 	static void setCoverActive(bool active);
 
 	explicit WinPanelWindow(QObject* parent = nullptr);
