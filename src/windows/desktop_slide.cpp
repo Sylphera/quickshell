@@ -292,7 +292,14 @@ bool heavyWindow(const TrackedWindow* window) {
 	}
 	auto path = window->exePath();
 	auto name = path.mid(path.lastIndexOf(QLatin1Char('\\')) + 1).toLower();
-	return names.contains(name);
+	if (names.contains(name)) return true;
+
+	// Every Chromium-based app (Electron: Discord, Spotify, VS Code, Slack...)
+	// stops painting while its desktop is hidden, just like the browsers, so
+	// its live thumbnail is empty on the way in. They share a window class.
+	wchar_t cls[64] {};
+	GetClassNameW(window->hwnd(), cls, 64);
+	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
 }
 
 HWND createSnapshotHost(int x, int width, int height) {
