@@ -1,4 +1,5 @@
 #include "window_frame.hpp"
+#include "../window_motion.hpp"
 
 #include <algorithm>
 
@@ -6,6 +7,10 @@
 #include <qobject.h>
 #include <qt_windows.h>
 #include <qvariant.h>
+#include <memory>
+
+#include <qquickwindow.h>
+#include <qtimer.h>
 #include <qwindow.h>
 #include <qpa/qplatformwindow_p.h>
 
@@ -114,4 +119,32 @@ bool WindowFrame::ensureVisible(QObject* object) {
     return IsWindowVisible(hwnd) != FALSE;
 }
 
+void WindowFrame::popIn(QObject* object) {
+	auto* window = qobject_cast<QWindow*>(object);
+	if (window == nullptr) return;
+	auto* hwnd = reinterpret_cast<HWND>(window->winId()); // NOLINT(performance-no-int-to-ptr)
+	WindowPop::popIn(hwnd);
+
+	// The window shows blank until its first frame; pop it in once it painted.
+	auto started = std::make_shared<bool>(false);
+	auto begin = [hwnd, started]() {
+		if (*started) return;
+		*started = true;
+		WindowPop::start(hwnd, true);
+	};
+	if (auto* quick = qobject_cast<QQuickWindow*>(window)) {
+		auto connection = std::make_shared<QMetaObject::Connection>();
+		*connection = QObject::connect(quick, &QQuickWindow::frameSwapped, quick, [begin, connection]() {
+			QObject::disconnect(*connection);
+			QTimer::singleShot(0, begin);
+		}, Qt::QueuedConnection);
+	}
+	QTimer::singleShot(600, window, begin);
+}
+
+int WindowFrame::popOut(QObject* object) {
+	auto* window = qobject_cast<QWindow*>(object);
+	if (window == nullptr || !window->isVisible()) return 0;
+	return WindowPop::popOut(reinterpret_cast<HWND>(window->winId())); // NOLINT(performance-no-int-to-ptr)
+}
 } // namespace qs::windows::sys

@@ -339,4 +339,140 @@ void WindowMotion::closeCover() {
 	}
 }
 
+namespace {
+
+// end-4: windowsIn speed 3 (300 ms), windowsOut speed 2 (200 ms), both
+// emphasizedDecel; popin 80% in, 90% out; fadeIn/fadeOut alongside.
+constexpr double POP_IN_MS = 300;
+constexpr double POP_OUT_MS = 200;
+constexpr double POP_IN_SCALE = 0.8;
+constexpr double POP_OUT_SCALE = 0.9;
+constexpr auto* POP_CLASS = L"QuickshellWindowPop";
+
+void setCloaked(HWND hwnd, bool cloaked) {
+	BOOL value = cloaked ? TRUE : FALSE;
+	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &value, sizeof(value));
+}
+
+} // namespace
+
+void WindowPop::popIn(HWND hwnd) {
+	if (hwnd == nullptr) return;
+	setCloaked(hwnd, true);
+}
+
+int WindowPop::popOut(HWND hwnd) {
+	if (hwnd == nullptr) return 0;
+	WindowPop::start(hwnd, false);
+	return static_cast<int>(POP_OUT_MS);
+}
+
+void WindowPop::start(HWND hwnd, bool in) {
+	RECT raw {};
+	RECT bounds {};
+	if (!IsWindow(hwnd) || !GetWindowRect(hwnd, &raw)
+	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	{
+		setCloaked(hwnd, false);
+		return;
+	}
+	auto frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+
+	static auto registered = false; // NOLINT
+	auto* instance = GetModuleHandleW(nullptr);
+	if (!registered) {
+		WNDCLASSEXW cls {};
+		cls.cbSize = sizeof(cls);
+		cls.lpfnWndProc = &DefWindowProcW;
+		cls.hInstance = instance;
+		cls.hbrBackground = CreateSolidBrush(COVER_KEY);
+		cls.lpszClassName = POP_CLASS;
+		registered = RegisterClassExW(&cls) != 0;
+	}
+	auto* cover = CreateWindowExW(
+	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+	    POP_CLASS,
+	    L"",
+	    WS_POPUP,
+	    frame.x(),
+	    frame.y(),
+	    frame.width(),
+	    frame.height(),
+	    nullptr,
+	    nullptr,
+	    instance,
+	    nullptr
+	);
+	HTHUMBNAIL thumbnail = nullptr;
+	if (cover == nullptr || FAILED(DwmRegisterThumbnail(cover, hwnd, &thumbnail))) {
+		if (cover != nullptr) DestroyWindow(cover);
+		setCloaked(hwnd, !in);
+		return;
+	}
+	SetLayeredWindowAttributes(cover, COVER_KEY, 255, LWA_COLORKEY);
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(cover, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+
+	RECT source {bounds.left - raw.left, bounds.top - raw.top, bounds.right - raw.left, bounds.bottom - raw.top};
+	auto apply = [thumbnail, source, frame](double progress, bool in) {
+		auto eased = ease(progress);
+		auto scale = in ? POP_IN_SCALE + (1.0 - POP_IN_SCALE) * eased : 1.0 - (1.0 - POP_OUT_SCALE) * eased;
+		auto alpha = in ? eased : 1.0 - eased;
+		auto width = frame.width() * scale;
+		auto height = frame.height() * scale;
+		auto left = (frame.width() - width) / 2;
+		auto top = (frame.height() - height) / 2;
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
+		              | DWM_TNP_SOURCECLIENTAREAONLY;
+		props.rcSource = source;
+		props.rcDestination = {
+		    static_cast<LONG>(std::lround(left)),
+		    static_cast<LONG>(std::lround(top)),
+		    static_cast<LONG>(std::lround(left + width)),
+		    static_cast<LONG>(std::lround(top + height))
+		};
+		props.opacity = static_cast<BYTE>(std::clamp(std::lround(alpha * 255), 0L, 255L));
+		props.fVisible = TRUE;
+		props.fSourceClientAreaOnly = FALSE;
+		DwmUpdateThumbnailProperties(thumbnail, &props);
+	};
+
+	apply(0, in);
+	auto* above = GetWindow(hwnd, GW_HWNDPREV);
+	SetWindowPos(cover, above != nullptr ? above : HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	ShowWindow(cover, SW_SHOWNOACTIVATE);
+	// The thumbnail takes the window's place in the same frame it hides.
+	setCloaked(hwnd, true);
+	DwmFlush();
+
+	// A short animation on its own thread, on the compositor clock; the cover
+	// and the cloak are released back on the thread that owns them.
+	std::thread([hwnd, cover, thumbnail, apply, in]() {
+		auto duration = in ? POP_IN_MS : POP_OUT_MS;
+		auto start = std::chrono::steady_clock::now();
+		auto period = compositorRefreshMs();
+		auto last = start;
+		while (true) {
+			do {
+				waitForCompositorFrame();
+			} while (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+			         < period * 0.75);
+			last = std::chrono::steady_clock::now();
+			auto progress = std::clamp(std::chrono::duration<double, std::milli>(last - start).count() / duration, 0.0, 1.0);
+			apply(progress, in);
+			if (progress >= 1.0) break;
+		}
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [hwnd, cover, thumbnail, in]() {
+			    if (in && IsWindow(hwnd)) setCloaked(hwnd, false);
+			    DwmUnregisterThumbnail(thumbnail);
+			    DestroyWindow(cover);
+		    },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
+
 } // namespace qs::windows
