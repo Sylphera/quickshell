@@ -89,6 +89,7 @@ public:
 	static void restoreForCrash();
 
 	void relayout();
+	void expectBarSpace(const QString& screenName, bool top, int delta);
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
 	[[nodiscard]] TrackedWindow* focusedWindow() const;
@@ -350,6 +351,10 @@ public:
 	explicit Tiling(QObject* parent = nullptr);
 
 	Q_INVOKABLE void relayout();
+	// The bar on `screenName` is about to give back (`delta` < 0) or take
+	// (`delta` > 0) that many logical pixels at its edge: windows start sliding
+	// now, before Windows changes the work area and apps react to it.
+	Q_INVOKABLE void expectBarSpace(const QString& screenName, bool top, int delta);
 
 	[[nodiscard]] bool enabled() const;
 	void setEnabled(bool enabled);

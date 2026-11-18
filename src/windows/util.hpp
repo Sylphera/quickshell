@@ -24,6 +24,10 @@ void setFocusedScreen(QScreen* screen);
 void prioritizeInputThread(int priority);
 void optOutOfProcessPowerThrottling();
 [[nodiscard]] MonitorRects monitorRects(HMONITOR monitor);
+// The shell is about to change a monitor's work area (the bar toggling): until
+// Windows reports it, or for `ms`, monitorRects answers with it already, so
+// windows slide before apps react to the change themselves.
+void expectWorkArea(HMONITOR monitor, const QRect& work, int ms);
 
 class ScreenMapper {
 public:

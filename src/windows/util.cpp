@@ -1,3 +1,5 @@
+#include <mutex>
+#include <unordered_map>
 #include "util.hpp"
 
 #include <atomic>
@@ -42,6 +44,20 @@ QPointer<QScreen> gFocusedScreen; // NOLINT
 QScreen* focusedScreen() { return gFocusedScreen.data(); }
 void setFocusedScreen(QScreen* screen) { gFocusedScreen = screen; }
 
+namespace {
+struct ExpectedWork {
+	QRect work;
+	qint64 until = 0;
+};
+std::mutex gExpectedMutex;                              // NOLINT
+std::unordered_map<HMONITOR, ExpectedWork> gExpectedWork; // NOLINT
+} // namespace
+
+void expectWorkArea(HMONITOR monitor, const QRect& work, int ms) {
+	auto lock = std::lock_guard(gExpectedMutex);
+	gExpectedWork[monitor] = {.work = work, .until = static_cast<qint64>(GetTickCount64()) + ms};
+}
+
 MonitorRects monitorRects(HMONITOR monitor) {
 	MonitorRects rects;
 	if (monitor == nullptr) return rects;
@@ -53,6 +69,16 @@ MonitorRects monitorRects(HMONITOR monitor) {
 	rects.monitor = toQRect(info.rcMonitor);
 	rects.work = toQRect(info.rcWork);
 	rects.valid = true;
+
+	auto lock = std::lock_guard(gExpectedMutex);
+	auto found = gExpectedWork.find(monitor);
+	if (found != gExpectedWork.end()) {
+		if (rects.work == found->second.work || static_cast<qint64>(GetTickCount64()) > found->second.until) {
+			gExpectedWork.erase(found);
+		} else {
+			rects.work = found->second.work;
+		}
+	}
 	return rects;
 }
 

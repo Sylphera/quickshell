@@ -47,6 +47,8 @@ private:
 	struct Entry {
 		HWND hwnd = nullptr;
 		HTHUMBNAIL thumbnail = nullptr;
+		// A still of the window, for apps that stop painting off screen.
+		HWND snapshot = nullptr;
 		QRect from;
 		QRect to;
 		QRect current;
@@ -65,10 +67,13 @@ private:
 	void onFrameDone();
 	void layout(Entry& entry, double progress);
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
+	static void release(const Entry& entry);
 
 	HWND cover = nullptr;
 	QRect coverRect;
 	QList<Entry> entries;
+	// Stills that stay over their landed window until it has painted again.
+	QList<Entry> lingering;
 	mutable std::mutex mutex;
 	std::thread worker;
 	std::atomic<bool> stop = false;

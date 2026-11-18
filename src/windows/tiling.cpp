@@ -436,11 +436,14 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	auto* motion = WindowMotion::instance();
 	auto found = this->moving.find(m.window);
 	if (found != this->moving.end()) {
+		// It keeps waiting where it is, at the size it had: only the thumbnail
+		// heads somewhere else.
+		auto parked = m.target.isNull() ? parkedFrame(tile) : m.target;
 		if (*found != tile) {
 			*found = tile;
-			motion->retarget(m.window->hwnd(), tile, parkedFrame(tile));
+			motion->retarget(m.window->hwnd(), tile, parked);
 		}
-		this->place(m, parkedFrame(tile));
+		this->place(m, parked);
 		return;
 	}
 	// end-4's windowsIn: a window that just opened pops in at its tile.
@@ -454,10 +457,15 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	}
 	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
+		// As in Hyprland, the window keeps its size while it travels and its
+		// image stretches to the new tile; it takes the new size on landing,
+		// on screen. Resized off screen, apps like Chromium relayout without
+		// painting and the thumbnail goes blank.
 		auto from = this->managedFrame(m);
-		if (motion->begin(m.window->hwnd(), from, tile, parkedFrame(tile))) {
+		auto parked = QRect(parkedFrame(tile).topLeft(), from.size());
+		if (motion->begin(m.window->hwnd(), from, tile, parked)) {
 			this->moving.insert(m.window, tile);
-			this->place(m, parkedFrame(tile));
+			this->place(m, parked);
 			return;
 		}
 	}
@@ -764,13 +772,34 @@ void TilingManager::rebuildLayouts() {
 void TilingManager::relayout() {
 	if (!this->mEnabled) return;
 
+	// Every window is sent to its tile again, but keeps where it was: a window
+	// whose tile changed (the bar toggled) slides there (windowsMove).
 	for (auto& [window, m]: this->managed) {
-		m.target = QRect();
 		m.accepted = QRect();
 		m.corrections = 0;
 	}
 
 	this->markAll();
+}
+
+void TilingManager::expectBarSpace(const QString& screenName, bool top, int delta) {
+	if (!this->mEnabled || delta == 0) return;
+	QScreen* screen = nullptr;
+	for (auto* candidate: QGuiApplication::screens()) {
+		if (candidate->name() == screenName) screen = candidate;
+	}
+	auto* monitor = monitorForScreen(screen);
+	auto rects = monitorRects(monitor);
+	if (!rects.valid) return;
+
+	auto physical = static_cast<int>(std::lround(delta * screen->devicePixelRatio()));
+	auto work = rects.work;
+	if (top) work.setTop(std::clamp(work.top() + physical, rects.monitor.top(), work.bottom()));
+	else work.setBottom(std::clamp(work.bottom() - physical, work.top(), rects.monitor.bottom()));
+	expectWorkArea(monitor, work, 1500);
+
+	this->relayout();
+	this->sync();
 }
 
 void TilingManager::markAll() {
@@ -2845,6 +2874,9 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 }
 
 void Tiling::relayout() { TilingManager::instance()->relayout(); }
+void Tiling::expectBarSpace(const QString& screenName, bool top, int delta) {
+	TilingManager::instance()->expectBarSpace(screenName, top, delta);
+}
 
 bool Tiling::enabled() const { return TilingManager::instance()->enabled(); }
 void Tiling::setEnabled(bool enabled) { TilingManager::instance()->setEnabled(enabled); }
