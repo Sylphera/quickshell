@@ -12,6 +12,7 @@
 #include <qrect.h>
 #include <qtypes.h>
 
+#include "desktop_slide.hpp"
 #include "tiling.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
@@ -34,7 +35,10 @@ constexpr ULONGLONG FOCUS_GRACE_MS = 400;
 // end-4's specialWorkspaceIn and specialWorkspaceOut: slidevert from below.
 constexpr double SLIDE_IN_MS = 280;
 constexpr double SLIDE_OUT_MS = 120;
-constexpr int SLIDE_FRAME_MS = 4;
+constexpr int LANDING_TRIES = 20;
+constexpr int LANDING_STEP_MS = 8;
+constexpr auto* COVER_CLASS = L"QuickshellScratchpadCover";
+constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
@@ -176,7 +180,7 @@ bool Scratchpad::holds(const TrackedWindow* window) {
 	return !SCRATCHPAD.isNull() && SCRATCHPAD->contains(window);
 }
 
-Scratchpad::~Scratchpad() = default;
+Scratchpad::~Scratchpad() { this->closeCover(); }
 
 Scratchpad::Scratchpad(QObject* parent)
     : QObject(parent) {
@@ -184,10 +188,6 @@ Scratchpad::Scratchpad(QObject* parent)
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
 	}
-
-	this->slideTimer.setInterval(SLIDE_FRAME_MS);
-	this->slideTimer.setTimerType(Qt::PreciseTimer);
-	QObject::connect(&this->slideTimer, &QTimer::timeout, this, &Scratchpad::stepSlide);
 
 	this->dimTimer.setInterval(DIM_FRAME_MS);
 	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
@@ -276,9 +276,10 @@ void Scratchpad::setShown(bool shown) {
 		this->shownAt = GetTickCount64();
 		this->mShown = true;
 		this->showDim();
+		this->slideOffset = this->slideDistance();
+		this->moveReal(this->slideOffset);
 		this->relayout();
 		if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
-		this->slideOffset = this->slideDistance();
 		this->slide(true);
 		emit this->shownChanged();
 	} else {
@@ -297,44 +298,250 @@ int Scratchpad::slideDistance() const {
 	return rects.valid ? rects.monitor.height() : 0;
 }
 
+// Moving the real windows every frame stutters: each move goes through the
+// app and lands whenever it gets to it. Like the desktop slide, the motion is
+// live DWM thumbnails on a click-through cover, stepped on the compositor's
+// clock off the GUI thread. The real windows wait below the screen and move
+// once, under their thumbnails, when the slide in ends.
+void Scratchpad::moveReal(int offset) {
+	this->realOffset = offset;
+	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(offset);
+}
+
 void Scratchpad::slide(bool in) {
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return;
-	this->slideIn = in;
-	this->slideFrom = this->slideOffset;
-	this->slideTo = in ? 0 : this->slideDistance();
-	this->slideStart = std::chrono::steady_clock::now();
-	tiling->setSpecialOffset(this->slideOffset);
-	this->slideTimer.start();
+	this->slideGeneration++;
+
+	if (this->cover == nullptr) {
+		// Showing windows go below the screen first; on hide the cover must be
+		// up before they leave.
+		if (in) this->moveReal(this->slideDistance());
+		this->openCover();
+	}
+	if (this->realOffset != this->slideDistance()) this->moveReal(this->slideDistance());
+
+	{
+		auto lock = std::lock_guard(this->slideMutex);
+		this->slideIn = in;
+		this->slideFrom = this->slideOffset;
+		this->slideTo = in ? 0 : this->slideDistance();
+		this->slideStart = std::chrono::steady_clock::now();
+		this->slideDoneSent = false;
+	}
+	if (!this->slideWorker.joinable()) {
+		this->slideStop.store(false);
+		this->slideWorker = std::thread(&Scratchpad::runSlide, this);
+	}
 }
 
-void Scratchpad::stepSlide() {
+void Scratchpad::openCover() {
+	auto rects = monitorRects(this->mMonitor);
+	if (!rects.valid) return;
 	auto* tiling = TilingManager::active();
-	if (tiling == nullptr) {
-		this->slideTimer.stop();
+	auto frames = tiling != nullptr ? tiling->specialFrames() : QHash<HWND, QRect>();
+
+	static auto registered = false; // NOLINT
+	auto* instance = GetModuleHandleW(nullptr);
+	if (!registered) {
+		WNDCLASSEXW cls {};
+		cls.cbSize = sizeof(cls);
+		cls.lpfnWndProc = &DefWindowProcW;
+		cls.hInstance = instance;
+		cls.hbrBackground = CreateSolidBrush(COVER_KEY);
+		cls.lpszClassName = COVER_CLASS;
+		registered = RegisterClassExW(&cls) != 0;
+	}
+	const auto& monitor = rects.monitor;
+	this->cover = CreateWindowExW(
+	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+	    COVER_CLASS,
+	    L"",
+	    WS_POPUP,
+	    monitor.x(),
+	    monitor.y(),
+	    monitor.width(),
+	    monitor.height(),
+	    nullptr,
+	    nullptr,
+	    instance,
+	    nullptr
+	);
+	if (this->cover == nullptr) return;
+	this->coverOrigin = monitor.topLeft();
+	SetLayeredWindowAttributes(this->cover, COVER_KEY, 255, LWA_COLORKEY);
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(this->cover, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+
+	// Thumbnails stack in the order they are registered: bottom first.
+	QList<HWND> stack;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		for (const auto& entry: this->entries) {
+			if (entry.hwnd == hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd)) stack.prepend(hwnd);
+		}
+	}
+	QList<CoverThumb> thumbs;
+	for (auto* hwnd: stack) {
+		QRect frame;
+		if (frames.contains(hwnd)) {
+			frame = frames.value(hwnd);
+		} else {
+			RECT bounds {};
+			if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
+			frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
+			            .translated(0, -this->realOffset);
+		}
+		HTHUMBNAIL thumbnail = nullptr;
+		if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
+		thumbs.append({hwnd, thumbnail, frame});
+	}
+	{
+		auto lock = std::lock_guard(this->slideMutex);
+		this->coverThumbs = thumbs;
+		this->layoutCover(this->slideOffset);
+	}
+	this->placeCover();
+	ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+	DwmFlush();
+}
+
+// Right above the topmost special window, so the shell's panels stay on top.
+void Scratchpad::placeCover() {
+	if (this->cover == nullptr) return;
+	HWND top = nullptr;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && top == nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		for (const auto& entry: this->entries) {
+			if (entry.hwnd == hwnd) top = hwnd;
+		}
+	}
+	auto* above = top != nullptr ? GetWindow(top, GW_HWNDPREV) : nullptr;
+	if (above == this->cover) return;
+	SetWindowPos(
+	    this->cover,
+	    above != nullptr ? above : HWND_TOPMOST,
+	    0,
+	    0,
+	    0,
+	    0,
+	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+	);
+}
+
+// Called with slideMutex held. The source follows the window's own frame, so
+// a window still settling into its tile shows as it is.
+void Scratchpad::layoutCover(double offset) {
+	auto shift = static_cast<int>(std::lround(offset));
+	for (const auto& thumb: this->coverThumbs) {
+		RECT window {};
+		RECT bounds {};
+		if (!GetWindowRect(thumb.hwnd, &window)
+		    || FAILED(DwmGetWindowAttribute(thumb.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		{
+			continue;
+		}
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
+		              | DWM_TNP_SOURCECLIENTAREAONLY;
+		props.rcSource = {
+		    bounds.left - window.left,
+		    bounds.top - window.top,
+		    bounds.right - window.left,
+		    bounds.bottom - window.top
+		};
+		auto dest = thumb.frame.translated(-this->coverOrigin).translated(0, shift);
+		props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+		props.opacity = 255;
+		props.fVisible = TRUE;
+		props.fSourceClientAreaOnly = FALSE;
+		DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
+	}
+}
+
+void Scratchpad::runSlide() {
+	auto last = std::chrono::steady_clock::now();
+	auto period = compositorRefreshMs();
+	while (!this->slideStop.load()) {
+		do {
+			waitForCompositorFrame();
+		} while (!this->slideStop.load()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+		                < period * 0.75);
+		last = std::chrono::steady_clock::now();
+
+		auto lock = std::lock_guard(this->slideMutex);
+		auto elapsed = std::chrono::duration<double, std::milli>(last - this->slideStart).count();
+		auto progress = std::clamp(elapsed / (this->slideIn ? SLIDE_IN_MS : SLIDE_OUT_MS), 0.0, 1.0);
+		auto eased = this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
+		this->slideOffset = static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
+		this->layoutCover(this->slideOffset);
+
+		if (progress >= 1.0 && !this->slideDoneSent) {
+			this->slideDoneSent = true;
+			QMetaObject::invokeMethod(this, &Scratchpad::onSlideDone, Qt::QueuedConnection);
+		}
+	}
+}
+
+void Scratchpad::onSlideDone() {
+	bool in = false;
+	{
+		auto lock = std::lock_guard(this->slideMutex);
+		if (!this->slideDoneSent) return;
+		in = this->slideIn;
+	}
+	if (!in) {
+		this->closeCover();
 		if (this->hiding) this->finishHide();
 		return;
 	}
+	// The windows come up under their thumbnails; the cover leaves once they
+	// are there, so nothing jumps.
+	this->moveReal(0);
+	this->waitForLanding(this->slideGeneration, 0);
+}
 
-	auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - this->slideStart).count();
-	auto progress = std::clamp(elapsed / (this->slideIn ? SLIDE_IN_MS : SLIDE_OUT_MS), 0.0, 1.0);
-	auto eased = this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
-	this->slideOffset = static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
-	tiling->setSpecialOffset(this->slideOffset);
+void Scratchpad::waitForLanding(int generation, int tries) {
+	if (generation != this->slideGeneration || this->cover == nullptr) return;
+	auto landed = true;
+	{
+		auto lock = std::lock_guard(this->slideMutex);
+		for (const auto& thumb: this->coverThumbs) {
+			RECT bounds {};
+			if (FAILED(DwmGetWindowAttribute(thumb.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
+			if (bounds.top != thumb.frame.top() || bounds.left != thumb.frame.left()) landed = false;
+		}
+	}
+	if (!landed && tries < LANDING_TRIES) {
+		QTimer::singleShot(LANDING_STEP_MS, this, [this, generation, tries]() {
+			this->waitForLanding(generation, tries + 1);
+		});
+		return;
+	}
+	DwmFlush();
+	this->closeCover();
+}
 
-	if (progress < 1.0) return;
-	this->slideTimer.stop();
-	if (this->hiding) this->finishHide();
+void Scratchpad::closeCover() {
+	this->slideStop.store(true);
+	if (this->slideWorker.joinable()) this->slideWorker.join();
+	auto lock = std::lock_guard(this->slideMutex);
+	for (const auto& thumb: this->coverThumbs) DwmUnregisterThumbnail(thumb.thumbnail);
+	this->coverThumbs.clear();
+	this->slideDoneSent = false;
+	if (this->cover != nullptr) {
+		DestroyWindow(this->cover);
+		this->cover = nullptr;
+	}
 }
 
 void Scratchpad::finishHide() {
 	this->hiding = false;
-	this->slideTimer.stop();
+	this->closeCover();
 	this->mShown = false;
 	for (auto& entry: this->entries) this->park(entry);
 	this->relayout();
 	this->slideOffset = 0;
-	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(0);
+	this->moveReal(0);
 	emit this->shownChanged();
 }
 

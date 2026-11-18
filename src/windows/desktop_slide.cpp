@@ -966,4 +966,7 @@ void DesktopSlide::finish() {
 	this->raised.clear();
 }
 
+void waitForCompositorFrame() { waitForFrame(); }
+double compositorRefreshMs() { return refreshPeriodMs(); }
+
 } // namespace qs::windows

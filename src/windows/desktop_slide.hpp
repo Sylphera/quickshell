@@ -17,6 +17,11 @@
 
 namespace qs::windows {
 
+// Blocks until the compositor's next frame (see desktop_slide.cpp).
+void waitForCompositorFrame();
+// The display's refresh period, in milliseconds.
+double compositorRefreshMs();
+
 // Hyprland slides workspaces in its compositor. Windows switches virtual
 // desktops at once, so this covers the switch with live DWM thumbnails of the
 // wallpaper and of the desktops' windows, slid under the shell's own panels.

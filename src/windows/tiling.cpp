@@ -1585,6 +1585,22 @@ void TilingManager::setSpecialOffset(int offset) {
 	}
 }
 
+QHash<HWND, QRect> TilingManager::specialFrames() const {
+	QHash<HWND, QRect> frames;
+	for (const auto& [key, layout]: this->layouts) {
+		if (!layout->special) continue;
+		for (auto id: layout->tree->ids()) {
+			if (layout->tree->isHidden(id)) continue;
+			auto* window = this->windowOf(id);
+			if (window == nullptr) continue;
+			auto found = this->managed.find(window);
+			if (found == this->managed.end() || this->stateOf(found->second) != State::Tiled) continue;
+			frames.insert(window->hwnd(), this->tileRect(layout.get(), window).translated(0, -this->mSpecialOffset));
+		}
+	}
+	return frames;
+}
+
 TrackedWindow* TilingManager::tileAt(const QPoint& point) {
 	if (this->tracker == nullptr || this->desktops == nullptr) return nullptr;
 	auto* screen = this->tracker->screenFor(MonitorFromPoint({point.x(), point.y()}, MONITOR_DEFAULTTONEAREST));

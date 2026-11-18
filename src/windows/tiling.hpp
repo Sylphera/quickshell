@@ -9,6 +9,7 @@
 
 #include <qlist.h>
 #include <qmargins.h>
+#include <qhash.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qqmlintegration.h>
@@ -44,6 +45,9 @@ public:
 	// Moves the special workspace's tiles down by this many physical pixels and
 	// places them at once, for its slide in and out.
 	void setSpecialOffset(int offset);
+	[[nodiscard]] int specialOffset() const { return this->mSpecialOffset; }
+	// Frames of the special layout's tiled windows with no slide offset.
+	[[nodiscard]] QHash<HWND, QRect> specialFrames() const;
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);

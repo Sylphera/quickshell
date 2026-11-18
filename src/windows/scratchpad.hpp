@@ -1,8 +1,13 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <thread>
+
+#include <dwmapi.h>
 
 #include <qlist.h>
 #include <qobject.h>
@@ -50,7 +55,14 @@ private:
 
 	void setShown(bool shown);
 	void slide(bool in);
-	void stepSlide();
+	void openCover();
+	void closeCover();
+	void placeCover();
+	void layoutCover(double offset);
+	void runSlide();
+	void onSlideDone();
+	void waitForLanding(int generation, int tries);
+	void moveReal(int offset);
 	void finishHide();
 	[[nodiscard]] int slideDistance() const;
 	void park(Entry& entry);
@@ -73,7 +85,20 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
-	QTimer slideTimer;
+	struct CoverThumb {
+		HWND hwnd = nullptr;
+		HTHUMBNAIL thumbnail = nullptr;
+		QRect frame; // where the window rests, in screen coordinates
+	};
+	HWND cover = nullptr;
+	QPoint coverOrigin;
+	QList<CoverThumb> coverThumbs;
+	std::mutex slideMutex;
+	std::thread slideWorker;
+	std::atomic<bool> slideStop = false;
+	bool slideDoneSent = false;
+	int slideGeneration = 0;
+	int realOffset = 0;
 	std::chrono::steady_clock::time_point slideStart;
 	double slideFrom = 0;
 	double slideTo = 0;
