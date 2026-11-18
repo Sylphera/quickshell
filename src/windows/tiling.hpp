@@ -199,6 +199,9 @@ private:
 		bool offscreen = false;
 		QRect restore;
 		bool tinyCornersApplied = false;
+		// Appeared after the shell started, and not placed yet: pops in.
+		bool fresh = false;
+		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
 		bool tinyBorderSuppressed = false;
 		int previousCornerPreference = 0;
@@ -306,6 +309,7 @@ private:
 	TrackedWindow* dragging = nullptr;
 	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
 	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
+	[[nodiscard]] bool canPop(const Managed& m, const Layout* layout, const QRect& tile) const;
 	void onMotionLanded(HWND hwnd, const QRect& frame);
 	EdgeDrag edgeDragState;
 	quint64 focusCounter = 0;

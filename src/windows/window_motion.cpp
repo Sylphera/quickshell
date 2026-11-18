@@ -169,7 +169,20 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 // Called with the mutex held. The source follows the window's own frame, so it
 // shows the window at whatever size it has reached.
 void WindowMotion::layout(Entry& entry, double progress) {
-	entry.current = lerp(entry.from, entry.to, ease(progress));
+	auto eased = ease(progress);
+	entry.current = lerp(entry.from, entry.to, eased);
+	// windowsIn: popin 80% and fadeIn, both on the same curve.
+	auto opacity = 255.0;
+	auto shown = entry.current;
+	if (entry.pop) {
+		auto scale = 0.8 + 0.2 * eased;
+		auto size = QSizeF(entry.to.size()) * scale;
+		auto center = QRectF(entry.to).center();
+		shown = QRectF(center.x() - size.width() / 2, center.y() - size.height() / 2, size.width(), size.height())
+		            .toRect();
+		entry.current = entry.to;
+		opacity = 255.0 * eased;
+	}
 	RECT raw {};
 	RECT bounds {};
 	if (!GetWindowRect(entry.hwnd, &raw)
@@ -177,19 +190,19 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	{
 		return;
 	}
-	auto dest = entry.current.translated(-this->coverRect.topLeft());
+	auto dest = shown.translated(-this->coverRect.topLeft());
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 	              | DWM_TNP_SOURCECLIENTAREAONLY;
 	props.rcSource = {bounds.left - raw.left, bounds.top - raw.top, bounds.right - raw.left, bounds.bottom - raw.top};
 	props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
-	props.opacity = 255;
+	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
 }
 
-bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QRect& parked) {
+bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QRect& parked, bool pop) {
 	if (this->moving(hwnd)) {
 		this->retarget(hwnd, to, parked);
 		return true;
@@ -211,6 +224,7 @@ bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QR
 		    .to = to,
 		    .current = from,
 		    .parked = parked,
+		    .pop = pop,
 		    .start = std::chrono::steady_clock::now(),
 		});
 		this->layout(this->entries.last(), 0);
@@ -235,10 +249,17 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		auto entry = std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
 		if (entry == this->entries.end()) return;
 		if (entry->to == to && !entry->done) return;
-		entry->from = entry->current;
-		entry->to = to;
 		entry->parked = parked;
-		entry->start = std::chrono::steady_clock::now();
+		if (entry->pop && !entry->done) {
+			// Still popping in: keep growing, toward the new tile.
+			entry->from = to;
+			entry->to = to;
+		} else {
+			entry->pop = false;
+			entry->from = entry->current;
+			entry->to = to;
+			entry->start = std::chrono::steady_clock::now();
+		}
 		entry->done = false;
 	}
 	moveTo(hwnd, parked, false);

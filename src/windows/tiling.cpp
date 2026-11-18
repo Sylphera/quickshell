@@ -30,6 +30,7 @@
 #include "scratchpad.hpp"
 #include "super_drag.hpp"
 #include "tiling_target.hpp"
+#include "startup.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
@@ -442,6 +443,16 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		this->place(m, parkedFrame(tile));
 		return;
 	}
+	// end-4's windowsIn: a window that just opened pops in at its tile.
+	if (m.target.isNull() && this->canPop(m, layout, tile)) {
+		m.fresh = false;
+		if (motion->begin(m.window->hwnd(), tile, tile, parkedFrame(tile), true)) {
+			this->moving.insert(m.window, tile);
+			this->place(m, parkedFrame(tile));
+			return;
+		}
+	}
+	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
 		auto from = this->managedFrame(m);
 		if (motion->begin(m.window->hwnd(), from, tile, parkedFrame(tile))) {
@@ -451,6 +462,17 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		}
 	}
 	this->place(m, tile);
+}
+
+bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& tile) const {
+	if (!this->mAnimateMoves || !m.fresh || layout->special || m.window == this->dragging) return false;
+	if (QDateTime::currentMSecsSinceEpoch() - m.managedAt > 2000) return false;
+	auto* hwnd = m.window->hwnd();
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
+	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
+	if (m.window->desktop() != this->desktops->currentIndex()) return false;
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	return rects.valid && rects.monitor.contains(tile);
 }
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
@@ -874,6 +896,8 @@ void TilingManager::manage(TrackedWindow* window) {
 
 	auto& m = this->managed[window];
 	m.window = window;
+	m.fresh = startup::settled();
+	m.managedAt = QDateTime::currentMSecsSinceEpoch();
 	m.elevated = isMoreElevated(window->hwnd());
 
 	if (m.elevated) {
