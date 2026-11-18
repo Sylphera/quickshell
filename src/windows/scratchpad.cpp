@@ -208,6 +208,12 @@ Scratchpad::Scratchpad(QObject* parent)
 		if (this->mShown && desktops->currentIndex() != this->openedDesktop)
 			this->setShown(false);
 	});
+	// The real switch is deferred under the desktop slide; special leaves as
+	// soon as the switch is asked for, like Hyprland, not when it commits.
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::shownChanged, this, [this]() {
+		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
+			this->setShown(false);
+	});
 }
 
 bool Scratchpad::contains(const TrackedWindow* window) const {
