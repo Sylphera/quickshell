@@ -22,6 +22,12 @@ constexpr const wchar_t* PROP_PARKED = L"qs.parked"; // tick when parked
 constexpr const wchar_t* PROP_X = L"qs.px";          // where the app wants it
 constexpr const wchar_t* PROP_Y = L"qs.py";
 constexpr DWORD GIVE_UP_MS = 5000;
+// A window the shell is sliding waits beside the screens, held there: tick when
+// held, and where (set by the shell's WindowMotion).
+constexpr const wchar_t* PROP_HOLD = L"qs.hold";
+constexpr const wchar_t* PROP_HOLD_X = L"qs.hx";
+constexpr const wchar_t* PROP_HOLD_Y = L"qs.hy";
+constexpr DWORD HOLD_MS = 3000;
 
 int parkedTop() {
 	return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100;
@@ -88,6 +94,23 @@ void onPosChanging(HWND hwnd, const WINDOWPOS* pos) {
 	park(hwnd, x);
 }
 
+// Pulled on screen while the shell slides it (Chromium fitting itself into a
+// changed work area): back to where it waits, before anything is drawn. Moves
+// that keep it beside the screens are the shell's own and are left alone.
+void onHeldMoved(HWND hwnd, const WINDOWPOS* pos) {
+	if ((pos->flags & SWP_NOMOVE) != 0) return;
+	auto heldAt = reinterpret_cast<ULONG_PTR>(GetPropW(hwnd, PROP_HOLD)); // NOLINT
+	if (heldAt == 0) return;
+	if (GetTickCount() - static_cast<DWORD>(heldAt) > HOLD_MS) {
+		RemovePropW(hwnd, PROP_HOLD);
+		return;
+	}
+	auto x = static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, PROP_HOLD_X))); // NOLINT
+	auto y = static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, PROP_HOLD_Y))); // NOLINT
+	if (pos->x >= x - 64) return;
+	SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
 // Moved while it waits (the app placing itself): remember where it wanted to
 // be, and put it back below the screens before anything is drawn.
 void onPosChanged(HWND hwnd, const WINDOWPOS* pos) {
@@ -108,7 +131,10 @@ __declspec(dllexport) LRESULT CALLBACK qsParkCallWndProc(int code, WPARAM wParam
 		if (cwp->lParam != 0) {
 			const auto* pos = reinterpret_cast<const WINDOWPOS*>(cwp->lParam); // NOLINT
 			if (cwp->message == WM_WINDOWPOSCHANGING) onPosChanging(cwp->hwnd, pos);
-			else if (cwp->message == WM_WINDOWPOSCHANGED) onPosChanged(cwp->hwnd, pos);
+			else if (cwp->message == WM_WINDOWPOSCHANGED) {
+				onPosChanged(cwp->hwnd, pos);
+				onHeldMoved(cwp->hwnd, pos);
+			}
 		}
 	}
 	return CallNextHookEx(nullptr, code, wParam, lParam);
