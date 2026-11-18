@@ -216,17 +216,23 @@ void HyprlandToplevel::refreshIpcObject() {
 	auto* tiling = TilingManager::active();
 	auto floating = tiling != nullptr ? !tiling->isTiled(window) : fullscreen == 0;
 
+	// Hyprland keeps special's windows on a workspace of their own, so end-4's
+	// overview, bar and dock leave them out of the regular ones.
+	auto special = qs::windows::Scratchpad::instance()->contains(window);
+	auto workspaceObject = special
+	    ? QVariantMap {{"id", -98}, {"name", QStringLiteral("special:special")}}
+	    : QVariantMap {
+	          {"id", workspace == nullptr ? -1 : workspace->bindableId().value()},
+	          {"name", workspace == nullptr ? QString() : workspace->bindableName().value()},
+	      };
+
 	QVariantMap object {
 	    {"address", "0x" + this->addressStr()},
 	    {"mapped", true},
 	    {"hidden", false},
 	    {"at", QVariantList {rect.x(), rect.y()}},
 	    {"size", QVariantList {rect.width(), rect.height()}},
-	    {"workspace",
-	     QVariantMap {
-	         {"id", workspace == nullptr ? -1 : workspace->bindableId().value()},
-	         {"name", workspace == nullptr ? QString() : workspace->bindableName().value()},
-	     }},
+	    {"workspace", workspaceObject},
 	    {"floating", floating},
 	    {"pseudo", false},
 	    {"monitor", monitor == nullptr ? -1 : monitor->bindableId().value()},
@@ -240,7 +246,7 @@ void HyprlandToplevel::refreshIpcObject() {
 	    {"fullscreen", fullscreen},
 	    {"fullscreenClient", fullscreen},
 	    {"grouped", QVariantList {}},
-	    {"tags", qs::windows::Scratchpad::instance()->contains(window)
+	    {"tags", special
 	                 ? QVariantList {QStringLiteral("quickshell:scratchpad")}
 	                 : QVariantList {}},
 	    {"swallowing", "0x0"},
