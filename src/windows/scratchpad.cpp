@@ -36,6 +36,8 @@ constexpr ULONGLONG FOCUS_GRACE_MS = 400;
 constexpr double SLIDE_IN_MS = 280;
 constexpr double SLIDE_OUT_MS = 120;
 constexpr int LANDING_TRIES = 20;
+constexpr int ORPHAN_RETRY_MS = 250;
+constexpr int ORPHAN_RETRIES = 40;
 constexpr int LANDING_STEP_MS = 8;
 constexpr auto* COVER_CLASS = L"QuickshellScratchpadCover";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
@@ -161,19 +163,36 @@ QRect visibleRect(HWND hwnd) {
 	return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
 }
 
-void recoverOrphans() {
+// Windows a previous shell left in special: killed, crashed or restarted
+// without releasing them. The mark only goes once the window is unpinned, or
+// it would stay on every desktop with nothing left to tell it apart.
+// Returns whether some are still waiting for the desktop accessor.
+struct OrphanScan {
+	QList<HWND> held;
+	bool pending = false;
+};
+
+bool recoverOrphans(const QList<HWND>& held = {}) {
+	OrphanScan scan {held, false};
 	EnumWindows(
-	    [](HWND hwnd, LPARAM /*param*/) -> BOOL {
+	    [](HWND hwnd, LPARAM param) -> BOOL {
 		    auto packed = reinterpret_cast<quintptr>(GetPropW(hwnd, SCRATCHPAD_PROP));
 		    if (packed == 0) return TRUE;
+		    auto* scan = reinterpret_cast<OrphanScan*>(param);
+		    if (scan->held.contains(hwnd)) return TRUE;
+		    auto* desktops = VirtualDesktops::instance();
+		    if (!desktops->accessorLoaded() || !desktops->pinWindow(hwnd, false)) {
+			    scan->pending = true;
+			    return TRUE;
+		    }
 		    auto rect = unpackRect(packed);
 		    if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
-		    VirtualDesktops::instance()->pinWindow(hwnd, false);
 		    RemovePropW(hwnd, SCRATCHPAD_PROP);
 		    return TRUE;
 	    },
-	    0
+	    reinterpret_cast<LPARAM>(&scan)
 	);
+	return scan.pending;
 }
 
 } // namespace
@@ -195,7 +214,16 @@ Scratchpad::~Scratchpad() { this->closeCover(); }
 
 Scratchpad::Scratchpad(QObject* parent)
     : QObject(parent) {
-	recoverOrphans();
+	if (recoverOrphans()) {
+		auto* retry = new QTimer(this);
+		retry->setInterval(ORPHAN_RETRY_MS);
+		QObject::connect(retry, &QTimer::timeout, this, [this, retry, tries = 0]() mutable {
+			QList<HWND> held;
+			for (const auto& entry: this->entries) held.append(entry.hwnd);
+			if (!recoverOrphans(held) || ++tries >= ORPHAN_RETRIES) retry->deleteLater();
+		});
+		retry->start();
+	}
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
 	}
@@ -793,7 +821,8 @@ void Scratchpad::restoreForCrash() {
 		if (hwnd == nullptr || !IsWindow(hwnd)) continue;
 		auto rect = unpackRect(slot.rect.load());
 		if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
-		RemovePropW(hwnd, SCRATCHPAD_PROP);
+		// The mark stays: unpinning isn't safe from a crash handler, and the
+		// next shell finds the window by it and unpins it.
 	}
 }
 
