@@ -142,6 +142,8 @@ WorkspaceBehavior::WorkspaceBehavior(QObject* parent)
 	this->focusTimer.setSingleShot(true);
 	this->focusTimer.setInterval(FOCUS_REPAIR_MS);
 	QObject::connect(&this->focusTimer, &QTimer::timeout, this, &WorkspaceBehavior::repairFocus);
+
+	QTimer::singleShot(0, this, &WorkspaceBehavior::watchTracker);
 }
 
 void WorkspaceBehavior::setBackAndForth(bool enabled) {
@@ -221,6 +223,18 @@ void WorkspaceBehavior::watchTracker() {
 	auto retry = &WorkspaceBehavior::tryWarp;
 	QObject::connect(this->tracker, &WindowTracker::activeWindowChanged, this, retry);
 	QObject::connect(this->tracker, &WindowTracker::flushed, this, retry);
+
+	// Hyprland's focus_on_close: closing the focused window hands focus on.
+	// Windows usually does, but now and then leaves it on the desktop or on
+	// nothing; repairFocus then gives it to the most recent window here.
+	QObject::connect(this->tracker, &WindowTracker::activeWindowChanged, this, [this]() {
+		if (auto* active = this->tracker->activeWindow()) this->lastActive = active;
+	});
+	QObject::connect(this->tracker, &WindowTracker::windowRemoved, this, [this](TrackedWindow* window) {
+		if (window != this->lastActive) return;
+		this->lastActive = nullptr;
+		this->expectFocus(this->desktops->currentIndex());
+	});
 }
 
 void WorkspaceBehavior::prepareWarp(qsizetype desktop, bool fromActive) {

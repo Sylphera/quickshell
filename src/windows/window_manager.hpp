@@ -75,6 +75,7 @@ private:
 	QTimer fallbackTimer;
 
 	qsizetype focusDesktop = -1;
+	const void* lastActive = nullptr;
 	QTimer focusTimer;
 };
 

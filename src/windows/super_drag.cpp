@@ -648,6 +648,14 @@ void SuperDragManager::onHover(POINT point) {
 	auto* window = WindowTracker::instance()->windowFor(root);
 	if (window == nullptr || window->minimized() || !IsWindowVisible(root)) return;
 
+	// Hyprland's float_switch_override_focus = 1 (end-4 keeps the default): the
+	// pointer moves focus between tiled and floating windows, not from one
+	// floating window to another.
+	auto* tiling = TilingManager::active();
+	auto floating = [tiling](TrackedWindow* w) { return tiling == nullptr || !tiling->isTiled(w); };
+	auto* focused = WindowTracker::instance()->windowFor(foreground);
+	if (focused != nullptr && floating(focused) && floating(window)) return;
+
 	auto* scratchpad = Scratchpad::instance();
 	if (scratchpad->shown() && !scratchpad->contains(window)) return;
 

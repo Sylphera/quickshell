@@ -15,6 +15,7 @@
 #include <qscreen.h>
 #include <qstring.h>
 #include <qstringlist.h>
+#include <qtimer.h>
 #include <qtypes.h>
 
 #include "../keyboard_hook.hpp"
@@ -200,6 +201,45 @@ bool closeShellWindow(HWND hwnd) {
 	if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
 	PostMessageW(hwnd, WM_CLOSE, 0, 0);
 	return true;
+}
+
+// Hyprland warps the cursor to a window focused or moved from the keyboard
+// (cursor:no_warps is off in end-4), so focus following the mouse doesn't snap
+// back on the next nudge. Windows move asynchronously, so a moved one is
+// followed a moment later.
+constexpr int WARP_AFTER_MOVE_MS = 120;
+
+void warpToWindow(HWND hwnd) {
+	RECT frame {};
+	if (hwnd == nullptr || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) {
+		return;
+	}
+	POINT cursor {};
+	if (GetCursorPos(&cursor) && PtInRect(&frame, cursor)) return;
+	SetCursorPos((frame.left + frame.right) / 2, (frame.top + frame.bottom) / 2);
+}
+
+void warpToWindowLater(TrackedWindow* window, int delayMs) {
+	if (window == nullptr) return;
+	QTimer::singleShot(delayMs, window, [window = QPointer(window)]() {
+		if (window != nullptr) warpToWindow(window->hwnd());
+	});
+}
+
+// Focus lands asynchronously: follow it once the tracker reports the new
+// active window, or give up after a moment.
+constexpr int WARP_FOCUS_TIMEOUT_MS = 300;
+
+void warpToFocusChange(WindowTracker* tracker) {
+	auto* before = tracker->activeWindow();
+	auto* context = new QObject(tracker);
+	QObject::connect(tracker, &WindowTracker::activeWindowChanged, context, [tracker, before, context]() {
+		auto* active = tracker->activeWindow();
+		if (active == nullptr || active == before) return;
+		warpToWindow(active->hwnd());
+		context->deleteLater();
+	});
+	QTimer::singleShot(WARP_FOCUS_TIMEOUT_MS, context, [context]() { context->deleteLater(); });
 }
 
 TrackedWindow* windowUnderPointer(WindowTracker* tracker, POINT cursor) {
@@ -714,7 +754,10 @@ void Dispatcher::pin(TrackedWindow* window) {
 void Dispatcher::moveFocus(const QString& direction) {
 	auto edge = directionEdge(direction);
 	auto* tiling = TilingManager::active();
-	if (tiling != nullptr && edge && tiling->focusDirection(*edge)) return;
+	if (tiling != nullptr && edge) {
+		warpToFocusChange(this->ipc->tracker());
+		if (tiling->focusDirection(*edge)) return;
+	}
 
 	auto* tracker = this->ipc->tracker();
 	auto* desktops = this->ipc->desktops();
@@ -732,6 +775,7 @@ void Dispatcher::moveFocus(const QString& direction) {
 
 	if (active == nullptr) {
 		candidates.first()->activate();
+		warpToWindowLater(candidates.first(), 0);
 		return;
 	}
 
@@ -772,7 +816,10 @@ void Dispatcher::moveFocus(const QString& direction) {
 		}
 	}
 
-	if (best != nullptr) best->activate();
+	if (best != nullptr) {
+		best->activate();
+		warpToWindowLater(best, 0);
+	}
 }
 
 void Dispatcher::moveWindow(const QString& direction) {
@@ -784,9 +831,9 @@ void Dispatcher::moveWindow(const QString& direction) {
 	auto edge = directionEdge(direction);
 	auto* tiling = TilingManager::active();
 	if (tiling != nullptr && edge) {
-		if (!tiling->moveDirection(*edge)) {
-			tiling->moveFloating(this->ipc->tracker()->activeWindow(), *edge);
-		}
+		auto* active = this->ipc->tracker()->activeWindow();
+		if (!tiling->moveDirection(*edge)) tiling->moveFloating(active, *edge);
+		warpToWindowLater(active, WARP_AFTER_MOVE_MS);
 		return;
 	}
 
