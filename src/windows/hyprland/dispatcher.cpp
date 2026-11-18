@@ -202,30 +202,54 @@ bool closeShellWindow(HWND hwnd) {
 	return true;
 }
 
-bool closeUnderPointer(WindowTracker* tracker, POINT cursor) {
+TrackedWindow* windowUnderPointer(WindowTracker* tracker, POINT cursor) {
 	auto* hit = WindowFromPoint(cursor);
-	if (hit == nullptr) return false;
+	if (hit == nullptr) return nullptr;
 	auto* root = GetAncestor(hit, GA_ROOT);
-	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return false;
-	if (auto* window = tracker->windowFor(root)) {
+	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return nullptr;
+	if (auto* window = tracker->windowFor(root)) return window;
+	if (auto* tiling = TilingManager::active()) return tiling->tileAt(QPoint(cursor.x, cursor.y));
+	return nullptr;
+}
+
+bool closeUnderPointer(WindowTracker* tracker, POINT cursor) {
+	if (auto* window = windowUnderPointer(tracker, cursor)) {
 		window->close();
 		return true;
 	}
-	if (auto* tiling = TilingManager::active()) {
-		if (auto* window = tiling->tileAt(QPoint(cursor.x, cursor.y))) {
-			window->close();
-			return true;
-		}
-	}
+	auto* hit = WindowFromPoint(cursor);
+	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
+	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return false;
 	return closeShellWindow(root);
 }
 
-void closeFocused(WindowTracker* tracker) {
+// Whether the pointer moved since focus last changed: then window actions
+// take the window under it, as with Hyprland's follow_mouse, and otherwise the
+// focused one, so the keyboard alone still acts on what it focused.
+bool pointerMovedSinceFocus(WindowTracker* tracker, POINT& cursor) {
 	auto& mark = focusMark(tracker);
-	POINT cursor {};
 	GetCursorPos(&cursor);
-	auto moved = !mark.valid || std::abs(cursor.x - mark.cursor.x) > POINTER_SLOP
-	          || std::abs(cursor.y - mark.cursor.y) > POINTER_SLOP;
+	return !mark.valid || std::abs(cursor.x - mark.cursor.x) > POINTER_SLOP
+	    || std::abs(cursor.y - mark.cursor.y) > POINTER_SLOP;
+}
+
+void markActedOn(WindowTracker* tracker) {
+	auto& mark = focusMark(tracker);
+	mark.valid = false;
+	mark.closedAt = GetTickCount64();
+}
+
+TrackedWindow* pointerOrFocused(WindowTracker* tracker) {
+	POINT cursor {};
+	if (pointerMovedSinceFocus(tracker, cursor)) {
+		if (auto* window = windowUnderPointer(tracker, cursor)) return window;
+	}
+	return tracker->activeWindow();
+}
+
+void closeFocused(WindowTracker* tracker) {
+	POINT cursor {};
+	auto moved = pointerMovedSinceFocus(tracker, cursor);
 
 	auto closed = moved && closeUnderPointer(tracker, cursor);
 	if (!closed) {
@@ -237,10 +261,7 @@ void closeFocused(WindowTracker* tracker) {
 		}
 	}
 
-	if (closed) {
-		mark.valid = false;
-		mark.closedAt = GetTickCount64();
-	}
+	if (closed) markActedOn(tracker);
 }
 
 } // namespace
@@ -355,7 +376,12 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 	} else if (fn == "hl.dsp.window.move") {
 		auto* window = this->resolveWindow(windowArg);
 		if (t.contains("workspace")) {
-			this->moveToWorkspace(window, t.value("workspace"), t.value("follow") != "false");
+			if (!t.contains("window")) window = pointerOrFocused(this->ipc->tracker());
+			auto follow = t.value("follow") != "false";
+			this->moveToWorkspace(window, t.value("workspace"), follow);
+			// Following the window focuses it on purpose; sending it away
+			// leaves focus wherever Windows puts it, so the pointer decides next.
+			if (!follow) markActedOn(this->ipc->tracker());
 		} else if (t.contains("x") || t.contains("y")) {
 			this->moveWindowPixel(window, t.value("x"), t.value("y"));
 		} else if (t.contains("direction")) {
@@ -427,7 +453,9 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		auto comma = args.indexOf(',');
 		auto workspace = comma == -1 ? args : args.left(comma);
 		auto window = comma == -1 ? QString() : args.mid(comma + 1);
-		this->moveToWorkspace(this->resolveWindow(window), workspace, name == "movetoworkspace");
+		auto* target = window.trimmed().isEmpty() ? pointerOrFocused(tracker) : this->resolveWindow(window);
+		this->moveToWorkspace(target, workspace, name == "movetoworkspace");
+		if (name != "movetoworkspace") markActedOn(tracker);
 	} else if (name == "killactive") {
 			closeFocused(tracker);
 	} else if (name == "closewindow") {
