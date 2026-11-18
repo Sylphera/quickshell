@@ -298,6 +298,9 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 			forceForegroundWindow(hwnd);
 		} else if (!follow) {
 			this->park(entry);
+			// The desktop it left closes the gap now, not the next time
+			// special opens.
+			if (auto* tiling = TilingManager::active()) tiling->markWindow(window);
 		}
 	}
 
