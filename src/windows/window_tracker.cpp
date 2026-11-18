@@ -63,7 +63,8 @@ std::atomic<bool> gParkNew = false;                             // NOLINT
 std::mutex gParkMutex;                                          // NOLINT
 std::unordered_map<HWND, std::pair<RECT, qint64>> gEarlyParked; // NOLINT
 std::atomic<int> gEarlyParkCount = 0;                           // NOLINT
-constexpr qint64 EARLY_PARK_MS = 700;
+constexpr qint64 EARLY_PARK_MS = 1000;     // never tracked: not an app window after all
+constexpr qint64 EARLY_PARK_SAFETY_MS = 5000; // tracked: tiling releases it; just in case
 
 // A plain resizable app window of another process: what tiling takes.
 bool parksEarly(HWND hwnd) {
@@ -78,18 +79,28 @@ bool parksEarly(HWND hwnd) {
 	return !IsIconic(hwnd);
 }
 
-void parkEarly(HWND hwnd) {
+int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100; }
+
+// again: the window was parked already and moved itself back on screen, as
+// apps restoring their saved position do right after showing.
+void parkEarly(HWND hwnd, bool again = false) {
 	RECT rect {};
 	if (!GetWindowRect(hwnd, &rect)) return;
 	{
 		auto lock = std::lock_guard(gParkMutex);
-		if (gEarlyParked.contains(hwnd)) return;
-		gEarlyParked[hwnd] = {rect, static_cast<qint64>(GetTickCount64())};
-		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+		auto found = gEarlyParked.find(hwnd);
+		if (again) {
+			if (found == gEarlyParked.end() || rect.top >= parkedTop() - 50) return;
+			found->second.first = rect;
+		} else {
+			if (found != gEarlyParked.end()) return;
+			gEarlyParked[hwnd] = {rect, static_cast<qint64>(GetTickCount64())};
+			gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+		}
 	}
 	// Below every screen, in the same column, so it still belongs to the
 	// monitor it opened on.
-	auto y = GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100;
+	auto y = parkedTop();
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
@@ -117,10 +128,12 @@ void putBack(HWND hwnd, const RECT& rect) {
 void releaseStaleEarlyParks() {
 	std::vector<std::pair<HWND, RECT>> stale;
 	{
+		auto eventLock = std::lock_guard(gEventMutex);
 		auto lock = std::lock_guard(gParkMutex);
 		auto now = static_cast<qint64>(GetTickCount64());
 		for (auto iter = gEarlyParked.begin(); iter != gEarlyParked.end();) {
-			if (now - iter->second.second >= EARLY_PARK_MS) {
+			auto limit = gTracked.contains(iter->first) ? EARLY_PARK_SAFETY_MS : EARLY_PARK_MS;
+			if (now - iter->second.second >= limit) {
 				stale.emplace_back(iter->first, iter->second.first);
 				iter = gEarlyParked.erase(iter);
 			} else {
@@ -161,6 +174,17 @@ void CALLBACK queueEvent(
 ) {
 	if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || hwnd == nullptr) return;
 
+	if (event == EVENT_OBJECT_LOCATIONCHANGE && gEarlyParkCount.load() > 0) parkEarly(hwnd, true);
+	// Parked while still hidden, so it shows already off screen.
+	if (event == EVENT_OBJECT_CREATE) {
+		if (GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
+		return;
+	}
+
+	// Also a window shown again: Explorer reuses its closed windows.
+	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd && mayBecomeTracked(hwnd) && parksEarly(hwnd))
+		parkEarly(hwnd);
+
 	auto trackedOnly = onlyForTracked(event);
 	if (!trackedOnly && event != EVENT_SYSTEM_FOREGROUND && GetAncestor(hwnd, GA_ROOT) != hwnd) {
 		return;
@@ -174,7 +198,6 @@ void CALLBACK queueEvent(
 
 			auto announces = event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_NAMECHANGE;
 			if (announces && !mayBecomeTracked(hwnd)) return;
-			if (event == EVENT_OBJECT_SHOW && parksEarly(hwnd)) parkEarly(hwnd);
 		}
 
 		if (!gEvents.empty() && gEvents.back().event == event && gEvents.back().hwnd == hwnd) return;
@@ -209,7 +232,7 @@ void eventThreadMain() {
 	hook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, true);
 	hook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, true);
 	hook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, true);
-	hook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, true);
+	hook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, true);
 	hook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, false);
 	hook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, true);
 
@@ -673,7 +696,10 @@ void releaseEarlyPark(HWND hwnd) {
 void WindowTracker::drainEvents() {
 	gEventWakePending.store(false);
 	// Whatever tiling didn't take in time goes back where it showed.
-	if (gEarlyParkCount.load() > 0) QTimer::singleShot(EARLY_PARK_MS + 50, this, []() { releaseStaleEarlyParks(); });
+	if (gEarlyParkCount.load() > 0) {
+		QTimer::singleShot(EARLY_PARK_MS + 50, this, []() { releaseStaleEarlyParks(); });
+		QTimer::singleShot(EARLY_PARK_SAFETY_MS + 50, this, []() { releaseStaleEarlyParks(); });
+	}
 
 	auto events = std::move(this->spareEvents);
 	events.clear();
