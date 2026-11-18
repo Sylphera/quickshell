@@ -17,6 +17,10 @@
 #include <qpointer.h>
 #include <qstringlist.h>
 #include <qtimer.h>
+#include <qdir.h>
+#include <qfile.h>
+#include <qimage.h>
+#include <qstandardpaths.h>
 
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
@@ -42,6 +46,72 @@ constexpr int CORNER_ZONE = 40;
 constexpr int CORNER_TOLERANCE = 6;
 constexpr int CORNER_RADIUS = 8;
 constexpr int WARM_DELAY_MS = 2500;
+
+// Window stills outlive a shell restart on disk: a browser on another desktop
+// is cloaked and won't paint, so after a restart there would be no way to get
+// one until it is visited. Each still is a PNG named after its window, with the
+// frame and process it was taken for; it only counts while both still match.
+QString snapshotDir() {
+	static const auto dir = []() {
+		auto path = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)
+		          + QStringLiteral("/quickshell/slide-snapshots");
+		QDir().mkpath(path);
+		return path;
+	}();
+	return dir;
+}
+
+QString snapshotFile(HWND hwnd) {
+	return snapshotDir() + QStringLiteral("/%1.png").arg(reinterpret_cast<quintptr>(hwnd), 0, 16); // NOLINT
+}
+
+DWORD processOf(HWND hwnd) {
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	return pid;
+}
+
+QString frameText(const QRect& frame) {
+	return QStringLiteral("%1,%2,%3,%4").arg(frame.x()).arg(frame.y()).arg(frame.width()).arg(frame.height());
+}
+
+void saveSnapshot(HWND hwnd, const QRect& frame, QImage image) {
+	auto pid = processOf(hwnd);
+	std::thread([hwnd, frame, pid, image = std::move(image)]() mutable {
+		image.setText(QStringLiteral("frame"), frameText(frame));
+		image.setText(QStringLiteral("pid"), QString::number(pid));
+		auto path = snapshotFile(hwnd);
+		image.save(path + QStringLiteral(".tmp"), "PNG", 30);
+		QFile::remove(path);
+		QFile::rename(path + QStringLiteral(".tmp"), path);
+	}).detach();
+}
+
+// On a worker thread: the saved still of this window, if it is still right.
+QList<quint32> loadSnapshot(HWND hwnd, const QRect& frame) {
+	QImage image;
+	if (!image.load(snapshotFile(hwnd), "PNG")) return {};
+	if (image.text(QStringLiteral("frame")) != frameText(frame)) return {};
+	if (image.text(QStringLiteral("pid")) != QString::number(processOf(hwnd))) return {};
+	image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+	if (image.size() != frame.size()) return {};
+	QList<quint32> pixels(static_cast<qsizetype>(frame.width()) * frame.height());
+	for (auto y = 0; y < frame.height(); y++) {
+		std::memcpy(pixels.data() + static_cast<qsizetype>(y) * frame.width(), image.constScanLine(y), sizeof(quint32) * frame.width());
+	}
+	return pixels;
+}
+
+// Stills of windows that are gone.
+void pruneSnapshotFiles() {
+	for (const auto& name: QDir(snapshotDir()).entryList({QStringLiteral("*.png"), QStringLiteral("*.tmp")}, QDir::Files)) {
+		bool ok = false;
+		auto value = name.section('.', 0, 0).toULongLong(&ok, 16);
+		if (!ok || !IsWindow(reinterpret_cast<HWND>(static_cast<quintptr>(value)))) { // NOLINT
+			QFile::remove(snapshotDir() + '/' + name);
+		}
+	}
+}
 constexpr LONGLONG OFF_DISPLAY_MIN_BYTES = 32LL * 1024 * 1024;
 
 // end-4's menu_decel curve for the workspaces animation.
@@ -786,6 +856,8 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 		}
 	}
 
+	// Copied for the disk while the bitmap is still alive.
+	auto still = QImage(static_cast<const uchar*>(raw), width, height, QImage::Format_ARGB32_Premultiplied).copy();
 	POINT origin {parkX, 0};
 	SIZE size {width, height};
 	POINT source {0, 0};
@@ -796,6 +868,7 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	ReleaseDC(nullptr, screen);
 	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
 	snapshot.frame = frame.translated(this->monitor.topLeft());
+	saveSnapshot(hwnd, snapshot.frame, std::move(still));
 	return true;
 }
 
@@ -811,6 +884,7 @@ void DesktopSlide::warmUp() {
 	}
 	QPointer<DesktopSlide> self = this;
 	std::thread([self]() {
+		pruneSnapshotFiles();
 		auto pids = scanOffDisplayProcesses();
 		{
 			auto& state = offDisplay();
@@ -905,23 +979,34 @@ void DesktopSlide::warmCapture() {
 			{
 				auto w = frame.width();
 				auto h = frame.height();
+				// Nor a flat page of any colour: Electron hands back an empty
+				// dark grey page when cloaked, which is as blank as black.
 				qsizetype samples = 0;
 				qsizetype lit = 0;
+				double sum = 0;
+				double squares = 0;
 				for (auto y = h / 4; y < h - h / 8; y += 8) {
 					for (auto x = w / 8; x < w - w / 8; x += 8) {
 						auto p = pixels[static_cast<qsizetype>(y) * w + x];
 						auto brightest = std::max({(p >> 16) & 0xffu, (p >> 8) & 0xffu, p & 0xffu});
 						samples++;
 						if (brightest > 3) lit++;
+						sum += brightest;
+						squares += static_cast<double>(brightest) * brightest;
 					}
 				}
-				if (samples > 0 && lit * 100 < samples * 2) return;
+				auto mean = samples > 0 ? sum / static_cast<double>(samples) : 0.0;
+				auto spread = samples > 0 ? std::sqrt(std::max(0.0, squares / static_cast<double>(samples) - mean * mean)) : 0.0;
+				if (samples > 0 && (lit * 100 < samples * 2 || spread < 4.0)) pixels.clear();
 			}
+			auto fromDisk = pixels.isEmpty();
+			if (fromDisk) pixels = loadSnapshot(hwnd, frame);
+			if (pixels.isEmpty() || self.isNull()) return;
 
 			QMetaObject::invokeMethod(
 			    self.data(),
-			    [self, hwnd, frame, pixels]() {
-				    if (!self.isNull() && self->overlay == nullptr) self->storeSnapshot(hwnd, frame, pixels);
+			    [self, hwnd, frame, pixels, fromDisk]() {
+				    if (!self.isNull() && self->overlay == nullptr) self->storeSnapshot(hwnd, frame, pixels, !fromDisk);
 			    },
 			    Qt::QueuedConnection
 			);
@@ -929,7 +1014,7 @@ void DesktopSlide::warmCapture() {
 	}
 }
 
-void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels) {
+void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist) {
 	if (!IsWindow(hwnd)) return;
 	auto width = frame.width();
 	auto height = frame.height();
@@ -970,6 +1055,9 @@ void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quin
 	ReleaseDC(nullptr, screen);
 	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
 	snapshot.frame = frame;
+	if (persist) {
+		saveSnapshot(hwnd, frame, QImage(reinterpret_cast<const uchar*>(pixels.constData()), width, height, QImage::Format_ARGB32_Premultiplied).copy()); // NOLINT
+	}
 }
 
 void DesktopSlide::pruneSnapshots() {
@@ -979,6 +1067,7 @@ void DesktopSlide::pruneSnapshots() {
 			continue;
 		}
 		if (iter->host != nullptr) DestroyWindow(iter->host);
+		if (!IsWindow(iter.key())) QFile::remove(snapshotFile(iter.key()));
 		iter = this->snapshots.erase(iter);
 	}
 }

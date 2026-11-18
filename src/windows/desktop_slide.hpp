@@ -57,7 +57,7 @@ private:
 	void pruneSnapshots();
 	void warmUp();
 	void warmCapture();
-	void storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels);
+	void storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist = true);
 
 	struct Snapshot {
 		HWND host = nullptr;
