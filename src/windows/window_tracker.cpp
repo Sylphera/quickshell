@@ -66,6 +66,66 @@ std::atomic<int> gEarlyParkCount = 0;                           // NOLINT
 constexpr qint64 EARLY_PARK_MS = 1000;     // never tracked: not an app window after all
 constexpr qint64 EARLY_PARK_SAFETY_MS = 5000; // tracked: tiling releases it; just in case
 
+// The park hook (park_hook/park_hook.cpp) parks new windows from inside the
+// app, with no delay; what follows here is the fallback when it can't load.
+constexpr const wchar_t* PARK_PROP = L"qs.parked";
+using ParkSetEnabled = void (*)(BOOL, DWORD);
+std::atomic<ParkSetEnabled> gParkHookSet = nullptr; // NOLINT
+
+void startParkHook() {
+	static std::once_flag once;
+	std::call_once(once, []() {
+		std::thread([]() {
+			wchar_t path[MAX_PATH] {};
+			GetModuleFileNameW(nullptr, path, MAX_PATH);
+			auto* slash = wcsrchr(path, L'\\');
+			if (slash == nullptr) return;
+			wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"qs-window-park.dll");
+			// Apps keep a hook DLL loaded after it is unhooked, and would reuse an
+			// old copy by its name; each build gets a name of its own.
+			WIN32_FILE_ATTRIBUTE_DATA info {};
+			if (!GetFileAttributesExW(path, GetFileExInfoStandard, &info)) return;
+			wchar_t copy[MAX_PATH] {};
+			if (GetTempPathW(MAX_PATH, copy) == 0) return;
+			wchar_t name[64] {};
+			swprintf_s(name, L"qs-window-park-%08lx%08lx.dll", info.ftLastWriteTime.dwHighDateTime, info.ftLastWriteTime.dwLowDateTime);
+			wcscat_s(copy, name);
+			CopyFileW(path, copy, TRUE);
+			auto* module = LoadLibraryW(copy);
+			if (module == nullptr) return;
+			auto* proc = reinterpret_cast<HOOKPROC>(GetProcAddress(module, "qsParkCallWndProc")); // NOLINT
+			auto set = reinterpret_cast<ParkSetEnabled>(GetProcAddress(module, "qsParkSetEnabled")); // NOLINT
+			if (proc == nullptr || set == nullptr) return;
+			// Its own thread: 32-bit apps reach the hook through the thread that set it.
+			if (SetWindowsHookExW(WH_CALLWNDPROC, proc, module, 0) == nullptr) return;
+			set(gParkNew.load() ? TRUE : FALSE, GetCurrentProcessId());
+			gParkHookSet.store(set);
+			MSG msg {};
+			while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+		}).detach();
+	});
+}
+
+bool parkedByHook(HWND hwnd) { return GetPropW(hwnd, PARK_PROP) != nullptr; }
+
+RECT hookWanted(HWND hwnd) {
+	RECT rect {};
+	GetWindowRect(hwnd, &rect);
+	auto width = rect.right - rect.left;
+	auto height = rect.bottom - rect.top;
+	rect.left = static_cast<LONG>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, L"qs.px"))); // NOLINT
+	rect.top = static_cast<LONG>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, L"qs.py")));  // NOLINT
+	rect.right = rect.left + width;
+	rect.bottom = rect.top + height;
+	return rect;
+}
+
+void unmarkHook(HWND hwnd) {
+	RemovePropW(hwnd, PARK_PROP);
+	RemovePropW(hwnd, L"qs.px");
+	RemovePropW(hwnd, L"qs.py");
+}
+
 // A plain resizable app window of another process: what tiling takes.
 bool parksEarly(HWND hwnd) {
 	if (!gParkNew.load()) return false;
@@ -84,8 +144,11 @@ int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(
 // again: the window was parked already and moved itself back on screen, as
 // apps restoring their saved position do right after showing.
 void parkEarly(HWND hwnd, bool again = false) {
+	auto byHook = parkedByHook(hwnd);
+	if (byHook && again) return;
 	RECT rect {};
 	if (!GetWindowRect(hwnd, &rect)) return;
+	if (byHook) rect = hookWanted(hwnd);
 	{
 		auto lock = std::lock_guard(gParkMutex);
 		auto found = gEarlyParked.find(hwnd);
@@ -98,6 +161,7 @@ void parkEarly(HWND hwnd, bool again = false) {
 			gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
 		}
 	}
+	if (byHook) return;
 	// Below every screen, in the same column, so it still belongs to the
 	// monitor it opened on.
 	auto y = parkedTop();
@@ -114,6 +178,7 @@ void parkEarly(HWND hwnd, bool again = false) {
 
 void putBack(HWND hwnd, const RECT& rect) {
 	if (!IsWindow(hwnd)) return;
+	unmarkHook(hwnd);
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
@@ -177,13 +242,16 @@ void CALLBACK queueEvent(
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && gEarlyParkCount.load() > 0) parkEarly(hwnd, true);
 	// Parked while still hidden, so it shows already off screen.
 	if (event == EVENT_OBJECT_CREATE) {
-		if (GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
+		if (gParkHookSet.load() == nullptr && GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
 		return;
 	}
 
 	// Also a window shown again: Explorer reuses its closed windows.
-	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd && mayBecomeTracked(hwnd) && parksEarly(hwnd))
+	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd
+	    && (parkedByHook(hwnd) || (mayBecomeTracked(hwnd) && parksEarly(hwnd))))
+	{
 		parkEarly(hwnd);
+	}
 
 	auto trackedOnly = onlyForTracked(event);
 	if (!trackedOnly && event != EVENT_SYSTEM_FOREGROUND && GetAncestor(hwnd, GA_ROOT) != hwnd) {
@@ -670,9 +738,15 @@ void WindowTracker::startEventThread() {
 	std::thread(&eventThreadMain).detach();
 }
 
-void setParkNewWindows(bool park) { gParkNew.store(park); }
+void setParkNewWindows(bool park) {
+	if (gParkNew.exchange(park) != park || gParkHookSet.load() == nullptr) {
+		if (auto set = gParkHookSet.load()) set(park ? TRUE : FALSE, GetCurrentProcessId());
+	}
+	if (park) startParkHook();
+}
 
 void claimEarlyPark(HWND hwnd) {
+	if (parkedByHook(hwnd)) unmarkHook(hwnd);
 	if (gEarlyParkCount.load() == 0) return;
 	auto lock = std::lock_guard(gParkMutex);
 	gEarlyParked.erase(hwnd);
@@ -680,12 +754,18 @@ void claimEarlyPark(HWND hwnd) {
 }
 
 void releaseEarlyPark(HWND hwnd) {
-	if (gEarlyParkCount.load() == 0) return;
+	if (gEarlyParkCount.load() == 0 && !parkedByHook(hwnd)) return;
 	RECT rect {};
 	{
 		auto lock = std::lock_guard(gParkMutex);
 		auto found = gEarlyParked.find(hwnd);
-		if (found == gEarlyParked.end()) return;
+		if (found == gEarlyParked.end()) {
+			if (parkedByHook(hwnd)) {
+				rect = hookWanted(hwnd);
+				putBack(hwnd, rect);
+			}
+			return;
+		}
 		rect = found->second.first;
 		gEarlyParked.erase(found);
 		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
