@@ -423,8 +423,11 @@ void TilingManager::setAnimateMoves(bool animate) {
 namespace {
 // Where a sliding window waits: past the right edge of every screen, at the
 // size of its new tile, so it is laid out and repainted before it shows.
+// A travelling window waits here with one column still on screen: an app that
+// thinks it is hidden (Chromium) stops painting, and its live thumbnail would
+// go blank. A single pixel at the screen's edge isn't noticed.
 QRect parkedFrame(const QRect& tile) {
-	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100;
+	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1;
 	return QRect(QPoint(x, tile.top()), tile.size());
 }
 } // namespace

@@ -100,7 +100,9 @@ HWND snapshotOf(const QRect& frame) {
 
 } // namespace
 
-bool WindowMotion::travelsAsStill(HWND hwnd) { return paintsOnlyOnScreen(hwnd); }
+// Off: parked windows keep a pixel on screen, so Chromium keeps painting and
+// travels live too. The still path stays for apps that still go blank.
+bool WindowMotion::travelsAsStill(HWND /*hwnd*/) { return false; }
 
 namespace {
 
@@ -296,7 +298,7 @@ bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QR
 	}
 	if (!this->ensureCover()) return false;
 
-	HWND snapshot = !pop && paintsOnlyOnScreen(hwnd) ? snapshotOf(from) : nullptr;
+	HWND snapshot = !pop && WindowMotion::travelsAsStill(hwnd) ? snapshotOf(from) : nullptr;
 	HTHUMBNAIL thumbnail = nullptr;
 	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail))) {
 		if (snapshot != nullptr) DestroyWindow(snapshot);
