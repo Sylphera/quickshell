@@ -32,6 +32,10 @@ constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
 constexpr int HOLD_MS = 150;
+// end-4's curve has covered 95 % of the way by then. The real switch happens
+// there, under the cover, so the new windows take input while the last few
+// pixels glide in, and the heavy work lands where the motion is slowest.
+constexpr int COMMIT_MS = 200;
 constexpr auto* SNAPSHOT_CLASS = L"QuickshellDesktopSlideSnapshot";
 constexpr int CORNER_ZONE = 40;
 constexpr int CORNER_TOLERANCE = 6;
@@ -63,8 +67,11 @@ double ease(double x) {
 
 LRESULT CALLBACK overlayProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	switch (msg) {
-	case WM_NCHITTEST: return HTTRANSPARENT;
-	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+	// Until the switch is committed the windows under the cover are the old
+	// desktop's, so clicks stop here. Afterwards the cover lets them through.
+	case WM_NCHITTEST: return HTCLIENT;
+	case WM_MOUSEACTIVATE: return MA_NOACTIVATEANDEAT;
+	case WM_SETCURSOR: SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE;
 	case WM_PAINT: {
 		PAINTSTRUCT paint {};
 		auto* dc = BeginPaint(hwnd, &paint);
@@ -475,7 +482,9 @@ void DesktopSlide::retarget(qsizetype to) {
 		this->startedAt = now;
 		this->target = to;
 		this->settledSent = false;
+		this->commitSent = false;
 	}
+	this->setClickThrough(false);
 	this->settleRetries = 0;
 	this->addDesktop(to, false);
 }
@@ -568,6 +577,10 @@ void DesktopSlide::run() {
 
 		this->layoutThumbs(camera);
 
+		if ((elapsed >= COMMIT_MS || progress >= 1.0) && !this->commitSent) {
+			this->commitSent = true;
+			QMetaObject::invokeMethod(this, &DesktopSlide::onCommit, Qt::QueuedConnection);
+		}
 		if (progress >= 1.0 && !this->settledSent) {
 			this->settledSent = true;
 			QMetaObject::invokeMethod(this, &DesktopSlide::onSettled, Qt::QueuedConnection);
@@ -587,6 +600,22 @@ void DesktopSlide::layoutThumbs(double camera) {
 		props.rcDestination = toRect(rect);
 		DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
 	}
+}
+
+void DesktopSlide::onCommit() {
+	{
+		auto lock = std::lock_guard(this->mutex);
+		if (!this->commitSent) return;
+	}
+	VirtualDesktops::instance()->commitSwitch();
+	this->setClickThrough(true);
+}
+
+void DesktopSlide::setClickThrough(bool through) {
+	if (this->overlay == nullptr) return;
+	auto style = GetWindowLongPtrW(this->overlay, GWL_EXSTYLE);
+	auto wanted = through ? style | WS_EX_TRANSPARENT : style & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
+	if (wanted != style) SetWindowLongPtrW(this->overlay, GWL_EXSTYLE, wanted);
 }
 
 void DesktopSlide::onSettled() {
@@ -927,6 +956,7 @@ void DesktopSlide::finish() {
 	this->bases.clear();
 	this->target = -1;
 	this->settledSent = false;
+	this->commitSent = false;
 	this->releaseBackdrop();
 	if (this->overlay == nullptr) return;
 	DestroyWindow(this->overlay);

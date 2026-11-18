@@ -61,6 +61,8 @@ private:
 	void run();
 	void layoutThumbs(double camera);
 	void onSettled();
+	void onCommit();
+	void setClickThrough(bool through);
 	void finish();
 	void placeUnderPanels();
 
@@ -76,6 +78,7 @@ private:
 	double cameraTo = 0;
 	std::chrono::steady_clock::time_point startedAt;
 	bool settledSent = false;
+	bool commitSent = false;
 
 	std::thread worker;
 	std::atomic<bool> stop = false;
