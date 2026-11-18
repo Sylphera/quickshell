@@ -105,4 +105,13 @@ bool WindowFrame::showTitleBar(QObject* object) {
 	return applyMargins(window);
 }
 
+bool WindowFrame::ensureVisible(QObject* object) {
+    auto* window = qobject_cast<QWindow*>(object);
+    if (window == nullptr || !window->isVisible()) return false;
+
+    auto* hwnd = reinterpret_cast<HWND>(window->winId()); // NOLINT(performance-no-int-to-ptr)
+    if (!IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_SHOWNA);
+    return IsWindowVisible(hwnd) != FALSE;
+}
+
 } // namespace qs::windows::sys

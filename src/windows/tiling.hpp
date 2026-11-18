@@ -51,6 +51,8 @@ public:
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
+	[[nodiscard]] bool suppressWindowShadows() const { return this->mSuppressWindowShadows; }
+	void setSuppressWindowShadows(bool suppress);
 	[[nodiscard]] qint32 gapsIn() const { return this->mGapsIn; }
 	void setGapsIn(qint32 gaps);
 	[[nodiscard]] qint32 gapsOut() const { return this->mGapsOut; }
@@ -126,6 +128,7 @@ public:
 
 signals:
 	void enabledChanged();
+	void suppressWindowShadowsChanged();
 	void gapsInChanged();
 	void gapsOutChanged();
 	void preserveSplitChanged();
@@ -268,6 +271,7 @@ private:
 	VirtualDesktops* desktops = nullptr;
 
 	bool mEnabled = false;
+	bool mSuppressWindowShadows = false;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
 	int mSpecialOffset = 0;
@@ -310,6 +314,7 @@ class Tiling: public QObject {
 	QML_SINGLETON;
 	// clang-format off
 	Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged);
+	Q_PROPERTY(bool suppressWindowShadows READ suppressWindowShadows WRITE setSuppressWindowShadows NOTIFY suppressWindowShadowsChanged);
 	Q_PROPERTY(qint32 gapsIn READ gapsIn WRITE setGapsIn NOTIFY gapsInChanged);
 	Q_PROPERTY(qint32 gapsOut READ gapsOut WRITE setGapsOut NOTIFY gapsOutChanged);
 	Q_PROPERTY(bool preserveSplit READ preserveSplit WRITE setPreserveSplit NOTIFY preserveSplitChanged);
@@ -334,6 +339,8 @@ public:
 
 	[[nodiscard]] bool enabled() const;
 	void setEnabled(bool enabled);
+	[[nodiscard]] bool suppressWindowShadows() const;
+	void setSuppressWindowShadows(bool suppress);
 	[[nodiscard]] qint32 gapsIn() const;
 	void setGapsIn(qint32 gaps);
 	[[nodiscard]] qint32 gapsOut() const;
@@ -367,6 +374,7 @@ public:
 
 signals:
 	void enabledChanged();
+	void suppressWindowShadowsChanged();
 	void gapsInChanged();
 	void gapsOutChanged();
 	void preserveSplitChanged();

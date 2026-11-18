@@ -62,6 +62,7 @@ private:
 	void runSlide();
 	void onSlideDone();
 	void waitForLanding(int generation, int tries);
+	void waitForTakeoff(int generation, int tries);
 	void moveReal(int offset);
 	void finishHide();
 	[[nodiscard]] int slideDistance() const;
@@ -79,6 +80,7 @@ private:
 
 	QList<Entry> entries;
 	bool mShown = false;
+	qsizetype openedDesktop = -1;
 	HMONITOR mMonitor = nullptr;
 	ULONGLONG shownAt = 0;
 	HWND dim = nullptr;
@@ -104,6 +106,7 @@ private:
 	double slideTo = 0;
 	bool slideIn = true;
 	bool hiding = false;
+	bool preparing = false;
 	int slideOffset = 0;
 };
 

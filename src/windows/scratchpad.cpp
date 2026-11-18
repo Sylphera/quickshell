@@ -202,7 +202,11 @@ Scratchpad::Scratchpad(QObject* parent)
 	    &Scratchpad::onActiveWindowChanged
 	);
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::currentChanged, this, [this]() {
-		this->setShown(false);
+		// A switch begun before opening special commits after the desktop slide.
+		// Its currentChanged only acknowledges the desktop already shown at open.
+		auto* desktops = VirtualDesktops::instance();
+		if (this->mShown && desktops->currentIndex() != this->openedDesktop)
+			this->setShown(false);
 	});
 }
 
@@ -263,6 +267,7 @@ void Scratchpad::setShown(bool shown) {
 	if (shown && this->hiding) {
 		// Super+S in the middle of the slide out turns it back.
 		this->hiding = false;
+		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
 		this->showDim();
 		this->slide(true);
 		return;
@@ -273,16 +278,22 @@ void Scratchpad::setShown(bool shown) {
 		POINT cursor {};
 		GetCursorPos(&cursor);
 		this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
 		this->shownAt = GetTickCount64();
 		this->mShown = true;
-		this->showDim();
+		this->preparing = true;
 		this->slideOffset = this->slideDistance();
 		this->moveReal(this->slideOffset);
 		this->relayout();
-		if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
-		this->slide(true);
+		this->waitForTakeoff(++this->slideGeneration, 0);
 		emit this->shownChanged();
 	} else {
+		if (this->preparing) {
+			this->preparing = false;
+			this->slideGeneration++;
+			this->finishHide();
+			return;
+		}
 		this->hideDim();
 		if (TilingManager::active() == nullptr || this->entries.isEmpty()) {
 			this->finishHide();
@@ -291,6 +302,35 @@ void Scratchpad::setShown(bool shown) {
 		this->hiding = true;
 		this->slide(false);
 	}
+}
+
+void Scratchpad::waitForTakeoff(int generation, int tries) {
+	if (generation != this->slideGeneration || !this->preparing || !this->mShown) return;
+	auto* tiling = TilingManager::active();
+	auto frames = tiling != nullptr ? tiling->specialFrames() : QHash<HWND, QRect>();
+	auto ready = tiling != nullptr;
+	for (const auto& entry: this->entries) {
+		RECT bounds {};
+		if (!frames.contains(entry.hwnd)
+		    || FAILED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))
+		    || bounds.left != frames.value(entry.hwnd).left()
+		    || bounds.top != frames.value(entry.hwnd).top() + this->slideDistance())
+		{
+			ready = false;
+			break;
+		}
+	}
+	if (!ready && tries < LANDING_TRIES) {
+		QTimer::singleShot(LANDING_STEP_MS, this, [this, generation, tries]() {
+			this->waitForTakeoff(generation, tries + 1);
+		});
+		return;
+	}
+	this->preparing = false;
+	for (const auto& entry: this->entries) raise(entry.hwnd);
+	this->showDim();
+	this->slide(true);
+	if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
 }
 
 int Scratchpad::slideDistance() const {
@@ -538,6 +578,7 @@ void Scratchpad::finishHide() {
 	this->hiding = false;
 	this->closeCover();
 	this->mShown = false;
+	this->openedDesktop = -1;
 	for (auto& entry: this->entries) this->park(entry);
 	this->relayout();
 	this->slideOffset = 0;
@@ -567,7 +608,7 @@ void Scratchpad::relayout() {
 		if (!IsWindow(entry.hwnd)) continue;
 		if (this->mShown) {
 			if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
-			raise(entry.hwnd);
+			if (!this->preparing) raise(entry.hwnd);
 		}
 		if (tiling != nullptr) tiling->markWindow(entry.window);
 	}

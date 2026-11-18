@@ -16,6 +16,7 @@ public:
 
 	Q_INVOKABLE static bool hideTitleBar(QObject* window);
 	Q_INVOKABLE static bool showTitleBar(QObject* window);
+	Q_INVOKABLE static bool ensureVisible(QObject* window);
 };
 
 } // namespace qs::windows::sys

@@ -42,6 +42,32 @@ namespace qs::windows {
 namespace {
 Q_LOGGING_CATEGORY(logTiling, "quickshell.windows.tiling", QtWarningMsg);
 
+// SPI_SETDROPSHADOW changes the current user's Windows appearance setting.
+// Remember only changes made by this process, including for crash recovery.
+std::atomic<bool> gRestoreWindowShadows {false};
+
+void setWindowShadowsSuppressed(bool suppress) {
+    if (suppress) {
+        if (gRestoreWindowShadows.load()) return;
+        BOOL enabled = FALSE;
+        if (!SystemParametersInfoW(SPI_GETDROPSHADOW, 0, &enabled, 0)) {
+            qCWarning(logTiling) << "Failed to read Windows window shadows" << GetLastError();
+            return;
+        }
+        if (!enabled) return;
+        if (!SystemParametersInfoW(SPI_SETDROPSHADOW, 0, nullptr, SPIF_SENDCHANGE)) {
+            qCWarning(logTiling) << "Failed to disable Windows window shadows" << GetLastError();
+            return;
+        }
+        gRestoreWindowShadows.store(true);
+    } else if (gRestoreWindowShadows.exchange(false)) {
+        if (!SystemParametersInfoW(SPI_SETDROPSHADOW, 0, reinterpret_cast<PVOID>(UINT_PTR {1}), SPIF_SENDCHANGE)) {
+            gRestoreWindowShadows.store(true);
+            qCWarning(logTiling) << "Failed to restore Windows window shadows" << GetLastError();
+        }
+    }
+}
+
 using tiling::Edge;
 
 constexpr int SYNC_DELAY_MS = 30;
@@ -357,7 +383,10 @@ TilingManager::TilingManager() {
 	QObject::connect(&this->deadlineTimer, &QTimer::timeout, this, &TilingManager::onDeadline);
 
 	if (auto* app = QCoreApplication::instance()) {
-		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &TilingManager::unparkAll);
+		QObject::connect(app, &QCoreApplication::aboutToQuit, this, [this]() {
+			this->unparkAll();
+			setWindowShadowsSuppressed(false);
+		});
 	}
 
 	TilingManager::rescueParked();
@@ -372,12 +401,21 @@ void TilingManager::setEnabled(bool enabled) {
 			this->mEnabled = false;
 			return;
 		}
+		if (this->mSuppressWindowShadows) setWindowShadowsSuppressed(true);
 	} else {
 		this->stop();
+		setWindowShadowsSuppressed(false);
 	}
 
 	this->syncWheel();
 	emit this->enabledChanged();
+}
+
+void TilingManager::setSuppressWindowShadows(bool suppress) {
+	if (suppress == this->mSuppressWindowShadows) return;
+	this->mSuppressWindowShadows = suppress;
+	if (this->mEnabled) setWindowShadowsSuppressed(suppress);
+	emit this->suppressWindowShadowsChanged();
 }
 
 void TilingManager::setGapsIn(qint32 gaps) {
@@ -1718,6 +1756,7 @@ void TilingManager::unparkAll() {
 }
 
 void TilingManager::restoreForCrash() {
+	setWindowShadowsSuppressed(false);
 	for (auto& slot: gTinyCornerSlots) {
 		auto* hwnd = slot.hwnd.exchange(nullptr);
 		if (hwnd == nullptr || !IsWindow(hwnd)) continue;
@@ -2653,6 +2692,7 @@ void TilingManager::moveFloating(TrackedWindow* window, Edge direction) const {
 Tiling::Tiling(QObject* parent): QObject(parent) {
 	auto* manager = TilingManager::instance();
 	QObject::connect(manager, &TilingManager::enabledChanged, this, &Tiling::enabledChanged);
+	QObject::connect(manager, &TilingManager::suppressWindowShadowsChanged, this, &Tiling::suppressWindowShadowsChanged);
 	QObject::connect(manager, &TilingManager::gapsInChanged, this, &Tiling::gapsInChanged);
 	QObject::connect(manager, &TilingManager::gapsOutChanged, this, &Tiling::gapsOutChanged);
 	// clang-format off
@@ -2680,6 +2720,8 @@ void Tiling::relayout() { TilingManager::instance()->relayout(); }
 
 bool Tiling::enabled() const { return TilingManager::instance()->enabled(); }
 void Tiling::setEnabled(bool enabled) { TilingManager::instance()->setEnabled(enabled); }
+bool Tiling::suppressWindowShadows() const { return TilingManager::instance()->suppressWindowShadows(); }
+void Tiling::setSuppressWindowShadows(bool suppress) { TilingManager::instance()->setSuppressWindowShadows(suppress); }
 qint32 Tiling::gapsIn() const { return TilingManager::instance()->gapsIn(); }
 void Tiling::setGapsIn(qint32 gaps) { TilingManager::instance()->setGapsIn(gaps); }
 qint32 Tiling::gapsOut() const { return TilingManager::instance()->gapsOut(); }
