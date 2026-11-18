@@ -229,6 +229,7 @@ VirtualDesktops::VirtualDesktops() {
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this->watcher, &RegistryWatcher::stop);
 	}
+	QTimer::singleShot(0, this, [] { DesktopSlide::instance(); });
 }
 
 VirtualDesktops::~VirtualDesktops() {

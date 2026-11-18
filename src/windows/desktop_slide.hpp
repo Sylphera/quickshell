@@ -12,6 +12,7 @@
 #include <qobject.h>
 #include <qrect.h>
 #include <qtclasshelpermacros.h>
+#include <qtimer.h>
 #include <qtypes.h>
 
 namespace qs::windows {
@@ -48,6 +49,8 @@ private:
 	void releaseBackdrop();
 	bool takeSnapshot(HWND hwnd, const QRect& frame);
 	void pruneSnapshots();
+	void warmUp();
+	void storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels);
 
 	struct Snapshot {
 		HWND host = nullptr;
@@ -80,6 +83,7 @@ private:
 	HBITMAP wallBitmap = nullptr;
 	quint32* wallBits = nullptr;
 	QHash<HWND, Snapshot> snapshots;
+	QTimer warmTimer;
 };
 
 } // namespace qs::windows

@@ -1,4 +1,6 @@
 #include "desktop_slide.hpp"
+#include <thread>
+#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -27,6 +29,8 @@ constexpr int HOLD_MS = 150;
 constexpr auto* SNAPSHOT_CLASS = L"QuickshellDesktopSlideSnapshot";
 constexpr int CORNER_ZONE = 40;
 constexpr int CORNER_TOLERANCE = 6;
+constexpr int CORNER_RADIUS = 8;
+constexpr int WARM_DELAY_MS = 2500;
 
 // end-4's menu_decel curve for the workspaces animation.
 constexpr double CURVE_X1 = 0.1;
@@ -174,6 +178,37 @@ bool heavyWindow(const TrackedWindow* window) {
 	return names.contains(name);
 }
 
+HWND createSnapshotHost(int x, int width, int height) {
+	static auto registered = false; // NOLINT
+	auto* instance = GetModuleHandleW(nullptr);
+	if (!registered) {
+		WNDCLASSEXW cls {};
+		cls.cbSize = sizeof(cls);
+		cls.lpfnWndProc = &DefWindowProcW;
+		cls.hInstance = instance;
+		cls.lpszClassName = SNAPSHOT_CLASS;
+		registered = RegisterClassExW(&cls) != 0;
+	}
+	auto* host = CreateWindowExW(
+	    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+	    SNAPSHOT_CLASS,
+	    L"",
+	    WS_POPUP,
+	    x,
+	    0,
+	    width,
+	    height,
+	    nullptr,
+	    nullptr,
+	    instance,
+	    nullptr
+	);
+	if (host == nullptr) return nullptr;
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(host, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	return host;
+}
+
 RECT toRect(const QRect& rect) { return {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1}; }
 
 } // namespace
@@ -184,7 +219,15 @@ DesktopSlide* DesktopSlide::instance() {
 	return slide.data();
 }
 
-DesktopSlide::DesktopSlide(QObject* parent): QObject(parent) {}
+DesktopSlide::DesktopSlide(QObject* parent): QObject(parent) {
+	this->warmTimer.setSingleShot(true);
+	this->warmTimer.setInterval(WARM_DELAY_MS);
+	QObject::connect(&this->warmTimer, &QTimer::timeout, this, &DesktopSlide::warmUp);
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::currentChanged, this, [this]() {
+		this->warmTimer.start();
+	});
+	this->warmTimer.start();
+}
 
 DesktopSlide::~DesktopSlide() { this->finish(); }
 
@@ -349,7 +392,8 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		auto snapshot = capture && heavy ? this->takeSnapshot(hwnd, frame) : false;
 		if (!snapshot && heavy) {
 			auto known = this->snapshots.constFind(hwnd);
-			snapshot = known != this->snapshots.constEnd() && known->frame == frame && IsWindow(known->host);
+			snapshot = known != this->snapshots.constEnd() && known->frame == frame.translated(this->monitor.topLeft())
+			           && IsWindow(known->host);
 		}
 		if (snapshot) {
 			const auto& copy = this->snapshots.value(hwnd);
@@ -531,36 +575,11 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	}
 	auto parkX = GetSystemMetrics(SM_XVIRTUALSCREEN) - width - 100;
 	if (snapshot.host == nullptr) {
-		static auto registered = false; // NOLINT
-		auto* instance = GetModuleHandleW(nullptr);
-		if (!registered) {
-			WNDCLASSEXW cls {};
-			cls.cbSize = sizeof(cls);
-			cls.lpfnWndProc = &DefWindowProcW;
-			cls.hInstance = instance;
-			cls.lpszClassName = SNAPSHOT_CLASS;
-			registered = RegisterClassExW(&cls) != 0;
-		}
-		snapshot.host = CreateWindowExW(
-		    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
-		    SNAPSHOT_CLASS,
-		    L"",
-		    WS_POPUP,
-		    parkX,
-		    0,
-		    width,
-		    height,
-		    nullptr,
-		    nullptr,
-		    instance,
-		    nullptr
-		);
+		snapshot.host = createSnapshotHost(parkX, width, height);
 		if (snapshot.host == nullptr) {
 			this->snapshots.remove(hwnd);
 			return false;
 		}
-		BOOL noTransitions = TRUE;
-		DwmSetWindowAttribute(snapshot.host, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
 	}
 
 	auto* screen = GetDC(nullptr);
@@ -608,8 +627,139 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	DeleteObject(bitmap);
 	ReleaseDC(nullptr, screen);
 	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
-	snapshot.frame = frame;
+	snapshot.frame = frame.translated(this->monitor.topLeft());
 	return true;
+}
+
+// Right after the shell starts no copy is kept yet, so the first slide to each
+// desktop would fall back to live browser thumbnails. A moment after the
+// desktops settle, browsers on the other desktops are asked to paint
+// themselves once on a worker thread; the screen copy taken when leaving a
+// desktop later replaces this with exact corners.
+void DesktopSlide::warmUp() {
+	if (this->overlay != nullptr) {
+		this->warmTimer.start();
+		return;
+	}
+	auto* tracker = WindowTracker::instance();
+	auto* desktops = VirtualDesktops::instance();
+	if (tracker == nullptr || desktops == nullptr) return;
+	this->pruneSnapshots();
+
+	for (auto* window: tracker->windows()) {
+		if (window->minimized() || window->desktop() < 0 || window->desktop() == desktops->currentIndex()) continue;
+		if (!heavyWindow(window)) continue;
+		auto* hwnd = window->hwnd();
+		RECT bounds {};
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
+		auto frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+		auto known = this->snapshots.constFind(hwnd);
+		if (known != this->snapshots.constEnd() && known->frame == frame) continue;
+		if (frame.isEmpty()) continue;
+
+		auto radius = static_cast<int>(std::lround(CORNER_RADIUS * GetDpiForWindow(hwnd) / 96.0));
+		QPointer<DesktopSlide> self = this;
+		std::thread([self, hwnd, frame, radius]() {
+			RECT raw {};
+			if (!GetWindowRect(hwnd, &raw)) return;
+			auto width = raw.right - raw.left;
+			auto height = raw.bottom - raw.top;
+			auto left = frame.x() - raw.left;
+			auto top = frame.y() - raw.top;
+			if (width <= 0 || height <= 0 || left < 0 || top < 0 || left + frame.width() > width
+			    || top + frame.height() > height)
+			{
+				return;
+			}
+
+			auto* screen = GetDC(nullptr);
+			BITMAPINFO info {};
+			info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+			info.bmiHeader.biWidth = width;
+			info.bmiHeader.biHeight = -height;
+			info.bmiHeader.biPlanes = 1;
+			info.bmiHeader.biBitCount = 32;
+			void* bits = nullptr;
+			auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+			auto* dc = CreateCompatibleDC(screen);
+			ReleaseDC(nullptr, screen);
+			SelectObject(dc, bitmap);
+			auto painted = PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != FALSE;
+			GdiFlush();
+
+			QList<quint32> pixels;
+			if (painted) {
+				auto w = frame.width();
+				auto h = frame.height();
+				pixels.resize(static_cast<qsizetype>(w) * h);
+				auto* source = static_cast<const quint32*>(bits);
+				auto r = static_cast<double>(radius);
+				for (auto y = 0; y < h; y++) {
+					for (auto x = 0; x < w; x++) {
+						auto p = source[static_cast<qsizetype>(top + y) * width + left + x] | 0xff000000u;
+						auto cx = x < r ? r - x - 0.5 : (x >= w - r ? x - (w - r) + 0.5 : 0.0);
+						auto cy = y < r ? r - y - 0.5 : (y >= h - r ? y - (h - r) + 0.5 : 0.0);
+						if (cx > 0 && cy > 0 && std::sqrt(cx * cx + cy * cy) > r) p = 0;
+						pixels[static_cast<qsizetype>(y) * w + x] = p;
+					}
+				}
+			}
+			DeleteDC(dc);
+			DeleteObject(bitmap);
+			if (pixels.isEmpty() || self.isNull()) return;
+
+			QMetaObject::invokeMethod(
+			    self.data(),
+			    [self, hwnd, frame, pixels]() {
+				    if (!self.isNull() && self->overlay == nullptr) self->storeSnapshot(hwnd, frame, pixels);
+			    },
+			    Qt::QueuedConnection
+			);
+		}).detach();
+	}
+}
+
+void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels) {
+	if (!IsWindow(hwnd)) return;
+	auto width = frame.width();
+	auto height = frame.height();
+	auto& snapshot = this->snapshots[hwnd];
+	if (snapshot.host != nullptr && snapshot.frame.size() != frame.size()) {
+		DestroyWindow(snapshot.host);
+		snapshot.host = nullptr;
+	}
+	auto parkX = GetSystemMetrics(SM_XVIRTUALSCREEN) - width - 100;
+	if (snapshot.host == nullptr) {
+		snapshot.host = createSnapshotHost(parkX, width, height);
+		if (snapshot.host == nullptr) {
+			this->snapshots.remove(hwnd);
+			return;
+		}
+	}
+
+	auto* screen = GetDC(nullptr);
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	void* raw = nullptr;
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
+	auto* dc = CreateCompatibleDC(screen);
+	SelectObject(dc, bitmap);
+	std::memcpy(raw, pixels.constData(), sizeof(quint32) * pixels.size());
+
+	POINT origin {parkX, 0};
+	SIZE size {width, height};
+	POINT source {0, 0};
+	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+	UpdateLayeredWindow(snapshot.host, screen, &origin, &size, dc, &source, 0, &blend, ULW_ALPHA);
+	DeleteDC(dc);
+	DeleteObject(bitmap);
+	ReleaseDC(nullptr, screen);
+	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
+	snapshot.frame = frame;
 }
 
 void DesktopSlide::pruneSnapshots() {
