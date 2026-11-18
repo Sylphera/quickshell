@@ -24,6 +24,7 @@
 #include "../hotkeys.hpp"
 #include "../input_mask.hpp"
 #include "../scratchpad.hpp"
+#include "../super_drag.hpp"
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_tracker.hpp"
@@ -143,6 +144,18 @@ HyprlandIpc::HyprlandIpc()
 	auto* masks = qs::windows::InputMaskTracker::instance();
 	masks->acquireButtonEvents();
 	masks->acquireMonitorEvents();
+
+	// end-4: Super+wheel walks workspaces, Ctrl+Super+wheel only the occupied
+	// ones, and Shift or Alt with Super+wheel takes the window along.
+	using WheelBind = qs::windows::SuperDragManager::WheelBind;
+	qs::windows::SuperDragManager::instance()->setWorkspaceWheel([this](int steps, WheelBind bind) {
+		auto amount = QString(steps > 0 ? "+%1" : "-%1").arg(qAbs(steps));
+		switch (bind) {
+		case WheelBind::Workspace: this->dispatch("workspace " + amount); break;
+		case WheelBind::OccupiedWorkspace: this->dispatch("workspace r" + amount); break;
+		case WheelBind::MoveWindow: this->dispatch("movetoworkspace r" + amount); break;
+		}
+	});
 	QObject::connect(
 	    masks,
 	    &qs::windows::InputMaskTracker::cursorMonitorChanged,

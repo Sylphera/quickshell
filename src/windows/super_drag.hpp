@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <thread>
 
 #include <qt_windows.h>
@@ -23,6 +24,10 @@ public:
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
 	void setWheelColumns(bool enabled);
+	// end-4's Super+wheel binds: the handler gets the steps (positive is down,
+	// to the next workspace) and the modifier: none, Ctrl, or Shift/Alt.
+	enum class WheelBind { Workspace, OccupiedWorkspace, MoveWindow };
+	void setWorkspaceWheel(std::function<void(int steps, WheelBind bind)> handler);
 
 	static bool onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info);
 	static void onHookStopped();
@@ -56,6 +61,7 @@ private:
 	bool workerRunning = false;
 	bool mEnabled = false;
 	bool wheelColumns = false;
+	std::function<void(int, WheelBind)> workspaceWheel;
 	GuiDrag guiDrag;
 };
 

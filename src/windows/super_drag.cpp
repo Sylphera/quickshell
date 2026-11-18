@@ -40,6 +40,7 @@ constexpr UINT WM_SD_STARTED = WM_APP + 1;
 constexpr UINT WM_SD_TILED_RESIZE = WM_APP + 2;
 constexpr UINT WM_SD_ENDED = WM_APP + 3;
 constexpr UINT WM_SD_WHEEL = WM_APP + 4;
+constexpr UINT WM_SD_WORKSPACE_WHEEL = WM_APP + 5;
 
 constexpr LPARAM FLAG_RESIZE = 1;
 constexpr LPARAM FLAG_LEFT = 2;
@@ -70,6 +71,7 @@ std::atomic<bool> gMovePending = false;  // NOLINT
 std::atomic<uint64_t> gTiledDelta = 0;   // NOLINT
 std::atomic<bool> gTiledPending = false; // NOLINT
 std::atomic<bool> gWheelColumns = false; // NOLINT
+std::atomic<bool> gWheelWorkspaces = false; // NOLINT
 
 struct HookState {
 	bool active = false;
@@ -596,6 +598,18 @@ void SuperDragManager::setWheelColumns(bool enabled) {
 	else tracker->releaseHook();
 }
 
+void SuperDragManager::setWorkspaceWheel(std::function<void(int, WheelBind)> handler) {
+	auto had = static_cast<bool>(this->workspaceWheel);
+	this->workspaceWheel = std::move(handler);
+	auto has = static_cast<bool>(this->workspaceWheel);
+	if (had == has) return;
+	gWheelWorkspaces.store(has);
+
+	auto* tracker = InputMaskTracker::instance();
+	if (has) tracker->acquireHook();
+	else tracker->releaseHook();
+}
+
 bool SuperDragManager::startWorker() {
 	if (this->workerRunning) return true;
 
@@ -708,12 +722,16 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 }
 
 bool SuperDragManager::onWheel(WPARAM message, const MSLLHOOKSTRUCT* info) {
-	if (!gWheelColumns.load(std::memory_order_relaxed)) return false;
 	if (!isDown(VK_LWIN) && !isDown(VK_RWIN)) return false;
-	if (isDown(VK_CONTROL) || isDown(VK_MENU)) return false;
 
+	// The vertical wheel switches workspaces like end-4; the horizontal one
+	// walks the scrolling layout's columns.
 	auto horizontal = message == WM_MOUSEHWHEEL;
-	if (horizontal == isDown(VK_SHIFT)) return false;
+	auto workspaces = !horizontal && gWheelWorkspaces.load(std::memory_order_relaxed);
+	if (!workspaces) {
+		if (!horizontal || !gWheelColumns.load(std::memory_order_relaxed)) return false;
+		if (isDown(VK_CONTROL) || isDown(VK_MENU) || isDown(VK_SHIFT)) return false;
+	}
 
 	auto delta = static_cast<qint32>(static_cast<SHORT>(HIWORD(info->mouseData)));
 	auto step = horizontal ? delta : -delta;
@@ -729,7 +747,19 @@ bool SuperDragManager::onWheel(WPARAM message, const MSLLHOOKSTRUCT* info) {
 
 	if (columns != 0) {
 		hook.wheel -= columns * WHEEL_DELTA;
-		if (auto* gui = gGuiWindow.load()) {
+		if (workspaces) {
+			auto bind = isDown(VK_SHIFT) || isDown(VK_MENU) ? WheelBind::MoveWindow
+			          : isDown(VK_CONTROL)                  ? WheelBind::OccupiedWorkspace
+			                                                : WheelBind::Workspace;
+			if (auto* gui = gGuiWindow.load()) {
+				PostMessageW(
+				    gui,
+				    WM_SD_WORKSPACE_WHEEL,
+				    static_cast<WPARAM>(static_cast<INT_PTR>(columns)),
+				    static_cast<LPARAM>(bind)
+				);
+			}
+		} else if (auto* gui = gGuiWindow.load()) {
 			PostMessageW(
 			    gui,
 			    WM_SD_WHEEL,
@@ -757,6 +787,13 @@ SuperDragManager::messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 	case WM_SD_STARTED: return SuperDragManager::instance()->onStarted(target, lParam);
 	case WM_SD_TILED_RESIZE: SuperDragManager::instance()->onTiledResize(); return 0;
 	case WM_SD_ENDED: SuperDragManager::instance()->onEnded(target, lParam); return 0;
+	case WM_SD_WORKSPACE_WHEEL: {
+		auto* manager = SuperDragManager::instance();
+		if (manager->workspaceWheel) {
+			manager->workspaceWheel(static_cast<int>(static_cast<INT_PTR>(wParam)), static_cast<WheelBind>(lParam));
+		}
+		return 0;
+	}
 	case WM_SD_WHEEL:
 		if (auto* tiling = TilingManager::active()) {
 			tiling->focusColumnAt(
