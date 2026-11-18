@@ -481,7 +481,19 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
-	if (this->managedFrame(m) != m.target) return false;
+	// Still where tiling left it. A few pixels off is the app nudging itself
+	// when the work area changes (Chromium does), which shouldn't cost the
+	// slide; anything more is someone else's move.
+	auto frame = this->managedFrame(m);
+	if (frame != m.target) {
+		auto off = std::max({
+		    std::abs(frame.left() - m.target.left()),
+		    std::abs(frame.top() - m.target.top()),
+		    std::abs(frame.right() - m.target.right()),
+		    std::abs(frame.bottom() - m.target.bottom()),
+		});
+		if (off > 48) return false;
+	}
 
 	// Only what is on screen now: not a desktop on its way out or in.
 	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
