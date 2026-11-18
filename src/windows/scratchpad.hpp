@@ -109,6 +109,8 @@ private:
 	bool hiding = false;
 	bool preparing = false;
 	int slideOffset = 0;
+	int slideSpan = 0;
+	[[nodiscard]] bool slideDrivesDim() const;
 };
 
 } // namespace qs::windows

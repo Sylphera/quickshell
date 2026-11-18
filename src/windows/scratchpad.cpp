@@ -454,6 +454,7 @@ void Scratchpad::slide(bool in) {
 		this->slideIn = in;
 		this->slideFrom = this->slideOffset;
 		this->slideTo = in ? 0 : this->slideDistance();
+		this->slideSpan = this->slideDistance();
 		this->slideStart = std::chrono::steady_clock::now();
 		this->slideDoneSent = false;
 	}
@@ -603,6 +604,11 @@ void Scratchpad::runSlide() {
 		auto eased = this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
 		this->slideOffset = static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
 		this->layoutCover(this->slideOffset);
+		if (this->dim != nullptr && this->slideSpan > 0) {
+			auto shown = std::clamp(1.0 - static_cast<double>(this->slideOffset) / this->slideSpan, 0.0, 1.0);
+			this->dimAlpha = static_cast<int>(std::lround(DIM_ALPHA * shown));
+			SetLayeredWindowAttributes(this->dim, 0, static_cast<BYTE>(this->dimAlpha), LWA_ALPHA);
+		}
 
 		if (progress >= 1.0 && !this->slideDoneSent) {
 			this->slideDoneSent = true;
@@ -620,6 +626,10 @@ void Scratchpad::onSlideDone() {
 	}
 	if (!in) {
 		this->closeCover();
+		if (this->dim != nullptr && this->dimTarget == 0) {
+			this->dimAlpha = 0;
+			ShowWindow(this->dim, SW_HIDE);
+		}
 		if (this->hiding) this->finishHide();
 		return;
 	}
@@ -749,13 +759,22 @@ void Scratchpad::showDim() {
 	    SWP_NOACTIVATE | SWP_SHOWWINDOW
 	);
 	this->dimTarget = DIM_ALPHA;
-	this->dimTimer.start();
+	if (this->slideDrivesDim()) this->dimTimer.stop();
+	else this->dimTimer.start();
 }
 
 void Scratchpad::hideDim() {
 	if (this->dim == nullptr) return;
 	this->dimTarget = 0;
-	this->dimTimer.start();
+	if (this->slideDrivesDim()) this->dimTimer.stop();
+	else this->dimTimer.start();
+}
+
+// With the windows sliding, the dim follows them on the slide's own clock and
+// curve, as Hyprland's dim_special follows the special workspace. Without a
+// slide it fades on its timer.
+bool Scratchpad::slideDrivesDim() const {
+	return TilingManager::active() != nullptr && !this->entries.isEmpty();
 }
 
 void Scratchpad::stepDim() {
