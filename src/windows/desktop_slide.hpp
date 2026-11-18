@@ -43,7 +43,16 @@ private:
 
 	bool start(qsizetype from, qsizetype to);
 	void retarget(qsizetype to);
-	void addDesktop(qsizetype desktop);
+	void addDesktop(qsizetype desktop, bool capture);
+	void prepareBackdrop();
+	void releaseBackdrop();
+	bool takeSnapshot(HWND hwnd, const QRect& frame);
+	void pruneSnapshots();
+
+	struct Snapshot {
+		HWND host = nullptr;
+		QRect frame;
+	};
 	void run();
 	void layoutThumbs(double camera);
 	void onSettled();
@@ -67,6 +76,10 @@ private:
 	std::atomic<bool> stop = false;
 	int settleRetries = 0;
 	QList<HWND> raised;
+	HDC wallDc = nullptr;
+	HBITMAP wallBitmap = nullptr;
+	quint32* wallBits = nullptr;
+	QHash<HWND, Snapshot> snapshots;
 };
 
 } // namespace qs::windows
