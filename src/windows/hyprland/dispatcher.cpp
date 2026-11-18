@@ -172,28 +172,6 @@ void moveWindowTo(TrackedWindow* window, qsizetype index, bool follow) {
 	window->activate();
 }
 
-constexpr LONG POINTER_SLOP = 2;
-constexpr ULONGLONG CLOSE_REFOCUS_MS = 500;
-
-struct FocusMark {
-	POINT cursor {};
-	bool valid = false;
-	ULONGLONG closedAt = 0;
-};
-
-FocusMark& focusMark(WindowTracker* tracker) {
-	static FocusMark mark;       // NOLINT
-	static auto connected = false; // NOLINT
-	if (!connected && tracker != nullptr) {
-		connected = true;
-		QObject::connect(tracker, &WindowTracker::activeWindowChanged, tracker, [] {
-			if (GetTickCount64() - mark.closedAt < CLOSE_REFOCUS_MS) return;
-			mark.valid = GetCursorPos(&mark.cursor) != 0;
-		});
-	}
-	return mark;
-}
-
 bool closeShellWindow(HWND hwnd) {
 	if (hwnd == nullptr || !isOwnProcessWindow(hwnd)) return false;
 	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -242,66 +220,14 @@ void warpToFocusChange(WindowTracker* tracker) {
 	QTimer::singleShot(WARP_FOCUS_TIMEOUT_MS, context, [context]() { context->deleteLater(); });
 }
 
-TrackedWindow* windowUnderPointer(WindowTracker* tracker, POINT cursor) {
-	auto* hit = WindowFromPoint(cursor);
-	if (hit == nullptr) return nullptr;
-	auto* root = GetAncestor(hit, GA_ROOT);
-	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return nullptr;
-	if (auto* window = tracker->windowFor(root)) return window;
-	if (auto* tiling = TilingManager::active()) return tiling->tileAt(QPoint(cursor.x, cursor.y));
-	return nullptr;
-}
-
-bool closeUnderPointer(WindowTracker* tracker, POINT cursor) {
-	if (auto* window = windowUnderPointer(tracker, cursor)) {
-		window->close();
-		return true;
-	}
-	auto* hit = WindowFromPoint(cursor);
-	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
-	if (root == nullptr || !IsWindowVisible(root) || IsIconic(root)) return false;
-	return closeShellWindow(root);
-}
-
-// Whether the pointer moved since focus last changed: then window actions
-// take the window under it, as with Hyprland's follow_mouse, and otherwise the
-// focused one, so the keyboard alone still acts on what it focused.
-bool pointerMovedSinceFocus(WindowTracker* tracker, POINT& cursor) {
-	auto& mark = focusMark(tracker);
-	GetCursorPos(&cursor);
-	return !mark.valid || std::abs(cursor.x - mark.cursor.x) > POINTER_SLOP
-	    || std::abs(cursor.y - mark.cursor.y) > POINTER_SLOP;
-}
-
-void markActedOn(WindowTracker* tracker) {
-	auto& mark = focusMark(tracker);
-	mark.valid = false;
-	mark.closedAt = GetTickCount64();
-}
-
-TrackedWindow* pointerOrFocused(WindowTracker* tracker) {
-	POINT cursor {};
-	if (pointerMovedSinceFocus(tracker, cursor)) {
-		if (auto* window = windowUnderPointer(tracker, cursor)) return window;
-	}
-	return tracker->activeWindow();
-}
-
+// killactive closes the focused window, as in Hyprland, or the shell's own
+// window in front when no app window is focused.
 void closeFocused(WindowTracker* tracker) {
-	POINT cursor {};
-	auto moved = pointerMovedSinceFocus(tracker, cursor);
-
-	auto closed = moved && closeUnderPointer(tracker, cursor);
-	if (!closed) {
-		if (auto* window = tracker->activeWindow()) {
-			window->close();
-			closed = true;
-		} else {
-			closed = closeShellWindow(GetForegroundWindow());
-		}
+	if (auto* window = tracker->activeWindow()) {
+		window->close();
+	} else {
+		closeShellWindow(GetForegroundWindow());
 	}
-
-	if (closed) markActedOn(tracker);
 }
 
 } // namespace
@@ -311,7 +237,6 @@ void Dispatcher::dispatch(const QString& request) {
 	if (trimmed.isEmpty()) return;
 
 	qCDebug(logDispatch) << "dispatch" << trimmed;
-	focusMark(this->ipc->tracker());
 
 	if (trimmed.startsWith("hl.")) {
 		auto call = Dispatcher::parseLua(trimmed);
@@ -416,12 +341,8 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 	} else if (fn == "hl.dsp.window.move") {
 		auto* window = this->resolveWindow(windowArg);
 		if (t.contains("workspace")) {
-			if (!t.contains("window")) window = pointerOrFocused(this->ipc->tracker());
-			auto follow = t.value("follow") != "false";
-			this->moveToWorkspace(window, t.value("workspace"), follow);
-			// Following the window focuses it on purpose; sending it away
-			// leaves focus wherever Windows puts it, so the pointer decides next.
-			if (!follow) markActedOn(this->ipc->tracker());
+			if (!t.contains("window")) window = this->ipc->tracker()->activeWindow();
+			this->moveToWorkspace(window, t.value("workspace"), t.value("follow") != "false");
 		} else if (t.contains("x") || t.contains("y")) {
 			this->moveWindowPixel(window, t.value("x"), t.value("y"));
 		} else if (t.contains("direction")) {
@@ -493,9 +414,8 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		auto comma = args.indexOf(',');
 		auto workspace = comma == -1 ? args : args.left(comma);
 		auto window = comma == -1 ? QString() : args.mid(comma + 1);
-		auto* target = window.trimmed().isEmpty() ? pointerOrFocused(tracker) : this->resolveWindow(window);
+		auto* target = window.trimmed().isEmpty() ? tracker->activeWindow() : this->resolveWindow(window);
 		this->moveToWorkspace(target, workspace, name == "movetoworkspace");
-		if (name != "movetoworkspace") markActedOn(tracker);
 	} else if (name == "killactive") {
 			closeFocused(tracker);
 	} else if (name == "closewindow") {

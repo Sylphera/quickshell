@@ -461,11 +461,9 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
 		// As in Hyprland, the app takes its new size right away and its live
-		// thumbnail shows it while it travels. Apps that stop painting off
-		// screen (Chromium) travel as a still at the size they had instead.
+		// thumbnail shows it while it travels.
 		auto from = this->managedFrame(m);
-		auto stillSize = WindowMotion::travelsAsStill(m.window->hwnd());
-		auto parked = stillSize ? QRect(parkedFrame(tile).topLeft(), from.size()) : parkedFrame(tile);
+		auto parked = parkedFrame(tile);
 		if (motion->begin(m.window->hwnd(), from, tile, parked)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);
@@ -826,8 +824,7 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
 		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
 		if (from == work && !motion->moving(hwnd)) continue;
-		auto parked = WindowMotion::travelsAsStill(hwnd) ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
-		motion->begin(hwnd, from, work, parked);
+		motion->begin(hwnd, from, work, parkedFrame(work));
 	}
 }
 
@@ -1813,31 +1810,6 @@ QHash<HWND, QRect> TilingManager::specialFrames() const {
 		}
 	}
 	return frames;
-}
-
-TrackedWindow* TilingManager::tileAt(const QPoint& point) {
-	if (this->tracker == nullptr || this->desktops == nullptr) return nullptr;
-	auto* screen = this->tracker->screenFor(MonitorFromPoint({point.x(), point.y()}, MONITOR_DEFAULTTONEAREST));
-	if (screen == nullptr) return nullptr;
-
-	Layout* layout = nullptr;
-	auto* scratchpad = Scratchpad::instance();
-	if (scratchpad->shown() && screenForMonitor(scratchpad->monitor()) == screen) {
-		layout = this->layoutAt(SPECIAL_DESKTOP, screen, false);
-	} else {
-		auto current = this->desktops->currentIndex();
-		if (current < 0 || current >= this->desktops->count()) return nullptr;
-		layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
-	}
-	if (layout == nullptr) return nullptr;
-
-	for (auto id: layout->tree->ids()) {
-		if (layout->tree->isHidden(id) || layout->tree->isParked(id)) continue;
-		if (!layout->tree->box(id).contains(point)) continue;
-		auto* window = this->windowOf(id);
-		if (window != nullptr && this->stateOf(this->managed.at(window)) == State::Tiled) return window;
-	}
-	return nullptr;
 }
 
 bool TilingManager::focusIdleStrip() {

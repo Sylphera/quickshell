@@ -41,7 +41,6 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
-	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
 	// Moves the special workspace's tiles down by this many physical pixels and
 	// places them at once, for its slide in and out.
 	void setSpecialOffset(int offset);
