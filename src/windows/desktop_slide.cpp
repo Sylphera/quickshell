@@ -18,6 +18,7 @@
 #include <qstringlist.h>
 #include <qtimer.h>
 #include <qdir.h>
+#include <qhash.h>
 #include <qfile.h>
 #include <qimage.h>
 #include <qstandardpaths.h>
@@ -75,7 +76,14 @@ QString frameText(const QRect& frame) {
 	return QStringLiteral("%1,%2,%3,%4").arg(frame.x()).arg(frame.y()).arg(frame.width()).arg(frame.height());
 }
 
+// Called on the GUI thread whenever a still is taken. Writing one costs a PNG
+// encode, so a window is written at most every 30 s unless its frame changed.
 void saveSnapshot(HWND hwnd, const QRect& frame, QImage image) {
+	static QHash<HWND, QPair<QRect, qint64>> written; // NOLINT
+	auto now = static_cast<qint64>(GetTickCount64());
+	auto last = written.constFind(hwnd);
+	if (last != written.constEnd() && last->first == frame && now - last->second < 30000) return;
+	written[hwnd] = {frame, now};
 	auto pid = processOf(hwnd);
 	std::thread([hwnd, frame, pid, image = std::move(image)]() mutable {
 		image.setText(QStringLiteral("frame"), frameText(frame));
