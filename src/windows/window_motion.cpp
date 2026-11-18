@@ -98,6 +98,12 @@ HWND snapshotOf(const QRect& frame) {
 	return host;
 }
 
+} // namespace
+
+bool WindowMotion::travelsAsStill(HWND hwnd) { return paintsOnlyOnScreen(hwnd); }
+
+namespace {
+
 double ease(double x) {
 	auto lo = 0.0;
 	auto hi = 1.0;

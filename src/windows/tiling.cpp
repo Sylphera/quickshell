@@ -457,12 +457,12 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	}
 	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
-		// As in Hyprland, the window keeps its size while it travels and its
-		// image stretches to the new tile; it takes the new size on landing,
-		// on screen. Resized off screen, apps like Chromium relayout without
-		// painting and the thumbnail goes blank.
+		// As in Hyprland, the app takes its new size right away and its live
+		// thumbnail shows it while it travels. Apps that stop painting off
+		// screen (Chromium) travel as a still at the size they had instead.
 		auto from = this->managedFrame(m);
-		auto parked = QRect(parkedFrame(tile).topLeft(), from.size());
+		auto stillSize = WindowMotion::travelsAsStill(m.window->hwnd());
+		auto parked = stillSize ? QRect(parkedFrame(tile).topLeft(), from.size()) : parkedFrame(tile);
 		if (motion->begin(m.window->hwnd(), from, tile, parked)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);
@@ -821,7 +821,8 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
 		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
 		if (from == work && !motion->moving(hwnd)) continue;
-		motion->begin(hwnd, from, work, QRect(parkedFrame(work).topLeft(), from.size()));
+		auto parked = WindowMotion::travelsAsStill(hwnd) ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
+		motion->begin(hwnd, from, work, parked);
 	}
 }
 

@@ -35,6 +35,10 @@ public:
 	void retarget(HWND hwnd, const QRect& to, const QRect& parked);
 	void cancel(HWND hwnd);
 	[[nodiscard]] bool moving(HWND hwnd) const;
+	// Apps that stop painting off screen (Chromium) travel as a still taken
+	// before they leave, at the size they had; the rest take their new size
+	// right away and their live thumbnail shows it, as in Hyprland.
+	[[nodiscard]] static bool travelsAsStill(HWND hwnd);
 
 signals:
 	// The window is in place at `frame`; tiling takes it back from here.
