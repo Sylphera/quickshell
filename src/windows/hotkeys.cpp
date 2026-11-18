@@ -36,6 +36,9 @@
 #include "system/keyboard.hpp"
 #include "util.hpp"
 
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
+
 namespace qs::windows::hotkeys {
 
 namespace {
@@ -1184,12 +1187,30 @@ void HotkeyManager::runDispatch(const Bind& bind) {
 	}
 }
 
+namespace {
+
+// The program Windows opens https links with, so a bind can start the user's
+// browser the way end-4's Super+W does.
+QString defaultBrowser() {
+	wchar_t path[MAX_PATH] {};
+	DWORD size = MAX_PATH;
+	if (FAILED(AssocQueryStringW(ASSOCF_IS_PROTOCOL, ASSOCSTR_EXECUTABLE, L"https", nullptr, path, &size))) {
+		return {};
+	}
+	return QString::fromWCharArray(path);
+}
+
+} // namespace
+
 void HotkeyManager::runExec(const Bind& bind) const {
 	auto commands = QStringList();
 
 	for (const auto& alternative: bind.argument.split(QStringLiteral(" || "))) {
 		auto command = alternative;
 		command.replace("%SHELL%", this->shellDir, Qt::CaseInsensitive);
+		if (command.contains("%BROWSER%", Qt::CaseInsensitive)) {
+			command.replace("%BROWSER%", defaultBrowser(), Qt::CaseInsensitive);
+		}
 
 		auto source = command.toStdWString();
 		auto size = ExpandEnvironmentStringsW(source.c_str(), nullptr, 0);
