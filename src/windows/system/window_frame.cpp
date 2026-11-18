@@ -122,26 +122,40 @@ bool WindowFrame::ensureVisible(QObject* object) {
 void WindowFrame::popIn(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);
 	if (window == nullptr) return;
+	// Cloaked before it first shows: a window cloaked once visible flashes
+	// for a frame. Call this while the window is still hidden.
 	auto* hwnd = reinterpret_cast<HWND>(window->winId()); // NOLINT(performance-no-int-to-ptr)
 	WindowPop::popIn(hwnd);
 
-	// The window shows blank until its first frame; pop it in once it painted.
+	// It shows blank until its first frame: pop it in once it has painted,
+	// or a moment after it shows if no frame is reported.
 	auto started = std::make_shared<bool>(false);
 	auto begin = [hwnd, started]() {
 		if (*started) return;
 		*started = true;
 		WindowPop::start(hwnd, true);
 	};
-	if (auto* quick = qobject_cast<QQuickWindow*>(window)) {
-		auto connection = std::make_shared<QMetaObject::Connection>();
-		*connection = QObject::connect(quick, &QQuickWindow::frameSwapped, quick, [begin, connection]() {
-			QObject::disconnect(*connection);
-			QTimer::singleShot(0, begin);
-		}, Qt::QueuedConnection);
+	auto arm = [window, begin]() {
+		if (auto* quick = qobject_cast<QQuickWindow*>(window)) {
+			auto connection = std::make_shared<QMetaObject::Connection>();
+			*connection = QObject::connect(quick, &QQuickWindow::frameSwapped, quick, [begin, connection]() {
+				QObject::disconnect(*connection);
+				QTimer::singleShot(0, begin);
+			}, Qt::QueuedConnection);
+		}
+		QTimer::singleShot(600, window, begin);
+	};
+	if (window->isVisible()) {
+		arm();
+		return;
 	}
-	QTimer::singleShot(600, window, begin);
+	auto shown = std::make_shared<QMetaObject::Connection>();
+	*shown = QObject::connect(window, &QWindow::visibleChanged, window, [arm, shown](bool visible) {
+		if (!visible) return;
+		QObject::disconnect(*shown);
+		arm();
+	});
 }
-
 int WindowFrame::popOut(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);
 	if (window == nullptr || !window->isVisible()) return 0;
