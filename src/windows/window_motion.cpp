@@ -164,23 +164,11 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 	// A hung app would hold the shell up; it moves when it wakes instead.
 	if (!wait || IsHungAppWindow(hwnd)) flags |= SWP_ASYNCWINDOWPOS;
-	auto x = frame.left() - left;
-	auto y = frame.top() - top;
-	// Parking (not waiting) holds the window there: the park hook puts it
-	// back if the app pulls itself on screen while it waits, as Chromium does
-	// when the work area changes. Landing lets it go.
-	if (wait) {
-		RemovePropW(hwnd, L"qs.hold");
-	} else {
-		SetPropW(hwnd, L"qs.hx", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(x))); // NOLINT
-		SetPropW(hwnd, L"qs.hy", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(y))); // NOLINT
-		SetPropW(hwnd, L"qs.hold", reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetTickCount() | 1))); // NOLINT
-	}
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
-	    x,
-	    y,
+	    frame.left() - left,
+	    frame.top() - top,
 	    frame.width() + left + right,
 	    frame.height() + top + bottom,
 	    flags
@@ -313,7 +301,6 @@ void WindowMotion::cancel(HWND hwnd) {
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (this->entries[i].hwnd != hwnd) continue;
 			DwmUnregisterThumbnail(this->entries[i].thumbnail);
-			RemovePropW(hwnd, L"qs.hold");
 			this->entries.removeAt(i);
 		}
 		empty = this->entries.isEmpty();
