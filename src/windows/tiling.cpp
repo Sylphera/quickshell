@@ -33,6 +33,7 @@
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
+#include "window_motion.hpp"
 #include "window_tracker.hpp"
 
 #include <dwmapi.h>
@@ -369,6 +370,7 @@ TilingManager* TilingManager::active() {
 
 TilingManager::TilingManager() {
 	gManager = this;
+	QObject::connect(WindowMotion::instance(), &WindowMotion::landed, this, &TilingManager::onMotionLanded);
 
 	this->syncTimer.setSingleShot(true);
 	this->syncTimer.setInterval(SYNC_DELAY_MS);
@@ -409,6 +411,74 @@ void TilingManager::setEnabled(bool enabled) {
 
 	this->syncWheel();
 	emit this->enabledChanged();
+}
+
+void TilingManager::setAnimateMoves(bool animate) {
+	if (animate == this->mAnimateMoves) return;
+	this->mAnimateMoves = animate;
+	emit this->animateMovesChanged();
+}
+
+namespace {
+// Where a sliding window waits: past the right edge of every screen, at the
+// size of its new tile, so it is laid out and repainted before it shows.
+QRect parkedFrame(const QRect& tile) {
+	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100;
+	return QRect(QPoint(x, tile.top()), tile.size());
+}
+} // namespace
+
+// end-4's windowsMove: a tiled window that settled somewhere and gets a new
+// tile slides there instead of jumping. While it slides, tiling's own target
+// for it is the parked spot, so its checks don't pull it back on screen.
+void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& tile) {
+	auto* motion = WindowMotion::instance();
+	auto found = this->moving.find(m.window);
+	if (found != this->moving.end()) {
+		if (*found != tile) {
+			*found = tile;
+			motion->retarget(m.window->hwnd(), tile, parkedFrame(tile));
+		}
+		this->place(m, parkedFrame(tile));
+		return;
+	}
+	if (this->canAnimate(m, layout, tile)) {
+		auto from = this->managedFrame(m);
+		if (motion->begin(m.window->hwnd(), from, tile, parkedFrame(tile))) {
+			this->moving.insert(m.window, tile);
+			this->place(m, parkedFrame(tile));
+			return;
+		}
+	}
+	this->place(m, tile);
+}
+
+bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
+	if (!this->mAnimateMoves || layout->special || m.target.isNull() || tile == m.target) return false;
+	if (m.verifying || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
+
+	auto* hwnd = m.window->hwnd();
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
+	if (this->managedFrame(m) != m.target) return false;
+
+	// Only what is on screen now: not a desktop on its way out or in.
+	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
+	if (m.window->desktop() != this->desktops->currentIndex()) return false;
+
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	return rects.valid && rects.monitor.contains(m.target) && rects.monitor.contains(tile) ;
+}
+
+void TilingManager::onMotionLanded(HWND hwnd, const QRect& /*frame*/) {
+	for (auto iter = this->moving.begin(); iter != this->moving.end(); ++iter) {
+		if (iter.key()->hwnd() != hwnd) continue;
+		auto* window = iter.key();
+		auto tile = iter.value();
+		this->moving.erase(iter);
+		auto found = this->managed.find(window);
+		if (found != this->managed.end()) this->place(found->second, tile);
+		return;
+	}
 }
 
 void TilingManager::setSuppressWindowShadows(bool suppress) {
@@ -837,6 +907,12 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	            && TilingManager::scrollingOf(from) != nullptr;
 
 	QObject::disconnect(window, nullptr, this, nullptr);
+	if (auto moved = this->moving.find(window); moved != this->moving.end()) {
+		// A window leaving tiling mid-slide goes straight to where it was going.
+		WindowMotion::instance()->cancel(window->hwnd());
+		if (IsWindow(window->hwnd())) setFrame(window->hwnd(), moved.value());
+		this->moving.erase(moved);
+	}
 	this->takeOut(iter->second);
 	if (iter->second.offscreen) forgetParked(window->hwnd());
 	this->managed.erase(iter);
@@ -1208,7 +1284,7 @@ void TilingManager::apply(Layout* layout) {
 		if (parked) restore = clampInto(scroll->visibleBox(id).adjusted(in, in, -in, -in), rects.work);
 		this->markOffscreen(m, parked, restore);
 
-		this->place(m, this->tileRect(layout, window));
+		this->placeMoving(m, layout, this->tileRect(layout, window));
 	}
 }
 
@@ -2693,6 +2769,7 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 	auto* manager = TilingManager::instance();
 	QObject::connect(manager, &TilingManager::enabledChanged, this, &Tiling::enabledChanged);
 	QObject::connect(manager, &TilingManager::suppressWindowShadowsChanged, this, &Tiling::suppressWindowShadowsChanged);
+	QObject::connect(manager, &TilingManager::animateMovesChanged, this, &Tiling::animateMovesChanged);
 	QObject::connect(manager, &TilingManager::gapsInChanged, this, &Tiling::gapsInChanged);
 	QObject::connect(manager, &TilingManager::gapsOutChanged, this, &Tiling::gapsOutChanged);
 	// clang-format off
@@ -2721,6 +2798,8 @@ void Tiling::relayout() { TilingManager::instance()->relayout(); }
 bool Tiling::enabled() const { return TilingManager::instance()->enabled(); }
 void Tiling::setEnabled(bool enabled) { TilingManager::instance()->setEnabled(enabled); }
 bool Tiling::suppressWindowShadows() const { return TilingManager::instance()->suppressWindowShadows(); }
+bool Tiling::animateMoves() const { return TilingManager::instance()->animateMoves(); }
+void Tiling::setAnimateMoves(bool animate) { TilingManager::instance()->setAnimateMoves(animate); }
 void Tiling::setSuppressWindowShadows(bool suppress) { TilingManager::instance()->setSuppressWindowShadows(suppress); }
 qint32 Tiling::gapsIn() const { return TilingManager::instance()->gapsIn(); }
 void Tiling::setGapsIn(qint32 gaps) { TilingManager::instance()->setGapsIn(gaps); }
