@@ -52,7 +52,10 @@ private:
 	struct Snapshot {
 		HWND host = nullptr;
 		QRect frame;
+		QList<quint8> alpha;
 	};
+	void refreshSnapshot(HWND hwnd);
+	void applyRefresh(HWND hwnd, const QRect& frame, const QList<quint32>& pixels);
 	void run();
 	void layoutThumbs(double camera);
 	void onSettled();

@@ -1,4 +1,6 @@
 #include "desktop_slide.hpp"
+#include <cstring>
+#include <memory>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -359,6 +361,7 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 				props.fVisible = FALSE;
 				DwmUpdateThumbnailProperties(thumbnail, &props);
 				added.append({thumbnail, frame, QRect(QPoint(), frame.size()), desktop});
+				if (!capture) this->refreshSnapshot(hwnd);
 				continue;
 			}
 		}
@@ -575,6 +578,7 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	GdiFlush();
 
 	auto* bits = static_cast<quint32*>(raw);
+	snapshot.alpha = QList<quint8>(static_cast<qsizetype>(width) * height, 255);
 	auto zone = std::min({CORNER_ZONE, width / 2, height / 2});
 	auto wallWidth = this->monitor.width();
 	auto close = [](quint32 a, quint32 b) {
@@ -590,6 +594,7 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 			auto cornerColumn = x < zone || x >= width - zone;
 			if (cornerRow && cornerColumn && close(p, this->wallBits[(frame.y() + y) * wallWidth + frame.x() + x])) {
 				p = 0;
+				snapshot.alpha[y * width + x] = 0;
 			} else {
 				p |= 0xff000000u;
 			}
@@ -607,6 +612,103 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
 	snapshot.frame = frame;
 	return true;
+}
+
+// A window on another desktop cannot be copied from the screen, but it can be
+// asked to paint itself. That takes a browser 15-30 ms, so it runs aside: the
+// slide starts on the kept copy and the fresh one replaces it when it lands.
+void DesktopSlide::refreshSnapshot(HWND hwnd) {
+	auto known = this->snapshots.constFind(hwnd);
+	if (known == this->snapshots.constEnd()) return;
+	auto frame = known->frame.translated(this->monitor.topLeft());
+	QPointer<DesktopSlide> self = this;
+	auto local = known->frame;
+
+	std::thread([self, hwnd, frame, local]() {
+		RECT raw {};
+		if (!GetWindowRect(hwnd, &raw)) return;
+		auto width = raw.right - raw.left;
+		auto height = raw.bottom - raw.top;
+		if (width <= 0 || height <= 0) return;
+
+		auto* screen = GetDC(nullptr);
+		BITMAPINFO info {};
+		info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		info.bmiHeader.biWidth = width;
+		info.bmiHeader.biHeight = -height;
+		info.bmiHeader.biPlanes = 1;
+		info.bmiHeader.biBitCount = 32;
+		void* bits = nullptr;
+		auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+		auto* dc = CreateCompatibleDC(screen);
+		ReleaseDC(nullptr, screen);
+		SelectObject(dc, bitmap);
+		auto painted = PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != FALSE;
+		GdiFlush();
+
+		QList<quint32> pixels;
+		auto left = frame.x() - raw.left;
+		auto top = frame.y() - raw.top;
+		if (painted && left >= 0 && top >= 0 && left + frame.width() <= width && top + frame.height() <= height) {
+			pixels.resize(static_cast<qsizetype>(frame.width()) * frame.height());
+			auto* source = static_cast<const quint32*>(bits);
+			for (auto y = 0; y < frame.height(); y++) {
+				std::memcpy(
+				    pixels.data() + static_cast<qsizetype>(y) * frame.width(),
+				    source + static_cast<qsizetype>(top + y) * width + left,
+				    sizeof(quint32) * frame.width()
+				);
+			}
+		}
+		DeleteDC(dc);
+		DeleteObject(bitmap);
+		if (pixels.isEmpty() || self.isNull()) return;
+
+		QMetaObject::invokeMethod(
+		    self.data(),
+		    [self, hwnd, local, pixels]() {
+			    if (!self.isNull()) self->applyRefresh(hwnd, local, pixels);
+		    },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
+
+void DesktopSlide::applyRefresh(HWND hwnd, const QRect& frame, const QList<quint32>& pixels) {
+	auto known = this->snapshots.find(hwnd);
+	if (known == this->snapshots.end() || known->frame != frame || !IsWindow(known->host)) return;
+
+	auto width = frame.width();
+	auto height = frame.height();
+	auto* screen = GetDC(nullptr);
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	void* raw = nullptr;
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
+	auto* dc = CreateCompatibleDC(screen);
+	SelectObject(dc, bitmap);
+
+	auto* bits = static_cast<quint32*>(raw);
+	auto masked = known->alpha.size() == pixels.size();
+	for (qsizetype i = 0; i < pixels.size(); i++) {
+		auto alpha = masked ? known->alpha[i] : quint8(255);
+		bits[i] = alpha == 0 ? 0 : (pixels[i] | 0xff000000u);
+	}
+
+	RECT parked {};
+	GetWindowRect(known->host, &parked);
+	POINT origin {parked.left, parked.top};
+	SIZE size {width, height};
+	POINT source {0, 0};
+	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+	UpdateLayeredWindow(known->host, screen, &origin, &size, dc, &source, 0, &blend, ULW_ALPHA);
+	DeleteDC(dc);
+	DeleteObject(bitmap);
+	ReleaseDC(nullptr, screen);
 }
 
 void DesktopSlide::pruneSnapshots() {
