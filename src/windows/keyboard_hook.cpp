@@ -242,6 +242,16 @@ LRESULT onModifier(const HookSnapshot& snapshot, const KBDLLHOOKSTRUCT* info, ui
 		postAll(snapshot, HookTrigger::Hold, bit, HookReleased);
 	}
 
+	// Super went into a chord the hook handled (Super+wheel, Super+drag). The
+	// mask sent at the time can be forgotten by the shell once the chord has
+	// switched desktops, so the release itself is masked as well, or Windows
+	// takes it for a lone Super and opens Start.
+	if (bit == ModSuper && gSuperChord.load() && !isDown(otherSide(info->vkCode))) {
+		gTapCandidate = 0;
+		injectMaskedRelease(info);
+		return 1;
+	}
+
 	if (gTapCandidate != bit) return 0;
 	gTapCandidate = 0;
 	if (blocked) return 0;
