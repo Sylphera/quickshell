@@ -487,7 +487,9 @@ bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& 
 }
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
-	if (!this->mAnimateMoves || layout->special || m.target.isNull() || tile == m.target) return false;
+	// Special too: closing or moving a window there slides the others, as on a
+	// normal desktop.
+	if (!this->mAnimateMoves || m.target.isNull() || tile == m.target) return false;
 	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
 
 	auto* hwnd = m.window->hwnd();
