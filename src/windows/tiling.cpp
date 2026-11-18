@@ -1180,11 +1180,12 @@ QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const
 	auto dpr = layout->screen->devicePixelRatio();
 	auto in = toPhysical(this->mGapsIn, dpr);
 	auto out = toPhysical(layout->special ? SPECIAL_GAPS_OUT : this->mGapsOut, dpr);
+	auto shift = layout->special ? this->mSpecialOffset : 0;
 
 	if (layout->tree->kind() == tiling::Kind::Scrolling) {
 		return QRect(
 		    box.left() + in,
-		    box.top() + in,
+		    box.top() + in + shift,
 		    qMax(1, box.width() - 2 * in),
 		    qMax(1, box.height() - 2 * in)
 		);
@@ -1197,7 +1198,7 @@ QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const
 
 	return QRect(
 	    box.left() + left,
-	    box.top() + top,
+	    box.top() + top + shift,
 	    qMax(1, box.width() - left - right),
 	    qMax(1, box.height() - top - bottom)
 	);
@@ -1573,6 +1574,15 @@ void TilingManager::settle(Layout* layout) {
 
 	layout->lastFocused = window;
 	window->activate();
+}
+
+void TilingManager::setSpecialOffset(int offset) {
+	this->mSpecialOffset = offset;
+	if (!this->mEnabled) return;
+	this->sync();
+	for (auto& [key, layout]: this->layouts) {
+		if (layout->special) this->apply(layout.get());
+	}
 }
 
 TrackedWindow* TilingManager::tileAt(const QPoint& point) {

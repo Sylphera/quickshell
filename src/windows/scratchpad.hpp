@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qt_windows.h>
+#include <chrono>
 #include <memory>
 
 #include <qlist.h>
@@ -48,6 +49,10 @@ private:
 	};
 
 	void setShown(bool shown);
+	void slide(bool in);
+	void stepSlide();
+	void finishHide();
+	[[nodiscard]] int slideDistance() const;
 	void park(Entry& entry);
 	void releaseAll();
 	void prune();
@@ -68,6 +73,13 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
+	QTimer slideTimer;
+	std::chrono::steady_clock::time_point slideStart;
+	double slideFrom = 0;
+	double slideTo = 0;
+	bool slideIn = true;
+	bool hiding = false;
+	int slideOffset = 0;
 };
 
 } // namespace qs::windows

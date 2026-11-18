@@ -41,6 +41,9 @@ public:
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
+	// Moves the special workspace's tiles down by this many physical pixels and
+	// places them at once, for its slide in and out.
+	void setSpecialOffset(int offset);
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
@@ -263,6 +266,7 @@ private:
 	bool mEnabled = false;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
+	int mSpecialOffset = 0;
 	bool mPreserveSplit = true;
 	QStringList mExcluded;
 	QString mLayout = QStringLiteral("dwindle");

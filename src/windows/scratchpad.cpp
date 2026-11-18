@@ -1,4 +1,6 @@
 #include "scratchpad.hpp"
+#include <algorithm>
+#include <cmath>
 #include <array>
 #include <atomic>
 
@@ -29,6 +31,26 @@ constexpr int DIM_ALPHA = 51;
 constexpr int DIM_STEP = 18;
 constexpr int DIM_FRAME_MS = 16;
 constexpr ULONGLONG FOCUS_GRACE_MS = 400;
+// end-4's specialWorkspaceIn and specialWorkspaceOut: slidevert from below.
+constexpr double SLIDE_IN_MS = 280;
+constexpr double SLIDE_OUT_MS = 120;
+constexpr int SLIDE_FRAME_MS = 4;
+
+double bezierAt(double a, double b, double t) {
+	auto u = 1.0 - t;
+	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
+}
+
+double curve(double x1, double y1, double x2, double y2, double x) {
+	auto lo = 0.0;
+	auto hi = 1.0;
+	for (auto i = 0; i < 40; i++) {
+		auto mid = (lo + hi) / 2;
+		if (bezierAt(x1, x2, mid) < x) lo = mid;
+		else hi = mid;
+	}
+	return bezierAt(y1, y2, (lo + hi) / 2);
+}
 constexpr auto* DIM_CLASS = L"QuickshellScratchpadDim";
 
 struct CrashSlot {
@@ -163,6 +185,10 @@ Scratchpad::Scratchpad(QObject* parent)
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, &Scratchpad::releaseAll);
 	}
 
+	this->slideTimer.setInterval(SLIDE_FRAME_MS);
+	this->slideTimer.setTimerType(Qt::PreciseTimer);
+	QObject::connect(&this->slideTimer, &QTimer::timeout, this, &Scratchpad::stepSlide);
+
 	this->dimTimer.setInterval(DIM_FRAME_MS);
 	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
 
@@ -190,7 +216,7 @@ bool Scratchpad::contains(const TrackedWindow* window) const {
 
 void Scratchpad::toggle() {
 	this->prune();
-	this->setShown(!this->mShown);
+	this->setShown(!this->mShown || this->hiding);
 }
 
 void Scratchpad::add(TrackedWindow* window, bool follow) {
@@ -234,7 +260,14 @@ void Scratchpad::remove(TrackedWindow* window) {
 }
 
 void Scratchpad::setShown(bool shown) {
-	if (shown == this->mShown) return;
+	if (shown && this->hiding) {
+		// Super+S in the middle of the slide out turns it back.
+		this->hiding = false;
+		this->showDim();
+		this->slide(true);
+		return;
+	}
+	if (shown == this->mShown || (!shown && this->hiding)) return;
 
 	if (shown) {
 		POINT cursor {};
@@ -245,13 +278,63 @@ void Scratchpad::setShown(bool shown) {
 		this->showDim();
 		this->relayout();
 		if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
+		this->slideOffset = this->slideDistance();
+		this->slide(true);
+		emit this->shownChanged();
 	} else {
-		this->mShown = false;
-		for (auto& entry: this->entries) this->park(entry);
-		this->relayout();
 		this->hideDim();
+		if (TilingManager::active() == nullptr || this->entries.isEmpty()) {
+			this->finishHide();
+			return;
+		}
+		this->hiding = true;
+		this->slide(false);
+	}
+}
+
+int Scratchpad::slideDistance() const {
+	auto rects = monitorRects(this->mMonitor);
+	return rects.valid ? rects.monitor.height() : 0;
+}
+
+void Scratchpad::slide(bool in) {
+	auto* tiling = TilingManager::active();
+	if (tiling == nullptr) return;
+	this->slideIn = in;
+	this->slideFrom = this->slideOffset;
+	this->slideTo = in ? 0 : this->slideDistance();
+	this->slideStart = std::chrono::steady_clock::now();
+	tiling->setSpecialOffset(this->slideOffset);
+	this->slideTimer.start();
+}
+
+void Scratchpad::stepSlide() {
+	auto* tiling = TilingManager::active();
+	if (tiling == nullptr) {
+		this->slideTimer.stop();
+		if (this->hiding) this->finishHide();
+		return;
 	}
 
+	auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - this->slideStart).count();
+	auto progress = std::clamp(elapsed / (this->slideIn ? SLIDE_IN_MS : SLIDE_OUT_MS), 0.0, 1.0);
+	auto eased = this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
+	this->slideOffset = static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
+	tiling->setSpecialOffset(this->slideOffset);
+
+	if (progress < 1.0) return;
+	this->slideTimer.stop();
+	if (this->hiding) this->finishHide();
+}
+
+void Scratchpad::finishHide() {
+	this->hiding = false;
+	this->slideTimer.stop();
+	this->mShown = false;
+	for (auto& entry: this->entries) this->park(entry);
+	this->relayout();
+	this->slideOffset = 0;
+	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(0);
 	emit this->shownChanged();
 }
 
