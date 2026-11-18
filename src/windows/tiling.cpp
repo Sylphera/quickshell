@@ -1087,6 +1087,10 @@ void TilingManager::schedule() {
 }
 
 void TilingManager::sync() {
+	setParkNewWindows(
+	    this->mEnabled && this->mAnimateMoves && startup::settled()
+	    && this->desktops->shownIndex() == this->desktops->currentIndex()
+	);
 	if (!this->mEnabled) return;
 
 	for (auto iter = this->layouts.begin(); iter != this->layouts.end();) {
@@ -1137,6 +1141,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 	auto state = this->stateOf(m);
 	if (state != State::Tiled) {
+		releaseEarlyPark(window->hwnd());
 		m.verifying = false;
 		this->restoreTinyCorners(m);
 	}
@@ -1549,6 +1554,7 @@ void TilingManager::reassertTinyDecorations() {
 }
 
 void TilingManager::place(Managed& m, const QRect& tile) {
+	claimEarlyPark(m.window->hwnd());
 	auto frame = this->managedFrame(m);
 	this->updateTinyCorners(m, frame);
 

@@ -21,6 +21,8 @@
 #include <qset.h>
 #include <qstring.h>
 #include <qtimer.h>
+#include <unordered_map>
+#include <utility>
 #include <qtypes.h>
 
 #include "desktopentry_backend.hpp"
@@ -56,6 +58,79 @@ std::mutex gEventMutex;                       // NOLINT
 std::vector<WindowEvent> gEvents;             // NOLINT
 std::unordered_set<HWND> gTracked;            // NOLINT
 std::atomic<bool> gEventWakePending = false;  // NOLINT
+
+std::atomic<bool> gParkNew = false;                             // NOLINT
+std::mutex gParkMutex;                                          // NOLINT
+std::unordered_map<HWND, std::pair<RECT, qint64>> gEarlyParked; // NOLINT
+std::atomic<int> gEarlyParkCount = 0;                           // NOLINT
+constexpr qint64 EARLY_PARK_MS = 700;
+
+// A plain resizable app window of another process: what tiling takes.
+bool parksEarly(HWND hwnd) {
+	if (!gParkNew.load()) return false;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid == GetCurrentProcessId() || GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	if ((style & WS_THICKFRAME) == 0 || (style & WS_CHILD) != 0) return false;
+	if ((exStyle & (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return false;
+	return !IsIconic(hwnd);
+}
+
+void parkEarly(HWND hwnd) {
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return;
+	{
+		auto lock = std::lock_guard(gParkMutex);
+		if (gEarlyParked.contains(hwnd)) return;
+		gEarlyParked[hwnd] = {rect, static_cast<qint64>(GetTickCount64())};
+		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+	}
+	// Below every screen, in the same column, so it still belongs to the
+	// monitor it opened on.
+	auto y = GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100;
+	SetWindowPos(
+	    hwnd,
+	    nullptr,
+	    rect.left,
+	    y,
+	    0,
+	    0,
+	    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS
+	);
+}
+
+void putBack(HWND hwnd, const RECT& rect) {
+	if (!IsWindow(hwnd)) return;
+	SetWindowPos(
+	    hwnd,
+	    nullptr,
+	    rect.left,
+	    rect.top,
+	    0,
+	    0,
+	    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS
+	);
+}
+
+void releaseStaleEarlyParks() {
+	std::vector<std::pair<HWND, RECT>> stale;
+	{
+		auto lock = std::lock_guard(gParkMutex);
+		auto now = static_cast<qint64>(GetTickCount64());
+		for (auto iter = gEarlyParked.begin(); iter != gEarlyParked.end();) {
+			if (now - iter->second.second >= EARLY_PARK_MS) {
+				stale.emplace_back(iter->first, iter->second.first);
+				iter = gEarlyParked.erase(iter);
+			} else {
+				++iter;
+			}
+		}
+		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+	}
+	for (const auto& [hwnd, rect]: stale) putBack(hwnd, rect);
+}
 std::atomic<HWND> gEventTarget = nullptr;     // NOLINT
 
 bool onlyForTracked(DWORD event) {
@@ -99,6 +174,7 @@ void CALLBACK queueEvent(
 
 			auto announces = event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_NAMECHANGE;
 			if (announces && !mayBecomeTracked(hwnd)) return;
+			if (event == EVENT_OBJECT_SHOW && parksEarly(hwnd)) parkEarly(hwnd);
 		}
 
 		if (!gEvents.empty() && gEvents.back().event == event && gEvents.back().hwnd == hwnd) return;
@@ -571,8 +647,33 @@ void WindowTracker::startEventThread() {
 	std::thread(&eventThreadMain).detach();
 }
 
+void setParkNewWindows(bool park) { gParkNew.store(park); }
+
+void claimEarlyPark(HWND hwnd) {
+	if (gEarlyParkCount.load() == 0) return;
+	auto lock = std::lock_guard(gParkMutex);
+	gEarlyParked.erase(hwnd);
+	gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+}
+
+void releaseEarlyPark(HWND hwnd) {
+	if (gEarlyParkCount.load() == 0) return;
+	RECT rect {};
+	{
+		auto lock = std::lock_guard(gParkMutex);
+		auto found = gEarlyParked.find(hwnd);
+		if (found == gEarlyParked.end()) return;
+		rect = found->second.first;
+		gEarlyParked.erase(found);
+		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+	}
+	putBack(hwnd, rect);
+}
+
 void WindowTracker::drainEvents() {
 	gEventWakePending.store(false);
+	// Whatever tiling didn't take in time goes back where it showed.
+	if (gEarlyParkCount.load() > 0) QTimer::singleShot(EARLY_PARK_MS + 50, this, []() { releaseStaleEarlyParks(); });
 
 	auto events = std::move(this->spareEvents);
 	events.clear();
