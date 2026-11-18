@@ -22,6 +22,8 @@ constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
 // An app that takes longer than this to leave slides anyway.
 constexpr double TAKEOFF_TIMEOUT_MS = 250;
+// Two compositor frames for an app to repaint at its new size before sliding.
+constexpr int REPAINT_SETTLE_MS = 33;
 // How long a still stays over a window that landed, while it paints again.
 constexpr int LINGER_MS = 150;
 
@@ -427,7 +429,9 @@ void WindowMotion::run() {
 					auto waited = std::chrono::duration<double, std::milli>(last - entry.start).count();
 					if (!left && waited < TAKEOFF_TIMEOUT_MS) continue;
 					entry.waiting = false;
-					entry.start = last;
+					// Hold still a moment longer: the app repaints at its new size
+					// while in place, instead of during the curve's fast start.
+					entry.start = last + std::chrono::milliseconds(REPAINT_SETTLE_MS);
 				}
 				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
 				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
