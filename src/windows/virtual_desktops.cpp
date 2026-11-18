@@ -515,10 +515,15 @@ void VirtualDesktops::refresh(bool rereadNames) {
 	}
 
 	auto currentChanged = currentIndex != this->mCurrent || !IsEqualGUID(current, this->mCurrentId);
+	auto shownBefore = this->shownIndex();
 
 	this->mDesktops = desktops;
 	this->mCurrent = currentIndex;
 	this->mCurrentId = current;
+	if (this->pendingTarget >= 0 && this->pendingCommitted && this->mCurrent == this->pendingTarget) {
+		this->pendingTarget = -1;
+	}
+	auto shownMoved = this->shownIndex() != shownBefore;
 
 	if (listChanged) {
 		qCDebug(logDesktops) << "Desktop list changed:" << desktops.length() << "desktops";
@@ -529,6 +534,7 @@ void VirtualDesktops::refresh(bool rereadNames) {
 		qCDebug(logDesktops) << "Current desktop:" << currentIndex;
 		emit this->currentChanged();
 	}
+	if (shownMoved) emit this->shownChanged();
 }
 
 qsizetype VirtualDesktops::indexOf(const GUID& id) const {
@@ -634,8 +640,30 @@ void VirtualDesktops::switchToAsync(qsizetype index) {
 		return;
 	}
 
-	DesktopSlide::instance()->begin(this->mCurrent, index);
+	// Showing and hiding every window of both desktops is the heavy part of a
+	// switch. Under a slide it waits for the slide's end, behind a still cover.
+	auto shown = this->shownIndex();
+	if (DesktopSlide::instance()->begin(shown, index)) {
+		this->pendingTarget = index;
+		this->pendingCommitted = false;
+		if (shown != index) emit this->shownChanged();
+		return;
+	}
 
+	this->queueSwitch(index);
+}
+
+void VirtualDesktops::commitSwitch() {
+	if (this->pendingTarget < 0 || this->pendingCommitted) return;
+	this->pendingCommitted = true;
+	if (this->pendingTarget == this->mCurrent) {
+		this->pendingTarget = -1;
+		return;
+	}
+	this->queueSwitch(this->pendingTarget);
+}
+
+void VirtualDesktops::queueSwitch(qsizetype index) {
 	{
 		auto lock = std::lock_guard(this->switchMutex);
 		this->switchTarget = index;

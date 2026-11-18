@@ -492,7 +492,7 @@ qsizetype Dispatcher::resolveWorkspace(const QString& arg, bool& create) const {
 	create = false;
 
 	auto* desktops = this->ipc->desktops();
-	auto current = desktops->currentIndex();
+	auto current = desktops->shownIndex();
 	auto count = desktops->count();
 
 	if (a == "previous" || a == "previous_per_monitor") {
@@ -594,7 +594,7 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 	auto* desktops = this->ipc->desktops();
 	auto* behavior = WorkspaceBehavior::instance();
 
-	if (index == desktops->currentIndex()) {
+	if (index == desktops->shownIndex()) {
 		auto previous = behavior->previousDesktop();
 		if (!behavior->backAndForth() || isRelativeWorkspace(arg) || previous < 0 || previous == index) {
 			behavior->warpToActive();

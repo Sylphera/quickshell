@@ -137,6 +137,7 @@ HyprlandIpc::HyprlandIpc()
 	QObject::connect(this->mTracker, &WindowTracker::flushed, this, &HyprlandIpc::onTrackerFlushed);
 	QObject::connect(this->mDesktops, &VirtualDesktops::desktopsChanged, this, &HyprlandIpc::onDesktopsChanged);
 	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, &HyprlandIpc::onCurrentDesktopChanged);
+	QObject::connect(this->mDesktops, &VirtualDesktops::shownChanged, this, &HyprlandIpc::onCurrentDesktopChanged);
 	// clang-format on
 
 	auto* masks = qs::windows::InputMaskTracker::instance();
@@ -466,7 +467,7 @@ void HyprlandIpc::updateVisibleWorkspaces(bool initial) {
 
 void HyprlandIpc::updateFocusedWorkspace() {
 	const auto& list = this->mAllWorkspaces;
-	auto index = this->mDesktops->currentIndex();
+	auto index = this->mDesktops->shownIndex();
 	auto* workspace = index >= 0 && index < list.length() ? list[index] : nullptr;
 	this->bFocusedWorkspace = workspace;
 }

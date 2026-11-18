@@ -29,7 +29,8 @@ public:
 	static DesktopSlide* instance();
 	Q_DISABLE_COPY_MOVE(DesktopSlide);
 
-	void begin(qsizetype from, qsizetype to);
+	// Returns whether a slide now covers the switch.
+	bool begin(qsizetype from, qsizetype to);
 
 private:
 	explicit DesktopSlide(QObject* parent);

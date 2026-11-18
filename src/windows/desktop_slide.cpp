@@ -340,10 +340,11 @@ DesktopSlide::DesktopSlide(QObject* parent): QObject(parent) {
 
 DesktopSlide::~DesktopSlide() { this->finish(); }
 
-void DesktopSlide::begin(qsizetype from, qsizetype to) {
-	if (to < 0) return;
+bool DesktopSlide::begin(qsizetype from, qsizetype to) {
+	if (to < 0) return false;
 	if (this->overlay != nullptr) this->retarget(to);
 	else if (from >= 0 && from != to) this->start(from, to);
+	return this->overlay != nullptr;
 }
 
 bool DesktopSlide::start(qsizetype from, qsizetype to) {
@@ -595,6 +596,7 @@ void DesktopSlide::onSettled() {
 		if (!this->settledSent) return;
 		target = this->target;
 	}
+	VirtualDesktops::instance()->commitSwitch();
 
 	auto* desktops = VirtualDesktops::instance();
 	if (desktops->currentIndex() != target && this->settleRetries++ < SETTLE_RETRIES) {

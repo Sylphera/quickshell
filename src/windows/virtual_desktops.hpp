@@ -64,6 +64,12 @@ public:
 
 	bool switchTo(qsizetype index);
 	void switchToAsync(qsizetype index);
+	// The desktop the shell shows as current. While a slide covers a switch,
+	// Windows only switches at its end, but the shell already shows the target.
+	[[nodiscard]] qsizetype shownIndex() const {
+		return this->pendingTarget >= 0 ? this->pendingTarget : this->mCurrent;
+	}
+	void commitSwitch();
 	void ensureCount(qsizetype count, std::function<void(bool)> done);
 	bool removeDesktop(qsizetype index, qsizetype fallback);
 	bool moveWindow(HWND hwnd, qsizetype index);
@@ -79,6 +85,7 @@ public:
 signals:
 	void desktopsChanged();
 	void currentChanged();
+	void shownChanged();
 	void accessorReady();
 
 private:
@@ -127,6 +134,9 @@ private:
 	std::mutex switchMutex;
 	std::condition_variable switchWake;
 	qsizetype switchTarget = -1;
+	qsizetype pendingTarget = -1;
+	bool pendingCommitted = false;
+	void queueSwitch(qsizetype index);
 	bool switchStop = false;
 
 	mutable struct Accessor {
