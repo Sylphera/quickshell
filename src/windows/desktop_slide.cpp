@@ -526,22 +526,26 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		}
 		auto heavy = heavyWindow(window);
 		auto snapshot = capture && heavy ? this->takeSnapshot(hwnd, frame) : false;
+		// A browser on another desktop is cloaked and paints nothing until the
+		// real switch, so its live thumbnail is a black page. Any copy taken
+		// from the screen beats that, even one from before tiling moved or
+		// resized the window: it is stretched to where the window is now.
 		if (!snapshot && heavy) {
 			auto known = this->snapshots.constFind(hwnd);
-			snapshot = known != this->snapshots.constEnd() && known->frame == frame.translated(this->monitor.topLeft())
-			           && IsWindow(known->host);
+			snapshot = known != this->snapshots.constEnd() && IsWindow(known->host) && !known->frame.isEmpty();
 		}
 		if (snapshot) {
 			const auto& copy = this->snapshots.value(hwnd);
+			auto copied = QRect(QPoint(), copy.frame.size());
 			HTHUMBNAIL thumbnail = nullptr;
 			if (SUCCEEDED(DwmRegisterThumbnail(this->overlay, copy.host, &thumbnail))) {
 				DWM_THUMBNAIL_PROPERTIES props {};
 				props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
-				props.rcSource = {0, 0, frame.width(), frame.height()};
+				props.rcSource = {0, 0, copied.width(), copied.height()};
 				props.opacity = 255;
 				props.fVisible = FALSE;
 				DwmUpdateThumbnailProperties(thumbnail, &props);
-				added.append({thumbnail, frame, QRect(QPoint(), frame.size()), desktop});
+				added.append({thumbnail, frame, copied, desktop});
 				continue;
 			}
 		}
@@ -885,6 +889,27 @@ void DesktopSlide::warmCapture() {
 			DeleteDC(dc);
 			DeleteObject(bitmap);
 			if (pixels.isEmpty() || self.isNull()) return;
+
+			// A browser on another desktop is cloaked and stops painting, so
+			// PrintWindow hands back its frame with a black page. Like wiri,
+			// keep only copies with something in the interior (a dark page is
+			// not pure black); without one the window slides live, and its copy
+			// comes from the screen the next time it is left.
+			{
+				auto w = frame.width();
+				auto h = frame.height();
+				qsizetype samples = 0;
+				qsizetype lit = 0;
+				for (auto y = h / 4; y < h - h / 8; y += 8) {
+					for (auto x = w / 8; x < w - w / 8; x += 8) {
+						auto p = pixels[static_cast<qsizetype>(y) * w + x];
+						auto brightest = std::max({(p >> 16) & 0xffu, (p >> 8) & 0xffu, p & 0xffu});
+						samples++;
+						if (brightest > 3) lit++;
+					}
+				}
+				if (samples > 0 && lit * 100 < samples * 2) return;
+			}
 
 			QMetaObject::invokeMethod(
 			    self.data(),
