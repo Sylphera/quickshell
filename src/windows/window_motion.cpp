@@ -190,12 +190,19 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	{
 		return;
 	}
+	// The whole window is the source, not a rectangle cut from it: the window
+	// resizes while it waits, and a cut taken at the old size would show it
+	// half cropped for a frame or two. Its invisible border, the same at any
+	// size, goes around the destination instead.
 	auto dest = shown.translated(-this->coverRect.topLeft());
 	DWM_THUMBNAIL_PROPERTIES props {};
-	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
-	              | DWM_TNP_SOURCECLIENTAREAONLY;
-	props.rcSource = {bounds.left - raw.left, bounds.top - raw.top, bounds.right - raw.left, bounds.bottom - raw.top};
-	props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+	props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+	props.rcDestination = {
+	    dest.left() - (bounds.left - raw.left),
+	    dest.top() - (bounds.top - raw.top),
+	    dest.left() + dest.width() + (raw.right - bounds.right),
+	    dest.top() + dest.height() + (raw.bottom - bounds.bottom),
+	};
 	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
