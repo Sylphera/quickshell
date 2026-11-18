@@ -239,9 +239,10 @@ QRect sourceOf(HWND hwnd, const QRect& rect) {
 	return {0, 0, rect.width(), rect.height()};
 }
 
-// Wait for the next compositor frame, the way wiri paces its animations
-// (MIT, jolionlands/wiri: src/animation/clock.rs): Windows 11's compositor
-// clock when dcomp.dll exports it, DwmFlush otherwise.
+// Wait for the next compositor frame, the way wiri paces its animations:
+// Windows 11's compositor clock when dcomp.dll exports it, DwmFlush otherwise.
+// Adapted from wiri's src/animation/clock.rs, Copyright (c) 2026 jolionlands,
+// MIT License (see third-party/wiri-LICENSE).
 void waitForFrame() {
 	using WaitFn = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
 	static auto wait = []() -> WaitFn {
