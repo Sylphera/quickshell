@@ -95,11 +95,14 @@ bool WindowMotion::ensureCover() {
 		registered = RegisterClassExW(&cls) != 0;
 	}
 
+	// One pixel short of the screens at the top: a window covering a monitor
+	// exactly is taken by Explorer for a fullscreen app, and the shell's
+	// panels step down behind everything for as long as it is there.
 	this->coverRect = QRect(
 	    GetSystemMetrics(SM_XVIRTUALSCREEN),
-	    GetSystemMetrics(SM_YVIRTUALSCREEN),
+	    GetSystemMetrics(SM_YVIRTUALSCREEN) + 1,
 	    std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN)),
-	    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN))
+	    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1)
 	);
 	this->cover = CreateWindowExW(
 	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,

@@ -490,7 +490,9 @@ void Scratchpad::openCover(bool show) {
 		cls.lpszClassName = COVER_CLASS;
 		registered = RegisterClassExW(&cls) != 0;
 	}
-	const auto& monitor = rects.monitor;
+	// One pixel short of the monitor: a topmost window covering it exactly is
+	// taken by Explorer for a fullscreen app, and the shell's panels step down.
+	auto monitor = rects.monitor.adjusted(0, 1, 0, 0);
 	this->cover = CreateWindowExW(
 	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
 	    COVER_CLASS,
@@ -736,7 +738,7 @@ void Scratchpad::showDim() {
 			registered = RegisterClassExW(&cls) != 0;
 		}
 		this->dim = CreateWindowExW(
-		    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+		    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
 		    DIM_CLASS,
 		    L"",
 		    WS_POPUP,
@@ -760,18 +762,13 @@ void Scratchpad::showDim() {
 	if (work.isEmpty()) return;
 
 	// Hyprland draws dim_special over what lies under special and below the
-	// top layer, so end-4's bar and dock never dim. The dim goes right under
-	// the lowest of the shell's own topmost windows; special's windows are
-	// raised above everything already.
-	HWND under = HWND_TOPMOST;
-	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-		if (hwnd == this->dim || hwnd == this->cover || !IsWindowVisible(hwnd) || !isOwnProcessWindow(hwnd)) continue;
-		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
-		under = hwnd;
-	}
+	// top layer, so end-4's bar and dock never dim. The dim is the topmost of
+	// the ordinary windows: over every app, under every topmost window (the
+	// shell's panels, and special's windows, which are raised topmost).
+	SetWindowPos(this->dim, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	SetWindowPos(
 	    this->dim,
-	    under,
+	    HWND_TOP,
 	    work.x(),
 	    work.y(),
 	    work.width(),
