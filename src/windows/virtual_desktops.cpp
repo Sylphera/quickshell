@@ -13,6 +13,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "desktop_slide.hpp"
 #include "keyboard_hook.hpp"
 #include "startup.hpp"
 #include "util.hpp"
@@ -631,6 +632,8 @@ void VirtualDesktops::switchToAsync(qsizetype index) {
 		this->switchTo(index);
 		return;
 	}
+
+	DesktopSlide::instance()->begin(this->mCurrent, index);
 
 	{
 		auto lock = std::lock_guard(this->switchMutex);
