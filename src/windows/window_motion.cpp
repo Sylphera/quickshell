@@ -22,90 +22,11 @@ constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
 // An app that takes longer than this to leave slides anyway.
 constexpr double TAKEOFF_TIMEOUT_MS = 250;
-// How long a still stays over a window that landed, while it paints again.
-constexpr int LINGER_MS = 150;
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
 	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
 }
-
-// Chromium and Electron stop painting a window that is off screen, and drop
-// its picture a moment later: a thumbnail of it goes blank mid-slide. Like the
-// desktop slide, they travel as a still taken before they leave.
-bool paintsOnlyOnScreen(HWND hwnd) {
-	wchar_t cls[64] {};
-	GetClassNameW(hwnd, cls, 64);
-	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
-}
-
-HWND snapshotOf(const QRect& frame) {
-	auto width = frame.width();
-	auto height = frame.height();
-	if (width <= 0 || height <= 0) return nullptr;
-
-	static const auto* className = []() {
-		WNDCLASSW wc {};
-		wc.lpfnWndProc = DefWindowProcW;
-		wc.hInstance = GetModuleHandleW(nullptr);
-		wc.lpszClassName = L"QuickshellMotionSnapshot";
-		RegisterClassW(&wc);
-		return L"QuickshellMotionSnapshot";
-	}();
-	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) - width - 100;
-	auto* host = CreateWindowExW(
-	    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-	    className,
-	    L"",
-	    WS_POPUP,
-	    x,
-	    frame.top(),
-	    width,
-	    height,
-	    nullptr,
-	    nullptr,
-	    GetModuleHandleW(nullptr),
-	    nullptr
-	);
-	if (host == nullptr) return nullptr;
-
-	auto* screen = GetDC(nullptr);
-	BITMAPINFO info {};
-	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-	info.bmiHeader.biWidth = width;
-	info.bmiHeader.biHeight = -height;
-	info.bmiHeader.biPlanes = 1;
-	info.bmiHeader.biBitCount = 32;
-	void* raw = nullptr;
-	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
-	auto* dc = CreateCompatibleDC(screen);
-	auto* old = SelectObject(dc, bitmap);
-	BitBlt(dc, 0, 0, width, height, screen, frame.x(), frame.y(), SRCCOPY);
-	GdiFlush();
-	auto* bits = static_cast<quint32*>(raw);
-	for (qsizetype i = 0; i < static_cast<qsizetype>(width) * height; i++)
-		bits[i] |= 0xff000000; // NOLINT
-
-	POINT origin {x, frame.top()};
-	SIZE size {width, height};
-	POINT source {0, 0};
-	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-	UpdateLayeredWindow(host, screen, &origin, &size, dc, &source, 0, &blend, ULW_ALPHA);
-	SelectObject(dc, old);
-	DeleteDC(dc);
-	DeleteObject(bitmap);
-	ReleaseDC(nullptr, screen);
-	ShowWindow(host, SW_SHOWNOACTIVATE);
-	return host;
-}
-
-} // namespace
-
-// Off: parked windows keep a pixel on screen, so Chromium keeps painting and
-// travels live too. The still path stays for apps that still go blank.
-bool WindowMotion::travelsAsStill(HWND /*hwnd*/) { return false; }
-
-namespace {
 
 double ease(double x) {
 	auto lo = 0.0;
@@ -276,17 +197,6 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		entry.current = entry.to;
 		opacity = 255.0 * eased;
 	}
-	if (entry.snapshot != nullptr) {
-		auto dest = shown.translated(-this->coverRect.topLeft());
-		DWM_THUMBNAIL_PROPERTIES props {};
-		props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
-		props.rcDestination =
-		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
-		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
-		props.fVisible = TRUE;
-		DwmUpdateThumbnailProperties(entry.thumbnail, &props);
-		return;
-	}
 	RECT raw {};
 	RECT bounds {};
 	if (!GetWindowRect(entry.hwnd, &raw)
@@ -327,11 +237,8 @@ bool WindowMotion::begin(
 	}
 	if (!this->ensureCover()) return false;
 
-	HWND snapshot = !pop && WindowMotion::travelsAsStill(hwnd) ? snapshotOf(from) : nullptr;
 	HTHUMBNAIL thumbnail = nullptr;
-	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
-	{
-		if (snapshot != nullptr) DestroyWindow(snapshot);
+	if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) {
 		if (this->entries.isEmpty()) this->closeCover();
 		return false;
 	}
@@ -341,16 +248,12 @@ bool WindowMotion::begin(
 		this->entries.append(Entry {
 		    .hwnd = hwnd,
 		    .thumbnail = thumbnail,
-		    .snapshot = snapshot,
 		    .from = from,
 		    .to = to,
 		    .current = from,
 		    .parked = parked,
 		    .pop = pop,
 		    .start = std::chrono::steady_clock::now(),
-		    // A still covers the window already: no need to wait for it to leave,
-		    // which a busy app (Chromium repainting after a landing) takes long to.
-		    .waiting = snapshot == nullptr,
 		});
 		this->layout(this->entries.last(), 0);
 	}
@@ -397,7 +300,7 @@ void WindowMotion::cancel(HWND hwnd) {
 		auto lock = std::lock_guard(this->mutex);
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (this->entries[i].hwnd != hwnd) continue;
-			release(this->entries[i]);
+			DwmUnregisterThumbnail(this->entries[i].thumbnail);
 			this->entries.removeAt(i);
 		}
 		empty = this->entries.isEmpty();
@@ -455,13 +358,10 @@ void WindowMotion::onFrameDone() {
 		auto lock = std::lock_guard(this->mutex);
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (!this->entries[i].done) continue;
-			// A still stays up over its window while that paints (see lingering).
-			if (this->entries[i].snapshot == nullptr) {
-				DWM_THUMBNAIL_PROPERTIES props {};
-				props.dwFlags = DWM_TNP_VISIBLE;
-				props.fVisible = FALSE;
-				DwmUpdateThumbnailProperties(this->entries[i].thumbnail, &props);
-			}
+			DWM_THUMBNAIL_PROPERTIES props {};
+			props.dwFlags = DWM_TNP_VISIBLE;
+			props.fVisible = FALSE;
+			DwmUpdateThumbnailProperties(this->entries[i].thumbnail, &props);
 			landing.append(this->entries.takeAt(i));
 		}
 		empty = this->entries.isEmpty();
@@ -470,28 +370,10 @@ void WindowMotion::onFrameDone() {
 		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
 	}
 	for (const auto& entry: landing) {
-		// An app that stopped painting while away comes back blank for a few
-		// frames: its still stays over it, in place, until it has painted.
-		if (entry.snapshot != nullptr) this->lingering.append(entry);
-		else release(entry);
+		DwmUnregisterThumbnail(entry.thumbnail);
 		emit this->landed(entry.hwnd, entry.to);
 	}
-	if (!this->lingering.isEmpty()) {
-		QTimer::singleShot(LINGER_MS, this, [this]() {
-			for (const auto& entry: this->lingering) release(entry);
-			this->lingering.clear();
-			auto lock = std::unique_lock(this->mutex);
-			auto none = this->entries.isEmpty();
-			lock.unlock();
-			if (none) this->closeCover();
-		});
-	}
-	if (empty && this->lingering.isEmpty()) this->closeCover();
-}
-
-void WindowMotion::release(const Entry& entry) {
-	DwmUnregisterThumbnail(entry.thumbnail);
-	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
+	if (empty) this->closeCover();
 }
 
 void WindowMotion::closeCover() {
@@ -499,10 +381,8 @@ void WindowMotion::closeCover() {
 	if (this->worker.joinable()) this->worker.join();
 	{
 		auto lock = std::lock_guard(this->mutex);
-		for (const auto& entry: this->entries) release(entry);
+		for (const auto& entry: this->entries) DwmUnregisterThumbnail(entry.thumbnail);
 		this->entries.clear();
-		for (const auto& entry: this->lingering) release(entry);
-		this->lingering.clear();
 	}
 	if (this->cover != nullptr) {
 		DestroyWindow(this->cover);
