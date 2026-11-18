@@ -67,6 +67,29 @@ bool isSoftwareDevice(ID3D11Device* device) {
 }
 constexpr DXGI_FORMAT FRAME_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 
+// The largest monitor: a wallpaper is never shown bigger than that, so frames
+// beyond it (a 4K video on a 1080p screen) only cost memory.
+QSize largestMonitor() {
+	QSize largest;
+	EnumDisplayMonitors(
+	    nullptr,
+	    nullptr,
+	    [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
+		    MONITORINFO info {};
+		    info.cbSize = sizeof(info);
+		    if (GetMonitorInfoW(monitor, &info)) {
+			    auto* largest = reinterpret_cast<QSize*>(param);
+			    auto width = static_cast<int>(info.rcMonitor.right - info.rcMonitor.left);
+			    auto height = static_cast<int>(info.rcMonitor.bottom - info.rcMonitor.top);
+			    *largest = largest->expandedTo(QSize(width, height));
+		    }
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&largest)
+	);
+	return largest;
+}
+
 QString hresultText(HRESULT hr) {
 	return QStringLiteral("0x%1").arg(static_cast<quint32>(hr), 8, 16, QChar('0'));
 }
@@ -361,6 +384,11 @@ void VideoWorker::resizeFrame() {
 	auto maxHeight = this->software ? SOFTWARE_MAX_HEIGHT : MAX_HEIGHT;
 	if (size.width() > maxWidth || size.height() > maxHeight) {
 		size = size.scaled(maxWidth, maxHeight, Qt::KeepAspectRatio);
+	}
+	// Cover the largest monitor and no more.
+	auto monitor = largestMonitor();
+	if (monitor.isValid() && size.width() > monitor.width() && size.height() > monitor.height()) {
+		size = size.scaled(monitor, Qt::KeepAspectRatioByExpanding);
 	}
 
 	if (this->frame && this->frame->size == size) return;
