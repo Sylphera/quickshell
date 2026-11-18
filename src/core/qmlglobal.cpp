@@ -271,6 +271,13 @@ QString QuickshellGlobal::cacheDir() const { // NOLINT
 	return QsPaths::instance()->shellCacheDir().path();
 }
 
+void QuickshellGlobal::trimMemory() {
+	auto* engine = qmlEngine(this);
+	if (engine == nullptr) return;
+	engine->collectGarbage();
+	engine->trimComponentCache();
+}
+
 QString QuickshellGlobal::shellPath(const QString& path) const {
 	return this->shellDir() % '/' % path;
 }
