@@ -404,16 +404,48 @@ void Scratchpad::moveReal(int offset) {
 	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(offset);
 }
 
+// The hand-off between thumbnails and real windows has to land in a single
+// compositor frame: for a frame with both on screen a translucent window looks
+// twice as opaque, and with neither the window blinks out. Tiling moves
+// windows asynchronously, so this moves them itself, synchronously, right next
+// to the cover change, and tiling then finds them already in place.
+void Scratchpad::jumpReal(int offset) {
+	auto delta = offset - this->realOffset;
+	if (delta != 0) {
+		for (const auto& entry: this->entries) {
+			RECT rect {};
+			if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !GetWindowRect(entry.hwnd, &rect)) continue;
+			SetWindowPos(
+			    entry.hwnd,
+			    nullptr,
+			    rect.left,
+			    rect.top + delta,
+			    0,
+			    0,
+			    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+			);
+		}
+	}
+	this->moveReal(offset);
+}
+
 void Scratchpad::slide(bool in) {
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return;
 	this->slideGeneration++;
 
 	if (this->cover == nullptr) {
-		// Showing windows go below the screen first; on hide the cover must be
-		// up before they leave.
-		if (in) this->moveReal(this->slideDistance());
-		this->openCover();
+		// Showing windows go below the screen first; on hide the cover comes up
+		// and the windows leave in the same frame.
+		if (in) {
+			this->moveReal(this->slideDistance());
+			this->openCover(true);
+		} else {
+			this->openCover(false);
+			if (this->cover != nullptr) ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+			this->jumpReal(this->slideDistance());
+			DwmFlush();
+		}
 	}
 	if (this->realOffset != this->slideDistance()) this->moveReal(this->slideDistance());
 
@@ -431,7 +463,7 @@ void Scratchpad::slide(bool in) {
 	}
 }
 
-void Scratchpad::openCover() {
+void Scratchpad::openCover(bool show) {
 	auto rects = monitorRects(this->mMonitor);
 	if (!rects.valid) return;
 	auto* tiling = TilingManager::active();
@@ -497,6 +529,7 @@ void Scratchpad::openCover() {
 		this->layoutCover(this->slideOffset);
 	}
 	this->placeCover();
+	if (!show) return;
 	ShowWindow(this->cover, SW_SHOWNOACTIVATE);
 	DwmFlush();
 }
@@ -590,30 +623,21 @@ void Scratchpad::onSlideDone() {
 		if (this->hiding) this->finishHide();
 		return;
 	}
-	// The windows come up under their thumbnails; the cover leaves once they
-	// are there, so nothing jumps.
-	this->moveReal(0);
-	this->waitForLanding(this->slideGeneration, 0);
-}
-
-void Scratchpad::waitForLanding(int generation, int tries) {
-	if (generation != this->slideGeneration || this->cover == nullptr) return;
-	auto landed = true;
+	// The windows jump under their thumbnails and the cover leaves at once.
+	// The cover's own removal reaches the screen a frame after a window move,
+	// so its thumbnails are switched off first, which DWM applies right away.
+	this->slideStop.store(true);
+	if (this->slideWorker.joinable()) this->slideWorker.join();
 	{
 		auto lock = std::lock_guard(this->slideMutex);
 		for (const auto& thumb: this->coverThumbs) {
-			RECT bounds {};
-			if (FAILED(DwmGetWindowAttribute(thumb.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
-			if (bounds.top != thumb.frame.top() || bounds.left != thumb.frame.left()) landed = false;
+			DWM_THUMBNAIL_PROPERTIES props {};
+			props.dwFlags = DWM_TNP_VISIBLE;
+			props.fVisible = FALSE;
+			DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
 		}
 	}
-	if (!landed && tries < LANDING_TRIES) {
-		QTimer::singleShot(LANDING_STEP_MS, this, [this, generation, tries]() {
-			this->waitForLanding(generation, tries + 1);
-		});
-		return;
-	}
-	DwmFlush();
+	this->jumpReal(0);
 	this->closeCover();
 }
 

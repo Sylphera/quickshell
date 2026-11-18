@@ -56,15 +56,15 @@ private:
 	void setShown(bool shown);
 	void hideNow();
 	void slide(bool in);
-	void openCover();
 	void closeCover();
 	void placeCover();
 	void layoutCover(double offset);
 	void runSlide();
 	void onSlideDone();
-	void waitForLanding(int generation, int tries);
 	void waitForTakeoff(int generation, int tries);
 	void moveReal(int offset);
+	void jumpReal(int offset);
+	void openCover(bool show);
 	void finishHide();
 	[[nodiscard]] int slideDistance() const;
 	void park(Entry& entry);
