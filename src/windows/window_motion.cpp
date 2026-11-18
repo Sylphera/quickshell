@@ -317,7 +317,8 @@ bool WindowMotion::begin(
     const QRect& from,
     const QRect& to,
     const QRect& parked,
-    bool pop
+    bool pop,
+    bool still
 ) {
 	if (this->moving(hwnd)) {
 		this->retarget(hwnd, to, parked);
@@ -325,7 +326,7 @@ bool WindowMotion::begin(
 	}
 	if (!this->ensureCover()) return false;
 
-	HWND snapshot = !pop && paintsOnlyOnScreen(hwnd) ? snapshotOf(from) : nullptr;
+	HWND snapshot = !pop && still ? snapshotOf(from) : nullptr;
 	HTHUMBNAIL thumbnail = nullptr;
 	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
 	{

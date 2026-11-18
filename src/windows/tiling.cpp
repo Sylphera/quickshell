@@ -422,9 +422,11 @@ void TilingManager::setAnimateMoves(bool animate) {
 
 namespace {
 // Where a sliding window waits: past the right edge of every screen, at the
-// size of its new tile, so it is laid out and repainted before it shows.
-QRect parkedFrame(const QRect& tile) {
-	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100;
+// size of its new tile, so it is laid out and repainted before it shows. With
+// peek, one column stays on screen: Chromium stops painting a window it thinks
+// is hidden, and then can't travel live.
+QRect parkedFrame(const QRect& tile, bool peek = false) {
+	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + (peek ? -1 : 100);
 	return QRect(QPoint(x, tile.top()), tile.size());
 }
 } // namespace
@@ -458,12 +460,16 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
 		// As in Hyprland, the app takes its new size right away and its live
-		// thumbnail shows it while it travels. Apps that stop painting off
-		// screen (Chromium) travel as a still at the size they had instead.
+		// thumbnail shows it while it travels. Chromium only paints while some of
+		// it is on screen, so it waits with a column showing. While the bar
+		// toggles it can't: a window partly on screen fits itself into the new
+		// work area and jumps back, so then it travels as a still, fully off
+		// screen, at the size it had.
 		auto from = this->managedFrame(m);
-		auto stillSize = WindowMotion::travelsAsStill(m.window->hwnd());
-		auto parked = stillSize ? QRect(parkedFrame(tile).topLeft(), from.size()) : parkedFrame(tile);
-		if (motion->begin(m.window->hwnd(), from, tile, parked)) {
+		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
+		auto still = chromium && this->barMoving;
+		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size()) : parkedFrame(tile, chromium);
+		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);
 			return;
@@ -823,8 +829,9 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
 		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
 		if (from == work && !motion->moving(hwnd)) continue;
-		auto parked = WindowMotion::travelsAsStill(hwnd) ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
-		motion->begin(hwnd, from, work, parked);
+		auto still = WindowMotion::travelsAsStill(hwnd);
+		auto parked = still ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
+		motion->begin(hwnd, from, work, parked, false, still);
 	}
 }
 

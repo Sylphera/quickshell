@@ -30,8 +30,16 @@ public:
 	// Frames are DWM extended frame bounds, as tiling uses them. `parked` is
 	// where the window waits; the caller has already decided it may animate.
 	// With pop, the window pops in at `to` (end-4's windowsIn: from 80 % with a
-	// fade) instead of sliding from `from`.
-	bool begin(HWND hwnd, const QRect& from, const QRect& to, const QRect& parked, bool pop = false);
+	// fade) instead of sliding from `from`. With still, it travels as a copy of
+	// how it looked at `from`, for an app that won't paint while it waits.
+	bool begin(
+	    HWND hwnd,
+	    const QRect& from,
+	    const QRect& to,
+	    const QRect& parked,
+	    bool pop = false,
+	    bool still = false
+	);
 	void retarget(HWND hwnd, const QRect& to, const QRect& parked);
 	void cancel(HWND hwnd);
 	[[nodiscard]] bool moving(HWND hwnd) const;
