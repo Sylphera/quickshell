@@ -1,11 +1,16 @@
 #include "desktop_slide.hpp"
+#include <cstddef>
+#include <mutex>
+#include <vector>
 #include <thread>
 #include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 
+#include <pdh.h>
 #include <qcoreapplication.h>
+#include <qset.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpointer.h>
@@ -31,6 +36,7 @@ constexpr int CORNER_ZONE = 40;
 constexpr int CORNER_TOLERANCE = 6;
 constexpr int CORNER_RADIUS = 8;
 constexpr int WARM_DELAY_MS = 2500;
+constexpr LONGLONG OFF_DISPLAY_MIN_BYTES = 32LL * 1024 * 1024;
 
 // end-4's menu_decel curve for the workspaces animation.
 constexpr double CURVE_X1 = 0.1;
@@ -164,6 +170,103 @@ double refreshPeriodMs() {
 // Browsers and video players keep a video surface that makes their live
 // thumbnail expensive for the compositor, even when nothing plays. They slide
 // as still copies; everything else stays live.
+// Processes that render on a GPU other than the one driving the display. The
+// compositor copies each of their frames across GPUs, which makes a live
+// thumbnail of them as costly as a video. Refreshed off the GUI thread.
+struct OffDisplay {
+	std::mutex mutex;
+	// Executables rather than processes: Chromium and Firefox render in a GPU
+	// process of their own, not the one that owns the window.
+	QSet<QString> executables;
+};
+
+OffDisplay& offDisplay() {
+	static OffDisplay state; // NOLINT
+	return state;
+}
+
+bool displayLuid(LUID& luid) {
+	UINT32 pathCount = 0;
+	UINT32 modeCount = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) return false;
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr)
+	    != ERROR_SUCCESS)
+	{
+		return false;
+	}
+	for (UINT32 i = 0; i < pathCount; i++) {
+		auto index = paths[i].sourceInfo.modeInfoIdx;
+		if (index >= modeCount || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) continue;
+		const auto& position = modes[index].sourceMode.position;
+		if (position.x != 0 || position.y != 0) continue;
+		luid = paths[i].sourceInfo.adapterId;
+		return true;
+	}
+	return false;
+}
+
+// Reads the "GPU Process Memory" counters that Task Manager shows: a process
+// holding video memory on another adapter renders there. pdh.dll is loaded at
+// run time, so nothing links to it.
+QSet<QString> scanOffDisplayProcesses() {
+	QSet<QString> found;
+	LUID display {};
+	if (!displayLuid(display)) return found;
+
+	using OpenQuery = PDH_STATUS(WINAPI*)(LPCWSTR, DWORD_PTR, PDH_HQUERY*);
+	using AddCounter = PDH_STATUS(WINAPI*)(PDH_HQUERY, LPCWSTR, DWORD_PTR, PDH_HCOUNTER*);
+	using Collect = PDH_STATUS(WINAPI*)(PDH_HQUERY);
+	using GetArray = PDH_STATUS(WINAPI*)(PDH_HCOUNTER, DWORD, LPDWORD, LPDWORD, PPDH_FMT_COUNTERVALUE_ITEM_W);
+	using CloseQuery = PDH_STATUS(WINAPI*)(PDH_HQUERY);
+	static auto* pdh = LoadLibraryW(L"pdh.dll");
+	if (pdh == nullptr) return found;
+	auto resolve = [](const char* name) { return reinterpret_cast<void*>(GetProcAddress(pdh, name)); };
+	auto open = reinterpret_cast<OpenQuery>(resolve("PdhOpenQueryW"));
+	auto add = reinterpret_cast<AddCounter>(resolve("PdhAddEnglishCounterW"));
+	auto collect = reinterpret_cast<Collect>(resolve("PdhCollectQueryData"));
+	auto getArray = reinterpret_cast<GetArray>(resolve("PdhGetFormattedCounterArrayW"));
+	auto close = reinterpret_cast<CloseQuery>(resolve("PdhCloseQuery"));
+	if (open == nullptr || add == nullptr || collect == nullptr || getArray == nullptr || close == nullptr) {
+		return found;
+	}
+
+	PDH_HQUERY query = nullptr;
+	if (open(nullptr, 0, &query) != ERROR_SUCCESS) return found;
+	PDH_HCOUNTER counter = nullptr;
+	if (add(query, L"\\GPU Process Memory(*)\\Dedicated Usage", 0, &counter) == ERROR_SUCCESS
+	    && collect(query) == ERROR_SUCCESS)
+	{
+		DWORD size = 0;
+		DWORD count = 0;
+		if (getArray(counter, PDH_FMT_LARGE, &size, &count, nullptr) == static_cast<PDH_STATUS>(0x800007D2L)) {
+			std::vector<std::byte> buffer(size);
+			auto* items = reinterpret_cast<PPDH_FMT_COUNTERVALUE_ITEM_W>(buffer.data());
+			if (getArray(counter, PDH_FMT_LARGE, &size, &count, items) == ERROR_SUCCESS) {
+				for (DWORD i = 0; i < count; i++) {
+					if (items[i].FmtValue.largeValue < OFF_DISPLAY_MIN_BYTES) continue;
+					unsigned pid = 0;
+					unsigned high = 0;
+					unsigned low = 0;
+					if (swscanf_s(items[i].szName, L"pid_%u_luid_0x%x_0x%x", &pid, &high, &low) != 3) continue;
+					if (low == display.LowPart && static_cast<LONG>(high) == display.HighPart) continue;
+					auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+					if (process == nullptr) continue;
+					wchar_t path[MAX_PATH] {};
+					DWORD length = MAX_PATH;
+					if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+						found.insert(QString::fromWCharArray(path, static_cast<int>(length)).toLower());
+					}
+					CloseHandle(process);
+				}
+			}
+		}
+	}
+	close(query);
+	return found;
+}
+
 bool heavyWindow(const TrackedWindow* window) {
 	static const QStringList names = {
 	    QStringLiteral("zen.exe"),      QStringLiteral("firefox.exe"),  QStringLiteral("librewolf.exe"),
@@ -173,6 +276,11 @@ bool heavyWindow(const TrackedWindow* window) {
 	    QStringLiteral("mpv.exe"),      QStringLiteral("vlc.exe"),      QStringLiteral("mpc-hc64.exe"),
 	    QStringLiteral("mpc-be64.exe"), QStringLiteral("potplayermini64.exe"),
 	};
+	{
+		auto& state = offDisplay();
+		auto lock = std::lock_guard(state.mutex);
+		if (state.executables.contains(window->exePath().toLower())) return true;
+	}
 	auto path = window->exePath();
 	auto name = path.mid(path.lastIndexOf(QLatin1Char('\\')) + 1).toLower();
 	return names.contains(name);
@@ -641,6 +749,27 @@ void DesktopSlide::warmUp() {
 		this->warmTimer.start();
 		return;
 	}
+	QPointer<DesktopSlide> self = this;
+	std::thread([self]() {
+		auto pids = scanOffDisplayProcesses();
+		{
+			auto& state = offDisplay();
+			auto lock = std::lock_guard(state.mutex);
+			state.executables = pids;
+		}
+		if (self.isNull()) return;
+		QMetaObject::invokeMethod(
+		    self.data(),
+		    [self]() {
+			    if (!self.isNull()) self->warmCapture();
+		    },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
+
+void DesktopSlide::warmCapture() {
+	if (this->overlay != nullptr) return;
 	auto* tracker = WindowTracker::instance();
 	auto* desktops = VirtualDesktops::instance();
 	if (tracker == nullptr || desktops == nullptr) return;

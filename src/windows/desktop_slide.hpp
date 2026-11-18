@@ -50,6 +50,7 @@ private:
 	bool takeSnapshot(HWND hwnd, const QRect& frame);
 	void pruneSnapshots();
 	void warmUp();
+	void warmCapture();
 	void storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels);
 
 	struct Snapshot {
