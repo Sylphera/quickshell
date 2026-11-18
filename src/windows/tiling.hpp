@@ -89,7 +89,7 @@ public:
 	static void restoreForCrash();
 
 	void relayout();
-	void expectBarSpace(const QString& screenName, bool top, int delta);
+	void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
 	[[nodiscard]] TrackedWindow* focusedWindow() const;
@@ -280,6 +280,9 @@ private:
 	bool mEnabled = false;
 	bool mSuppressWindowShadows = false;
 	bool mAnimateMoves = true;
+	// Set while the bar is toggling: windows slide even while tiling is still
+	// checking where an app put its window, since they wait off screen anyway.
+	bool barMoving = false;
 	// Windows sliding to a new tile, with the tile they go to.
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;
@@ -351,10 +354,11 @@ public:
 	explicit Tiling(QObject* parent = nullptr);
 
 	Q_INVOKABLE void relayout();
-	// The bar on `screenName` is about to give back (`delta` < 0) or take
-	// (`delta` > 0) that many logical pixels at its edge: windows start sliding
-	// now, before Windows changes the work area and apps react to it.
-	Q_INVOKABLE void expectBarSpace(const QString& screenName, bool top, int delta);
+	// The bar on `screenName` is about to reserve `reserved` logical pixels at
+	// its edge (0 when hidden): windows start sliding now, before Windows changes
+	// the work area and apps react to it. A state, not a change, so toggling
+	// faster than the reservation follows cannot drift.
+	Q_INVOKABLE void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool enabled() const;
 	void setEnabled(bool enabled);

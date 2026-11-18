@@ -485,7 +485,7 @@ bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& 
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
 	if (!this->mAnimateMoves || layout->special || m.target.isNull() || tile == m.target) return false;
-	if (m.verifying || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
+	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
@@ -782,24 +782,29 @@ void TilingManager::relayout() {
 	this->markAll();
 }
 
-void TilingManager::expectBarSpace(const QString& screenName, bool top, int delta) {
-	if (!this->mEnabled || delta == 0) return;
+void TilingManager::expectBarSpace(const QString& screenName, bool top, int reserved) {
+	if (!this->mEnabled) return;
 	QScreen* screen = nullptr;
 	for (auto* candidate: QGuiApplication::screens()) {
 		if (candidate->name() == screenName) screen = candidate;
 	}
+	if (screen == nullptr) return;
 	auto* monitor = monitorForScreen(screen);
 	auto rects = monitorRects(monitor);
 	if (!rects.valid) return;
 
-	auto physical = static_cast<int>(std::lround(delta * screen->devicePixelRatio()));
+	// Measured from the screen's edge: only the bar's edge changes, the others
+	// keep what Windows reserves there (the dock, say).
+	auto physical = std::max(0, static_cast<int>(std::lround(reserved * screen->devicePixelRatio())));
 	auto work = rects.work;
-	if (top) work.setTop(std::clamp(work.top() + physical, rects.monitor.top(), work.bottom()));
-	else work.setBottom(std::clamp(work.bottom() - physical, work.top(), rects.monitor.bottom()));
+	if (top) work.setTop(std::min(rects.monitor.top() + physical, work.bottom()));
+	else work.setBottom(std::max(rects.monitor.bottom() - physical, work.top()));
 	expectWorkArea(monitor, work, 1500);
 
+	this->barMoving = true;
 	this->relayout();
 	this->sync();
+	this->barMoving = false;
 }
 
 void TilingManager::markAll() {
@@ -2874,8 +2879,8 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 }
 
 void Tiling::relayout() { TilingManager::instance()->relayout(); }
-void Tiling::expectBarSpace(const QString& screenName, bool top, int delta) {
-	TilingManager::instance()->expectBarSpace(screenName, top, delta);
+void Tiling::expectBarSpace(const QString& screenName, bool top, int reserved) {
+	TilingManager::instance()->expectBarSpace(screenName, top, reserved);
 }
 
 bool Tiling::enabled() const { return TilingManager::instance()->enabled(); }
