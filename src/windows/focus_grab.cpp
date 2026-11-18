@@ -75,6 +75,15 @@ private:
 
 		qCDebug(logFocusGrab) << "Button pressed at" << position << "on" << root;
 
+		// The native screen corners toggle the sidebars themselves; a click on
+		// them dismissing a sidebar first would have it reopen at once. They
+		// belong to every grab, as the bar does.
+		if (root != nullptr && isOwnProcessWindow(root)) {
+			wchar_t name[64] {};
+			GetClassNameW(root, name, 64);
+			if (wcscmp(name, L"QuickshellScreenCorner") == 0) return;
+		}
+
 		auto grabs = this->grabs;
 		for (const auto& grab: grabs) {
 			if (grab.isNull() || !grab->isActive()) continue;
