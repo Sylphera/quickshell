@@ -805,6 +805,24 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 	this->relayout();
 	this->sync();
 	this->barMoving = false;
+
+	// Maximized windows aren't tiled: Windows fits them to the work area by
+	// itself, without a slide. They slide to it here like the tiled ones; the
+	// motion leaves them at the new work area, still maximized.
+	if (!this->mAnimateMoves || this->desktops->shownIndex() != this->desktops->currentIndex()) return;
+	auto* motion = WindowMotion::instance();
+	for (auto& [window, m]: this->managed) {
+		if (!window->maximized() || window->minimized() || m.elevated) continue;
+		if (window->desktop() != this->desktops->currentIndex() || Scratchpad::holds(window)) continue;
+		if (monitorForScreen(window->screen()) != monitor) continue;
+		auto* hwnd = window->hwnd();
+		if (!IsWindowVisible(hwnd) || IsHungAppWindow(hwnd)) continue;
+		RECT bounds {};
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
+		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+		if (from == work && !motion->moving(hwnd)) continue;
+		motion->begin(hwnd, from, work, QRect(parkedFrame(work).topLeft(), from.size()));
+	}
 }
 
 void TilingManager::markAll() {
