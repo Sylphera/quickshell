@@ -1,4 +1,5 @@
 #include "desktop_slide.hpp"
+#include <limits>
 #include <cstddef>
 #include <mutex>
 #include <vector>
@@ -435,24 +436,38 @@ void DesktopSlide::retarget(qsizetype to) {
 		auto progress = this->cameraFrom == this->cameraTo ? 1.0 : std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
-		if (!this->bases.contains(to)) {
-			auto base = this->bases.value(this->target) + (to > this->target ? this->travel : -this->travel);
-			// Like Hyprland, a desktop that held this slot leaves the strip.
-			for (auto iter = this->bases.begin(); iter != this->bases.end();) {
-				if (iter.value() != base) {
-					++iter;
-					continue;
-				}
-				auto gone = iter.key();
-				for (auto i = this->thumbs.size() - 1; i >= 0; i--) {
-					if (this->thumbs[i].desktop != gone) continue;
-					DwmUnregisterThumbnail(this->thumbs[i].thumbnail);
-					this->thumbs.removeAt(i);
-				}
-				iter = this->bases.erase(iter);
+		// Like Hyprland, only the desktop under the camera and the requested one
+		// sit side by side: the new one goes right next to what is on screen, and
+		// any other desktop on the way between them leaves the strip.
+		auto here = this->target;
+		auto nearest = std::numeric_limits<double>::max();
+		for (auto iter = this->bases.cbegin(); iter != this->bases.cend(); ++iter) {
+			auto distance = std::abs(iter.value() - camera);
+			if (distance < nearest) {
+				nearest = distance;
+				here = iter.key();
 			}
-			this->bases.insert(to, base);
 		}
+		auto base = to == here ? this->bases.value(here)
+		                       : this->bases.value(here) + (to > here ? this->travel : -this->travel);
+		auto low = std::min(camera, static_cast<double>(base));
+		auto high = std::max(camera, static_cast<double>(base));
+		for (auto iter = this->bases.begin(); iter != this->bases.end();) {
+			auto key = iter.key();
+			auto value = static_cast<double>(iter.value());
+			auto inTheWay = key != here && key != to && value >= low && value <= high;
+			if (!inTheWay) {
+				++iter;
+				continue;
+			}
+			for (auto i = this->thumbs.size() - 1; i >= 0; i--) {
+				if (this->thumbs[i].desktop != key) continue;
+				DwmUnregisterThumbnail(this->thumbs[i].thumbnail);
+				this->thumbs.removeAt(i);
+			}
+			iter = this->bases.erase(iter);
+		}
+		this->bases.insert(to, base);
 
 		this->cameraFrom = camera;
 		this->cameraTo = this->bases.value(to);
