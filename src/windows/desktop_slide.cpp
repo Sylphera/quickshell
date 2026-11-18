@@ -7,18 +7,21 @@
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpointer.h>
+#include <qtimer.h>
 
+#include "panel_window.hpp"
+#include "virtual_desktops.hpp"
 #include "window_tracker.hpp"
 
 namespace qs::windows {
 
 namespace {
 
-Q_LOGGING_CATEGORY(logSlide, "quickshell.windows.desktopslide", QtWarningMsg);
-
 constexpr auto* OVERLAY_CLASS = L"QuickshellDesktopSlide";
-constexpr qint64 SLIDE_MS = 700;
+constexpr double SLIDE_MS = 700;
 constexpr int WORKSPACE_GAP = 50;
+constexpr int SETTLE_RETRY_MS = 30;
+constexpr int SETTLE_RETRIES = 30;
 
 // end-4's menu_decel curve for the workspaces animation.
 constexpr double CURVE_X1 = 0.1;
@@ -47,7 +50,13 @@ LRESULT CALLBACK overlayProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
 	case WM_NCHITTEST: return HTTRANSPARENT;
 	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
 	case WM_ERASEBKGND: return 1;
-	case WM_PAINT: ValidateRect(hwnd, nullptr); return 0;
+	case WM_PAINT: {
+		PAINTSTRUCT paint {};
+		auto* dc = BeginPaint(hwnd, &paint);
+		FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+		EndPaint(hwnd, &paint);
+		return 0;
+	}
 	default: return DefWindowProcW(hwnd, msg, wparam, lparam);
 	}
 }
@@ -60,7 +69,6 @@ HWND createOverlay(const QRect& rect) {
 		cls.cbSize = sizeof(cls);
 		cls.lpfnWndProc = &overlayProc;
 		cls.hInstance = instance;
-		cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
 		cls.lpszClassName = OVERLAY_CLASS;
 		registered = RegisterClassExW(&cls) != 0;
 	}
@@ -100,11 +108,30 @@ QList<HWND> topLevelWindows() {
 	return list;
 }
 
+bool desktopWindow(HWND hwnd) {
+	wchar_t name[16] {};
+	GetClassNameW(hwnd, name, 16);
+	return wcscmp(name, L"Progman") == 0 || wcscmp(name, L"WorkerW") == 0;
+}
+
 bool ownWindow(HWND hwnd) {
 	DWORD pid = 0;
 	GetWindowThreadProcessId(hwnd, &pid);
 	return pid == GetCurrentProcessId();
 }
+
+// A tiled window can carry a region that clips it to its tile; the thumbnail
+// ignores it, so the source is cut to the region's bounds instead.
+QRect sourceOf(HWND hwnd, const QRect& rect) {
+	RECT box {};
+	auto kind = GetWindowRgnBox(hwnd, &box);
+	if (kind == SIMPLEREGION || kind == COMPLEXREGION) {
+		return {box.left, box.top, box.right - box.left, box.bottom - box.top};
+	}
+	return {0, 0, rect.width(), rect.height()};
+}
+
+RECT toRect(const QRect& rect) { return {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1}; }
 
 } // namespace
 
@@ -116,15 +143,24 @@ DesktopSlide* DesktopSlide::instance() {
 
 DesktopSlide::DesktopSlide(QObject* parent): QObject(parent) {}
 
-DesktopSlide::~DesktopSlide() {
-	if (this->worker.joinable()) this->worker.join();
-	this->finish();
+DesktopSlide::~DesktopSlide() { this->finish(); }
+
+void DesktopSlide::begin(qsizetype from, qsizetype to) {
+	if (to < 0) return;
+	if (this->overlay != nullptr) this->retarget(to);
+	else if (from >= 0 && from != to) this->start(from, to);
 }
 
-bool DesktopSlide::begin(qsizetype from, qsizetype to) {
-	if (this->mRunning.load() || from < 0 || to < 0 || from == to) return false;
+bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	auto* tracker = WindowTracker::instance();
 	if (tracker == nullptr) return false;
+
+	auto any = false;
+	for (auto* window: tracker->windows()) {
+		auto desktop = window->desktop();
+		if (!window->minimized() && (desktop == from || desktop == to)) any = true;
+	}
+	if (!any) return false;
 
 	POINT cursor {};
 	GetCursorPos(&cursor);
@@ -133,120 +169,181 @@ bool DesktopSlide::begin(qsizetype from, qsizetype to) {
 	const auto& m = info.rcMonitor;
 	this->monitor = QRect(m.left, m.top, m.right - m.left, m.bottom - m.top);
 
-	struct Source {
-		HWND hwnd;
-		QRect rect;
-		int lane;
-	};
-	QList<Source> sources;
-	auto moving = 0;
+	this->overlay = createOverlay(this->monitor);
+	if (this->overlay == nullptr) return false;
+	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
+	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
+
 	auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
 		auto* hwnd = windows[i];
+		if (hwnd == this->overlay || topmost(hwnd)) continue;
+		if (!desktopWindow(hwnd) && !ownWindow(hwnd)) continue;
 		auto rect = rectOf(hwnd);
-		if (!rect.intersects(this->monitor)) continue;
+		if (!rect.contains(this->monitor)) continue;
 
-		if (ownWindow(hwnd)) {
-			if (!topmost(hwnd) && rect.contains(this->monitor)) sources.append({hwnd, rect, 0});
-			continue;
-		}
-
-		auto* window = tracker->windowFor(hwnd);
-		if (window == nullptr || window->minimized()) continue;
-		if (window->desktop() == from) sources.append({hwnd, rect, 1});
-		else if (window->desktop() == to) sources.append({hwnd, rect, 2});
-		else continue;
-		moving++;
-	}
-	if (moving == 0) return false;
-
-	this->overlay = createOverlay(this->monitor);
-	if (this->overlay == nullptr) return false;
-
-	auto direction = to > from ? -1 : 1;
-	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
-	auto travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
-
-	for (const auto& source: sources) {
 		HTHUMBNAIL thumbnail = nullptr;
-		if (FAILED(DwmRegisterThumbnail(this->overlay, source.hwnd, &thumbnail))) continue;
-		auto rect = source.rect.translated(-this->monitor.topLeft());
-		if (source.lane == 2) rect.translate(-direction * travel, 0);
-
+		if (FAILED(DwmRegisterThumbnail(this->overlay, hwnd, &thumbnail))) continue;
+		auto local = rect.translated(-this->monitor.topLeft());
 		DWM_THUMBNAIL_PROPERTIES props {};
 		props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY
 		              | DWM_TNP_SOURCECLIENTAREAONLY;
 		props.fVisible = TRUE;
 		props.opacity = 255;
-		props.fSourceClientAreaOnly = FALSE;
-		props.rcDestination = {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1};
+		props.rcDestination = toRect(local);
 		DwmUpdateThumbnailProperties(thumbnail, &props);
-		this->thumbs.append({thumbnail, source.rect.translated(-this->monitor.topLeft()), source.lane});
+		this->thumbs.append({thumbnail, local, QRect(), -1});
 	}
 
+	this->bases.insert(from, 0);
+	this->target = from;
+	this->cameraFrom = 0;
+	this->cameraTo = 0;
+	this->addDesktop(from);
+	this->retarget(to);
+
+	WinPanelWindow::setCoverActive(true);
 	ShowWindow(this->overlay, SW_SHOWNOACTIVATE);
 	SetWindowPos(this->overlay, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	this->raisePanels();
 	DwmFlush();
 	DwmFlush();
 
-	this->mRunning.store(true);
-	if (this->worker.joinable()) this->worker.join();
-	this->worker = std::thread(&DesktopSlide::run, this, direction, travel, SLIDE_MS);
+	this->stop.store(false);
+	this->settleRetries = 0;
+	this->worker = std::thread(&DesktopSlide::run, this);
 	return true;
 }
 
-void DesktopSlide::raisePanels() {
+void DesktopSlide::retarget(qsizetype to) {
+	{
+		auto lock = std::lock_guard(this->mutex);
+		if (to == this->target) return;
+
+		auto now = std::chrono::steady_clock::now();
+		auto elapsed = std::chrono::duration<double, std::milli>(now - this->startedAt).count();
+		auto progress = this->cameraFrom == this->cameraTo ? 1.0 : std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
+		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
+
+		if (!this->bases.contains(to)) {
+			auto base = this->bases.value(this->target);
+			this->bases.insert(to, base + (to > this->target ? this->travel : -this->travel));
+		}
+
+		this->cameraFrom = camera;
+		this->cameraTo = this->bases.value(to);
+		this->startedAt = now;
+		this->target = to;
+		this->settledSent = false;
+	}
+	this->addDesktop(to);
+}
+
+void DesktopSlide::addDesktop(qsizetype desktop) {
+	auto* tracker = WindowTracker::instance();
+	if (tracker == nullptr || this->overlay == nullptr) return;
+
+	{
+		auto lock = std::lock_guard(this->mutex);
+		for (const auto& thumb: this->thumbs) {
+			if (thumb.desktop == desktop) return;
+		}
+	}
+
+	QList<Thumb> added;
 	auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
 		auto* hwnd = windows[i];
-		if (hwnd == this->overlay || !ownWindow(hwnd) || !topmost(hwnd)) continue;
-		SetWindowPos(
-		    hwnd,
-		    HWND_TOPMOST,
-		    0,
-		    0,
-		    0,
-		    0,
-		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
-		);
+		if (ownWindow(hwnd)) continue;
+		auto* window = tracker->windowFor(hwnd);
+		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
+		auto rect = rectOf(hwnd);
+		if (!rect.intersects(this->monitor)) continue;
+
+		HTHUMBNAIL thumbnail = nullptr;
+		if (FAILED(DwmRegisterThumbnail(this->overlay, hwnd, &thumbnail))) continue;
+		auto source = sourceOf(hwnd, rect);
+		auto local = source.translated(rect.topLeft() - this->monitor.topLeft());
+
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
+		props.rcSource = toRect(source);
+		props.opacity = 255;
+		props.fVisible = FALSE;
+		DwmUpdateThumbnailProperties(thumbnail, &props);
+		added.append({thumbnail, local, source, desktop});
 	}
+
+	auto lock = std::lock_guard(this->mutex);
+	this->thumbs.append(added);
 }
 
-void DesktopSlide::run(int direction, int travel, qint64 durationMs) {
-	auto start = std::chrono::steady_clock::now();
-	while (true) {
+void DesktopSlide::run() {
+	while (!this->stop.load()) {
 		DwmFlush();
-		auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start);
-		auto progress = std::clamp(elapsed.count() / static_cast<double>(durationMs), 0.0, 1.0);
-		auto eased = ease(progress);
+		auto lock = std::lock_guard(this->mutex);
+		auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - this->startedAt).count();
+		auto progress = std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
+		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
 		for (const auto& thumb: this->thumbs) {
-			if (thumb.lane == 0) continue;
-			auto offset = thumb.lane == 1 ? direction * travel * eased
-			                              : direction * travel * (eased - 1.0);
-			auto rect = thumb.rect.translated(static_cast<int>(std::lround(offset)), 0);
+			if (thumb.desktop < 0) continue;
+			auto offset = static_cast<int>(std::lround(this->bases.value(thumb.desktop) - camera));
+			auto rect = thumb.rect.translated(offset, 0);
 			DWM_THUMBNAIL_PROPERTIES props {};
-			props.dwFlags = DWM_TNP_RECTDESTINATION;
-			props.rcDestination = {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1};
+			props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE;
+			props.fVisible = rect.intersects(QRect(QPoint(), this->monitor.size())) ? TRUE : FALSE;
+			props.rcDestination = toRect(rect);
 			DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
 		}
 
-		if (progress >= 1.0) break;
+		if (progress >= 1.0 && !this->settledSent) {
+			this->settledSent = true;
+			QMetaObject::invokeMethod(this, &DesktopSlide::onSettled, Qt::QueuedConnection);
+		}
 	}
-	DwmFlush();
-	QMetaObject::invokeMethod(this, &DesktopSlide::finish, Qt::QueuedConnection);
+}
+
+void DesktopSlide::onSettled() {
+	qsizetype target = -1;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		if (!this->settledSent) return;
+		target = this->target;
+	}
+
+	auto* desktops = VirtualDesktops::instance();
+	if (desktops->currentIndex() != target && this->settleRetries++ < SETTLE_RETRIES) {
+		QTimer::singleShot(SETTLE_RETRY_MS, this, &DesktopSlide::onSettled);
+		return;
+	}
+	this->finish();
+}
+
+void DesktopSlide::raisePanels() {
+	auto above = WinPanelWindow::aboveWindowHandles();
+	auto windows = topLevelWindows();
+	for (auto i = windows.size() - 1; i >= 0; i--) {
+		auto* hwnd = windows[i];
+		if (hwnd == this->overlay || !ownWindow(hwnd)) continue;
+		if (!topmost(hwnd) && !above.contains(hwnd)) continue;
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	}
 }
 
 void DesktopSlide::finish() {
-	if (this->worker.joinable() && this->worker.get_id() != std::this_thread::get_id()) {
-		this->worker.join();
-	}
+	this->stop.store(true);
+	if (this->worker.joinable()) this->worker.join();
 	for (const auto& thumb: this->thumbs) DwmUnregisterThumbnail(thumb.thumbnail);
 	this->thumbs.clear();
-	if (this->overlay != nullptr) DestroyWindow(this->overlay);
+	this->bases.clear();
+	this->target = -1;
+	this->settledSent = false;
+	if (this->overlay == nullptr) return;
+	DestroyWindow(this->overlay);
 	this->overlay = nullptr;
-	this->mRunning.store(false);
+	WinPanelWindow::setCoverActive(false);
+	WinPanelWindow::restackAll();
 }
 
 } // namespace qs::windows

@@ -362,6 +362,7 @@ public:
 	}
 
 	[[nodiscard]] bool fullscreenAppActive() const { return this->mFullscreenApp; }
+	[[nodiscard]] const QList<WinPanelWindow*>& panels() const { return this->mPanels; }
 
 	void setFullscreenAppActive(bool active) {
 		if (active == this->mFullscreenApp) return;
@@ -949,6 +950,10 @@ void WinPanelWindow::updateDimensions() {
 	}
 }
 
+namespace {
+bool gCoverActive = false; // NOLINT
+}
+
 void WinPanelWindow::updateLayer() {
 	if (this->window == nullptr) return;
 
@@ -976,7 +981,8 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Background:
 	case PanelLayer::Bottom: insertAfter = HWND_BOTTOM; break;
 	case PanelLayer::Top:
-		insertAfter = WinPanelStack::instance()->fullscreenAppActive() ? HWND_BOTTOM : HWND_TOPMOST;
+		insertAfter = WinPanelStack::instance()->fullscreenAppActive() && !gCoverActive ? HWND_BOTTOM
+		                                                                                  : HWND_TOPMOST;
 		break;
 	case PanelLayer::Overlay: insertAfter = HWND_TOPMOST; break;
 	}
@@ -986,6 +992,22 @@ void WinPanelWindow::updateLayer() {
 	if (layer == PanelLayer::Bottom) stack->lowerBackgrounds();
 
 	InputMaskTracker::instance()->refresh();
+}
+
+QList<HWND> WinPanelWindow::aboveWindowHandles() {
+	QList<HWND> list;
+	for (auto* panel: WinPanelStack::instance()->panels()) {
+		if (panel->isEmbedded() || !panel->aboveWindows()) continue;
+		auto* hwnd = panel->hwnd();
+		if (hwnd != nullptr && IsWindowVisible(hwnd)) list.append(hwnd);
+	}
+	return list;
+}
+
+void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }
+
+void WinPanelWindow::restackAll() {
+	for (auto* panel: WinPanelStack::instance()->panels()) panel->updateLayer();
 }
 
 bool WinPanelWindow::reservesSpace() const {
