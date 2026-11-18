@@ -310,6 +310,9 @@ bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QR
 		    .parked = parked,
 		    .pop = pop,
 		    .start = std::chrono::steady_clock::now(),
+		    // A still covers the window already: no need to wait for it to leave,
+		    // which a busy app (Chromium repainting after a landing) takes long to.
+		    .waiting = snapshot == nullptr,
 		});
 		this->layout(this->entries.last(), 0);
 	}
