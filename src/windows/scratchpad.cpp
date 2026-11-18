@@ -216,15 +216,26 @@ Scratchpad::Scratchpad(QObject* parent)
 		// A switch begun before opening special commits after the desktop slide.
 		// Its currentChanged only acknowledges the desktop already shown at open.
 		auto* desktops = VirtualDesktops::instance();
-		if (this->mShown && desktops->currentIndex() != this->openedDesktop)
-			this->setShown(false);
+		if (this->mShown && desktops->currentIndex() != this->openedDesktop) this->hideNow();
 	});
 	// The real switch is deferred under the desktop slide; special leaves as
 	// soon as the switch is asked for, like Hyprland, not when it commits.
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::shownChanged, this, [this]() {
-		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
-			this->setShown(false);
+		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop) this->hideNow();
 	});
+}
+
+// A desktop switch covers the screen with its own slide, and special's slide
+// out on top of it would leave a ghost of the window behind. It just goes.
+void Scratchpad::hideNow() {
+	if (!this->mShown) return;
+	this->preparing = false;
+	this->slideGeneration++;
+	this->dimTimer.stop();
+	this->dimAlpha = 0;
+	this->dimTarget = 0;
+	if (this->dim != nullptr) ShowWindow(this->dim, SW_HIDE);
+	this->finishHide();
 }
 
 bool Scratchpad::contains(const TrackedWindow* window) const {

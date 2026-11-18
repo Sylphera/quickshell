@@ -19,6 +19,7 @@
 #include <qtimer.h>
 
 #include "panel_window.hpp"
+#include "scratchpad.hpp"
 #include "virtual_desktops.hpp"
 #include "window_tracker.hpp"
 
@@ -506,6 +507,8 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		auto* hwnd = windows[i];
 		if (ownWindow(hwnd)) continue;
 		auto* window = tracker->windowFor(hwnd);
+		// Special windows are pinned to every desktop; they leave with special.
+		if (Scratchpad::holds(window)) continue;
 		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.intersects(this->monitor)) continue;

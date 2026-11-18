@@ -54,6 +54,7 @@ private:
 	};
 
 	void setShown(bool shown);
+	void hideNow();
 	void slide(bool in);
 	void openCover();
 	void closeCover();
