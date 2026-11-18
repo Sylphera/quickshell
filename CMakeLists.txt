@@ -117,7 +117,10 @@ include(cmake/install-qml-module.cmake)
 include(cmake/util.cmake)
 
 if (MSVC)
-	add_compile_options(/W4 -Wno-vla-cxx-extension -Wno-clang-cl-pch)
+	add_compile_options(/W4 /Zc:preprocessor)
+	if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+		add_compile_options(-Wno-vla-cxx-extension -Wno-clang-cl-pch)
+	endif()
 	add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
 	add_compile_options(-Wall -Wextra -Wno-vla-cxx-extension)
@@ -125,7 +128,9 @@ endif()
 
 # pipewire defines these, breaking PCH
 add_compile_definitions(_REENTRANT)
-add_compile_options(-fno-strict-overflow)
+if (NOT MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+	add_compile_options(-fno-strict-overflow)
+endif()
 
 if (FRAME_POINTERS)
 	add_compile_options(-fno-omit-frame-pointer)

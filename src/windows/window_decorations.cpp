@@ -304,6 +304,8 @@ void DecorationManager::apply(TrackedWindow* window) {
 	if (isOwnProcessWindow(hwnd) || !reachable(hwnd)) return;
 
 	auto state = this->applied.value(hwnd);
+	// Only the sub-80px legacy shrinking path owns this HWND mask.
+	auto tinyRoundedTile = GetPropW(hwnd, L"QuickshellTilingTinyRounded") != nullptr;
 
 	auto supported = DecorationManager::supported();
 	auto active = window == this->tracker->activeWindow();
@@ -311,24 +313,24 @@ void DecorationManager::apply(TrackedWindow* window) {
 	auto color = active ? this->mActiveColor : this->mInactiveColor;
 	if (mode == BorderMode::Colors && !color.isValid()) mode = BorderMode::System;
 
-	if (mode != BorderMode::System) {
+	if (!tinyRoundedTile && mode != BorderMode::System) {
 		auto value = mode == BorderMode::None ? DWMWA_COLOR_NONE : colorRef(color);
 		if ((!state.border || state.color != value) && setBorder(hwnd, value)) {
 			state.border = true;
 			state.color = value;
 		}
-	} else if (state.border) {
+	} else if (!tinyRoundedTile && state.border) {
 		setBorder(hwnd, DWMWA_COLOR_DEFAULT);
 		state.border = false;
 	}
 
 	auto preference = supported ? this->cornerPreference() : DWORD(DWMWCP_DEFAULT);
-	if (preference != DWMWCP_DEFAULT) {
+	if (!tinyRoundedTile && preference != DWMWCP_DEFAULT) {
 		if ((!state.corner || state.preference != preference) && setCorner(hwnd, preference)) {
 			state.corner = true;
 			state.preference = preference;
 		}
-	} else if (state.corner) {
+	} else if (!tinyRoundedTile && state.corner) {
 		setCorner(hwnd, DWMWCP_DEFAULT);
 		state.corner = false;
 	}

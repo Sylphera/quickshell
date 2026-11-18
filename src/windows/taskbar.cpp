@@ -203,18 +203,39 @@ TaskbarManager::~TaskbarManager() { this->disable(false); }
 void TaskbarManager::setHoverOnly(bool hoverOnly) {
 	if (hoverOnly == this->mHoverOnly) return;
 	this->mHoverOnly = hoverOnly;
-
-	if (hoverOnly) {
-		this->enable();
-	} else {
-		this->disable(true);
-	}
-
+	this->refreshMode();
 	emit this->hoverOnlyChanged();
 }
 
+void TaskbarManager::setAlwaysHidden(bool alwaysHidden) {
+	if (alwaysHidden == this->mAlwaysHidden) return;
+	this->mAlwaysHidden = alwaysHidden;
+	this->refreshMode();
+	emit this->alwaysHiddenChanged();
+}
+
+void TaskbarManager::refreshMode() {
+	if (!this->mHoverOnly && !this->mAlwaysHidden) {
+		this->disable(true);
+		return;
+	}
+	if (!this->enabled) {
+		this->enable();
+		return;
+	}
+	// Switching modes must update the existing bars immediately. Otherwise
+	// the old edge-hover state survives until the next pointer movement.
+	POINT cursor {};
+	GetCursorPos(&cursor);
+	if (!this->mAlwaysHidden && (this->atTrigger({cursor.x, cursor.y}) || this->overBar({cursor.x, cursor.y}))) {
+		this->reveal();
+	} else {
+		this->conceal();
+	}
+}
+
 void TaskbarManager::turnOffAutoHide() {
-	if (this->mHoverOnly) return;
+	if (this->enabled) return;
 
 	gTurnedOnAutoHide.store(false);
 	setAutoHideOwned(false);
@@ -232,7 +253,7 @@ void TaskbarManager::restoreForCrash() {
 }
 
 void TaskbarManager::releaseStaleAutoHide() {
-	if (this->mHoverOnly || gTurnedOnAutoHide.load() || !autoHideOwned()) return;
+	if (this->enabled || gTurnedOnAutoHide.load() || !autoHideOwned()) return;
 
 	if ((appBarState() & ABS_AUTOHIDE) != 0) {
 		setAutoHide(false);
@@ -270,7 +291,7 @@ void TaskbarManager::enable() {
 	GetCursorPos(&cursor);
 	auto position = QPoint(cursor.x, cursor.y);
 
-	if (this->atTrigger(position) || this->overBar(position)) this->reveal();
+	if (!this->mAlwaysHidden && (this->atTrigger(position) || this->overBar(position))) this->reveal();
 	else this->conceal();
 }
 
@@ -489,7 +510,7 @@ void TaskbarManager::onBarShown(HWND hwnd) {
 	POINT cursor {};
 	GetCursorPos(&cursor);
 	auto position = QPoint(cursor.x, cursor.y);
-	if (this->atTrigger(position)) {
+	if (!this->mAlwaysHidden && this->atTrigger(position)) {
 		this->reveal();
 		return;
 	}
@@ -505,6 +526,10 @@ void TaskbarManager::onBarShown(HWND hwnd) {
 }
 
 void TaskbarManager::reveal() {
+	if (this->mAlwaysHidden) {
+		this->conceal();
+		return;
+	}
 	if (this->bars.isEmpty()) this->findBars();
 
 	for (const auto& bar: this->bars) ShowWindowAsync(bar.hwnd, SW_SHOWNA);
@@ -526,6 +551,7 @@ void TaskbarManager::conceal() {
 
 void TaskbarManager::onCursorMoved(QPoint position) {
 	if (!this->enabled) return;
+	if (this->mAlwaysHidden) return;
 
 	if (!this->revealed) {
 		if (this->atTrigger(position)) this->reveal();
@@ -542,6 +568,10 @@ void TaskbarManager::onCheck() {
 	auto stale = this->bars.isEmpty();
 	for (const auto& bar: this->bars) stale = stale || !IsWindow(bar.hwnd);
 	if (stale) this->findBars();
+	if (this->mAlwaysHidden) {
+		this->conceal();
+		return;
+	}
 
 	if (!this->revealed) {
 		for (const auto& bar: this->bars) {
@@ -579,10 +609,18 @@ Taskbar::Taskbar(QObject* parent): QObject(parent) {
 	    this,
 	    &Taskbar::hoverOnlyChanged
 	);
+	QObject::connect(
+	    TaskbarManager::instance(),
+	    &TaskbarManager::alwaysHiddenChanged,
+	    this,
+	    &Taskbar::alwaysHiddenChanged
+	);
 }
 
 bool Taskbar::hoverOnly() const { return TaskbarManager::instance()->hoverOnly(); }
 void Taskbar::setHoverOnly(bool hoverOnly) { TaskbarManager::instance()->setHoverOnly(hoverOnly); }
+bool Taskbar::alwaysHidden() const { return TaskbarManager::instance()->alwaysHidden(); }
+void Taskbar::setAlwaysHidden(bool alwaysHidden) { TaskbarManager::instance()->setAlwaysHidden(alwaysHidden); }
 void Taskbar::turnOffAutoHide() { TaskbarManager::instance()->turnOffAutoHide(); }
 
 } // namespace qs::windows

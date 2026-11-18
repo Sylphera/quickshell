@@ -8,6 +8,7 @@
 #include <qt_windows.h>
 
 #include <qlist.h>
+#include <qmargins.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qqmlintegration.h>
@@ -181,6 +182,11 @@ private:
 		quint64 focusStamp = 0;
 		bool offscreen = false;
 		QRect restore;
+		bool tinyCornersApplied = false;
+		bool tinyBorderSuppressed = false;
+		int previousCornerPreference = 0;
+		QRect tinyCornersRect;
+		QMargins tinyFrameInsets;
 	};
 
 	bool start();
@@ -211,6 +217,10 @@ private:
 	void apply(Layout* layout);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
+	void updateTinyCorners(Managed& m, const QRect& frame);
+	void restoreTinyCorners(Managed& m);
+	void reassertTinyDecorations();
+	[[nodiscard]] QRect managedFrame(const Managed& m) const;
 	void send(Managed& m, const QRect& frame);
 	void armDeadline();
 	void restoreFloating(Managed& m);

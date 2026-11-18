@@ -184,6 +184,14 @@ VirtualDesktops* VirtualDesktops::instance() {
 	return instance;
 }
 
+qsizetype VirtualDesktops::nativeCurrentIndex() const {
+	if (this->accessor.loaded && this->accessor.getCurrentDesktopNumber != nullptr) {
+		int index = -1;
+		if (sehCall(this->accessor.getCurrentDesktopNumber, index) && index >= 0) return index;
+	}
+	return this->mCurrent;
+}
+
 VirtualDesktops::VirtualDesktops() {
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 

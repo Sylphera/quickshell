@@ -116,28 +116,40 @@ void DwindleLayout::insert(Id id, Id target, const QPoint* cursor) {
 	auto old = std::make_unique<Node>();
 	old->id = split->id;
 	old->box = split->box;
+	old->idealBox = split->idealBox;
 	old->parent = split;
 	leaf->parent = split;
 
 	const auto box = split->box;
+	// Hyprland retains floating-point layout boxes in its BSP tree. Windows
+	// needs integer HWND coordinates, but rounded boxes must not drive the
+	// direction of a future split (a rounded square can be a wide subpixel box).
+	const auto ideal = split->idealBox.isValid() ? split->idealBox : QRectF(box);
 	split->id = 0;
-	split->splitTop = box.height() > box.width();
+	// Hyprland uses side-by-side only when width > height. In particular,
+	// square containers split top/bottom, not left/right.
+	split->splitTop = ideal.height() >= ideal.width();
 	split->splitPinned = false;
 	split->ratio = this->defaultRatio;
 
 	auto newFirst = false;
 	if (this->smartSplit && cursor != nullptr) {
-		auto delta = *cursor - box.center();
-		auto across = qAbs(qint64(delta.y())) * box.width();
-		auto along = qAbs(qint64(delta.x())) * box.height();
+		auto delta = QPointF(*cursor) - ideal.center();
+		auto across = qAbs(delta.y()) * ideal.width();
+		auto along = qAbs(delta.x()) * ideal.height();
 		split->splitTop = across >= along;
 		newFirst = split->splitTop ? delta.y() <= 0 : delta.x() <= 0;
 	} else if (this->forceSplit == 1) {
 		newFirst = true;
 	} else if (this->forceSplit == 2) {
 		newFirst = false;
-	} else if (cursor != nullptr && box.contains(*cursor)) {
-		newFirst = split->splitTop ? cursor->y() < box.center().y() : cursor->x() < box.center().x();
+	} else if (cursor != nullptr) {
+		// Match Hyprland's half-cell threshold (including cursor positions in
+		// reserved areas outside the target), not QRect::center() which rounds
+		// the midpoint down by one pixel for even-sized rectangles.
+		auto mid = split->splitTop ? ideal.top() + ideal.height() / 2.0
+		                           : ideal.left() + ideal.width() / 2.0;
+		newFirst = split->splitTop ? cursor->y() < mid : cursor->x() < mid;
 	}
 
 	if (newFirst) {
@@ -304,42 +316,74 @@ void DwindleLayout::configure(const Options& options) {
 
 void DwindleLayout::compute(const QRect& area) {
 	this->mArea = area;
-	if (this->root != nullptr) this->computeNode(this->root.get(), area);
+	if (this->root != nullptr) this->computeNode(this->root.get(), area, QRectF(area));
 }
 
-void DwindleLayout::computeNode(Node* node, const QRect& box) const {
+void DwindleLayout::computeNode(Node* node, const QRect& box, const QRectF& ideal) const {
 	if (node->isLeaf()) {
 		node->box = this->hidden.contains(node->id) ? QRect() : box;
+		node->idealBox = this->hidden.contains(node->id) ? QRectF() : ideal;
 		return;
 	}
 
 	node->box = box;
+	node->idealBox = ideal;
 
 	auto firstVisible = this->hasVisible(node->first.get());
 	auto secondVisible = this->hasVisible(node->second.get());
 	if (!firstVisible || !secondVisible) {
-		this->computeNode(node->first.get(), firstVisible ? box : QRect());
-		this->computeNode(node->second.get(), secondVisible ? box : QRect());
+		this->computeNode(
+		    node->first.get(),
+		    firstVisible ? box : QRect(),
+		    firstVisible ? ideal : QRectF()
+		);
+		this->computeNode(
+		    node->second.get(),
+		    secondVisible ? box : QRect(),
+		    secondVisible ? ideal : QRectF()
+		);
 		return;
 	}
 
 	if (!this->preserveSplit && !this->smartSplit && !node->splitPinned) {
-		node->splitTop = box.height() > box.width();
+		node->splitTop = ideal.height() > ideal.width();
 	}
 
 	if (node->splitTop) {
 		auto firstHeight = static_cast<int>(std::lround(box.height() * node->ratio));
-		this->computeNode(node->first.get(), QRect(box.left(), box.top(), box.width(), firstHeight));
+		auto idealFirstHeight = ideal.height() * node->ratio;
+		this->computeNode(
+		    node->first.get(),
+		    QRect(box.left(), box.top(), box.width(), firstHeight),
+		    QRectF(ideal.left(), ideal.top(), ideal.width(), idealFirstHeight)
+		);
 		this->computeNode(
 		    node->second.get(),
-		    QRect(box.left(), box.top() + firstHeight, box.width(), box.height() - firstHeight)
+		    QRect(box.left(), box.top() + firstHeight, box.width(), box.height() - firstHeight),
+		    QRectF(
+		        ideal.left(),
+		        ideal.top() + idealFirstHeight,
+		        ideal.width(),
+		        ideal.height() - idealFirstHeight
+		    )
 		);
 	} else {
 		auto firstWidth = static_cast<int>(std::lround(box.width() * node->ratio));
-		this->computeNode(node->first.get(), QRect(box.left(), box.top(), firstWidth, box.height()));
+		auto idealFirstWidth = ideal.width() * node->ratio;
+		this->computeNode(
+		    node->first.get(),
+		    QRect(box.left(), box.top(), firstWidth, box.height()),
+		    QRectF(ideal.left(), ideal.top(), idealFirstWidth, ideal.height())
+		);
 		this->computeNode(
 		    node->second.get(),
-		    QRect(box.left() + firstWidth, box.top(), box.width() - firstWidth, box.height())
+		    QRect(box.left() + firstWidth, box.top(), box.width() - firstWidth, box.height()),
+		    QRectF(
+		        ideal.left() + idealFirstWidth,
+		        ideal.top(),
+		        ideal.width() - idealFirstWidth,
+		        ideal.height()
+		    )
 		);
 	}
 }

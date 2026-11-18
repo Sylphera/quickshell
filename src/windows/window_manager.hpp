@@ -86,10 +86,12 @@ class WindowManager: public QObject {
 	Q_PROPERTY(qreal inactiveOpacity READ inactiveOpacity WRITE setInactiveOpacity NOTIFY inactiveOpacityChanged);
 	Q_PROPERTY(bool workspaceBackAndForth READ workspaceBackAndForth WRITE setWorkspaceBackAndForth NOTIFY workspaceBackAndForthChanged);
 	Q_PROPERTY(qint32 warpOnChangeWorkspace READ warpOnChangeWorkspace WRITE setWarpOnChangeWorkspace NOTIFY warpOnChangeWorkspaceChanged);
+	Q_PROPERTY(bool hideDesktopPopup READ hideDesktopPopup WRITE setHideDesktopPopup NOTIFY hideDesktopPopupChanged);
 	// clang-format on
 
 public:
 	explicit WindowManager(QObject* parent = nullptr);
+	~WindowManager() override;
 
 	[[nodiscard]] static bool decorationsSupported();
 	[[nodiscard]] QString borders() const;
@@ -108,6 +110,8 @@ public:
 	void setWorkspaceBackAndForth(bool enabled);
 	[[nodiscard]] qint32 warpOnChangeWorkspace() const;
 	void setWarpOnChangeWorkspace(qint32 mode);
+	[[nodiscard]] bool hideDesktopPopup() const { return this->mHideDesktopPopup; }
+	void setHideDesktopPopup(bool enabled);
 
 signals:
 	void bordersChanged();
@@ -118,6 +122,23 @@ signals:
 	void inactiveOpacityChanged();
 	void workspaceBackAndForthChanged();
 	void warpOnChangeWorkspaceChanged();
+	void hideDesktopPopupChanged();
+
+private:
+	static void CALLBACK onDesktopPopupWinEvent(
+	    HWINEVENTHOOK hook,
+	    DWORD event,
+	    HWND hwnd,
+	    LONG idObject,
+	    LONG idChild,
+	    DWORD eventThread,
+	    DWORD eventTime
+	);
+	void noteDesktopSwitch();
+	HWINEVENTHOOK popupHook = nullptr;
+	bool mHideDesktopPopup = false;
+	qsizetype popupObservedDesktop = -1;
+	ULONGLONG popupLastSwitchTick = 0;
 };
 
 } // namespace qs::windows

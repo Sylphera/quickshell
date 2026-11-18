@@ -11,11 +11,16 @@ namespace {
 QS_LOGGING_CATEGORY(logStartup, "quickshell.startup", QtWarningMsg);
 }
 
-static QVector<QsEnginePlugin*> plugins; // NOLINT
+// Registrars may run before static objects in other translation units.
+static QVector<QsEnginePlugin*>& registeredPlugins() {
+	static QVector<QsEnginePlugin*> plugins; // NOLINT
+	return plugins;
+}
 
-void QsEnginePlugin::registerPlugin(QsEnginePlugin& plugin) { plugins.push_back(&plugin); }
+void QsEnginePlugin::registerPlugin(QsEnginePlugin& plugin) { registeredPlugins().push_back(&plugin); }
 
 void QsEnginePlugin::preinitPluginsOnly() {
+	auto& plugins = registeredPlugins();
 	plugins.removeIf([](QsEnginePlugin* plugin) { return !plugin->applies(); });
 
 	std::ranges::sort(plugins, [](QsEnginePlugin* a, QsEnginePlugin* b) {
@@ -28,6 +33,7 @@ void QsEnginePlugin::preinitPluginsOnly() {
 }
 
 void QsEnginePlugin::initPlugins() {
+	auto& plugins = registeredPlugins();
 	plugins.removeIf([](QsEnginePlugin* plugin) { return !plugin->applies(); });
 
 	std::ranges::sort(plugins, [](QsEnginePlugin* a, QsEnginePlugin* b) {
@@ -54,6 +60,7 @@ void QsEnginePlugin::initPlugins() {
 }
 
 void QsEnginePlugin::runConstructGeneration(EngineGeneration& generation) {
+	auto& plugins = registeredPlugins();
 	auto timer = QElapsedTimer();
 	timer.start();
 
@@ -64,6 +71,7 @@ void QsEnginePlugin::runConstructGeneration(EngineGeneration& generation) {
 }
 
 void QsEnginePlugin::runOnReload() {
+	auto& plugins = registeredPlugins();
 	for (QsEnginePlugin* plugin: plugins) {
 		plugin->onReload();
 	}

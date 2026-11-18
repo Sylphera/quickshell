@@ -1,5 +1,6 @@
 #include "window_manager.hpp"
 #include <cwchar>
+#include <cstdlib>
 
 #include <qcolor.h>
 #include <qcoreapplication.h>
@@ -27,6 +28,8 @@ Q_LOGGING_CATEGORY(logWorkspace, "quickshell.windows.workspace", QtWarningMsg);
 constexpr qint64 WARP_TIMEOUT_MS = 2000;
 constexpr int WARP_FALLBACK_MS = 500;
 constexpr int FOCUS_REPAIR_MS = 150;
+constexpr ULONGLONG DESKTOP_POPUP_WINDOW_MS = 1200;
+WindowManager* gDesktopPopupOwner = nullptr; // NOLINT
 
 bool isNullGuid(const GUID& id) { return IsEqualGUID(id, GUID {}) != FALSE; }
 
@@ -294,6 +297,104 @@ WindowManager::WindowManager(QObject* parent): QObject(parent) {
 	QObject::connect(behavior, &WorkspaceBehavior::backAndForthChanged, this, &WindowManager::workspaceBackAndForthChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::warpOnChangeChanged, this, &WindowManager::warpOnChangeWorkspaceChanged);
 	// clang-format on
+	QObject::connect(
+	    VirtualDesktops::instance(),
+	    &VirtualDesktops::currentChanged,
+	    this,
+	    &WindowManager::noteDesktopSwitch
+	);
+}
+
+WindowManager::~WindowManager() {
+	if (this->popupHook != nullptr) UnhookWinEvent(this->popupHook);
+	if (gDesktopPopupOwner == this) gDesktopPopupOwner = nullptr;
+}
+
+void WindowManager::setHideDesktopPopup(bool enabled) {
+	if (enabled == this->mHideDesktopPopup) return;
+	if (enabled) {
+		this->popupObservedDesktop = VirtualDesktops::instance()->nativeCurrentIndex();
+		this->popupLastSwitchTick = 0;
+		gDesktopPopupOwner = this;
+		this->popupHook = SetWinEventHook(
+		    EVENT_OBJECT_SHOW,
+		    EVENT_OBJECT_SHOW,
+		    nullptr,
+		    &WindowManager::onDesktopPopupWinEvent,
+		    0,
+		    0,
+		    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
+		);
+		if (this->popupHook == nullptr) {
+			gDesktopPopupOwner = nullptr;
+			qCWarning(logWorkspace) << "Cannot watch native desktop popups";
+			return;
+		}
+	} else {
+		if (this->popupHook != nullptr) UnhookWinEvent(this->popupHook);
+		this->popupHook = nullptr;
+		if (gDesktopPopupOwner == this) gDesktopPopupOwner = nullptr;
+	}
+	this->mHideDesktopPopup = enabled;
+	emit this->hideDesktopPopupChanged();
+}
+
+void WindowManager::noteDesktopSwitch() {
+	if (!this->mHideDesktopPopup) return;
+	this->popupObservedDesktop = VirtualDesktops::instance()->nativeCurrentIndex();
+	this->popupLastSwitchTick = GetTickCount64();
+}
+
+void CALLBACK WindowManager::onDesktopPopupWinEvent(
+	    HWINEVENTHOOK /*hook*/,
+	    DWORD /*event*/,
+	    HWND hwnd,
+	    LONG idObject,
+	    LONG idChild,
+	    DWORD /*eventThread*/,
+	    DWORD /*eventTime*/
+) {
+	auto* owner = gDesktopPopupOwner;
+	if (owner == nullptr || !owner->mHideDesktopPopup || hwnd == nullptr
+	    || idObject != OBJID_WINDOW || idChild != CHILDID_SELF)
+	{
+		return;
+	}
+	// Only Explorer's short-lived, screen-bottom desktop name island, not
+	// Task View, the taskbar, Start, or unrelated notification overlays.
+	wchar_t cls[80] {};
+	if (GetClassNameW(hwnd, cls, 80) == 0 || wcscmp(cls, L"XamlExplorerHostIslandWindow") != 0) return;
+	DWORD popupPid = 0;
+	DWORD explorerPid = 0;
+	GetWindowThreadProcessId(hwnd, &popupPid);
+	auto* taskbar = explorerTaskbarWindow();
+	if (taskbar == nullptr) return;
+	GetWindowThreadProcessId(taskbar, &explorerPid);
+	if (popupPid == 0 || popupPid != explorerPid) return;
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return;
+	const auto width = rect.right - rect.left;
+	const auto height = rect.bottom - rect.top;
+	if (width < 65 || width > 650 || height < 25 || height > 150) return;
+	MONITORINFO monitor {};
+	monitor.cbSize = sizeof(monitor);
+	if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+	const auto& screen = monitor.rcMonitor;
+	if (rect.bottom < screen.bottom - 180 || rect.bottom > screen.bottom + 25) return;
+	const auto center = (rect.left + rect.right) / 2;
+	const auto screenCenter = (screen.left + screen.right) / 2;
+	if (abs(center - screenCenter) > (screen.right - screen.left) / 5) return;
+	// The native accessor lets this also work when Windows itself switches
+	// desktops before the Qt/registry notification is delivered.
+	auto desktop = VirtualDesktops::instance()->nativeCurrentIndex();
+	auto now = GetTickCount64();
+	if (desktop < 0) return;
+	if (owner->popupObservedDesktop != desktop) {
+		owner->popupObservedDesktop = desktop;
+		owner->popupLastSwitchTick = now;
+	}
+	if (owner->popupLastSwitchTick == 0 || now - owner->popupLastSwitchTick > DESKTOP_POPUP_WINDOW_MS) return;
+	ShowWindowAsync(hwnd, SW_HIDE);
 }
 
 bool WindowManager::decorationsSupported() { return DecorationManager::supported(); }
