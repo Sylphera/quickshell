@@ -321,6 +321,8 @@ void ProxyWindowBase::setVisible(bool visible) {
 	if (this->reloadComplete) this->setVisibleDirect(visible);
 }
 
+void (*ProxyWindowBase::beforeShowHook)(QWindow* window) = nullptr;
+
 void ProxyWindowBase::setVisibleDirect(bool visible) {
 	if (this->deleteOnInvisible()) {
 		if (visible) {
@@ -341,6 +343,12 @@ void ProxyWindowBase::setVisibleDirect(bool visible) {
 
 		if (this->window != nullptr) {
 			if (visible) this->polishItems();
+			if (visible && !this->window->isVisible() && ProxyWindowBase::beforeShowHook != nullptr
+			    && (this->property("popIn").toBool()
+			        || (this->parent() != nullptr && this->parent()->property("popIn").toBool())))
+			{
+				ProxyWindowBase::beforeShowHook(this->window);
+			}
 			this->window->setVisible(visible);
 			this->bBackerVisibility = visible;
 		}

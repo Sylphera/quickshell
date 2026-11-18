@@ -1,5 +1,6 @@
 #include "window_frame.hpp"
 #include "../window_motion.hpp"
+#include "../../window/proxywindow.hpp"
 
 #include <algorithm>
 
@@ -8,6 +9,11 @@
 #include <qt_windows.h>
 #include <qvariant.h>
 #include <memory>
+#include <mutex>
+#include <set>
+
+#include <qabstractnativeeventfilter.h>
+#include <qcoreapplication.h>
 
 #include <qquickwindow.h>
 #include <qtimer.h>
@@ -119,13 +125,52 @@ bool WindowFrame::ensureVisible(QObject* object) {
     return IsWindowVisible(hwnd) != FALSE;
 }
 
+namespace {
+
+// Windows waiting to pop in. DWM ignores a cloak set on a window before it
+// shows, and Qt reports it visible before Windows does, so the cloak goes on
+// when the window itself is told it showed, before DWM draws it.
+std::set<HWND>& pendingPops() {
+	static std::set<HWND> pending; // NOLINT
+	return pending;
+}
+
+class PopShowFilter: public QAbstractNativeEventFilter {
+public:
+	bool nativeEventFilter(const QByteArray& /*type*/, void* message, qintptr* /*result*/) override {
+		auto* msg = static_cast<MSG*>(message);
+		if (msg->message != WM_WINDOWPOSCHANGED) return false;
+		auto& pending = pendingPops();
+		if (pending.empty() || !pending.contains(msg->hwnd)) return false;
+		const auto* pos = reinterpret_cast<const WINDOWPOS*>(msg->lParam); // NOLINT(performance-no-int-to-ptr)
+		if ((pos->flags & SWP_SHOWWINDOW) == 0) return false;
+		pending.erase(msg->hwnd);
+		WindowPop::popIn(msg->hwnd);
+		return false;
+	}
+};
+
+void watchShow(HWND hwnd) {
+	static auto* filter = []() {
+		auto* f = new PopShowFilter();
+		QCoreApplication::instance()->installNativeEventFilter(f);
+		return f;
+	}();
+	(void) filter;
+	pendingPops().insert(hwnd);
+}
+
+} // namespace
+
 void WindowFrame::popIn(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);
 	if (window == nullptr) return;
 	// Cloaked before it first shows: a window cloaked once visible flashes
 	// for a frame. Call this while the window is still hidden.
+	window->setProperty("qsPopIn", true);
 	auto* hwnd = reinterpret_cast<HWND>(window->winId()); // NOLINT(performance-no-int-to-ptr)
 	WindowPop::popIn(hwnd);
+	if (!window->isVisible()) watchShow(hwnd);
 
 	// It shows blank until its first frame: pop it in once it has painted,
 	// or a moment after it shows if no frame is reported.
@@ -149,13 +194,24 @@ void WindowFrame::popIn(QObject* object) {
 		arm();
 		return;
 	}
+	// DWM ignores a cloak set on a window that was never shown; set it again
+	// the moment it shows, inside setVisible, before Qt renders a frame.
 	auto shown = std::make_shared<QMetaObject::Connection>();
-	*shown = QObject::connect(window, &QWindow::visibleChanged, window, [arm, shown](bool visible) {
+	*shown = QObject::connect(window, &QWindow::visibleChanged, window, [hwnd, arm, shown](bool visible) {
 		if (!visible) return;
 		QObject::disconnect(*shown);
+		WindowPop::popIn(hwnd);
 		arm();
-	});
+	}, Qt::DirectConnection);
 }
+namespace {
+// Windows declaring popIn get end-4's windowsIn when they show.
+const bool POP_HOOK = []() {
+	ProxyWindowBase::beforeShowHook = [](QWindow* window) { WindowFrame::popIn(window); };
+	return true;
+}();
+} // namespace
+
 int WindowFrame::popOut(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);
 	if (window == nullptr || !window->isVisible()) return 0;

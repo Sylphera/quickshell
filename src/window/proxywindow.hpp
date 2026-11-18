@@ -66,6 +66,10 @@ class ProxyWindowBase: public Reloadable {
 	Q_CLASSINFO("DefaultProperty", "data");
 
 public:
+	/// Called right before a window that declares `popIn: true` first shows,
+	/// so a platform can hide it until it pops in (set by the Windows backend).
+	static void (*beforeShowHook)(QWindow* window);
+
 	explicit ProxyWindowBase(QObject* parent = nullptr);
 	~ProxyWindowBase() override;
 
