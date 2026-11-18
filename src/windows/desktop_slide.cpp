@@ -222,7 +222,10 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
 		auto* hwnd = windows[i];
-		if (hwnd == this->overlay || topmost(hwnd) || !ownWindow(hwnd)) continue;
+		if (hwnd == this->overlay || topmost(hwnd)) continue;
+		// The desktop hosts the wallpaper and the shell's embedded widgets: it
+		// stays live over the still copy so neither freezes during the slide.
+		if (!ownWindow(hwnd) && hwnd != GetShellWindow()) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.contains(this->monitor)) continue;
 
