@@ -2345,6 +2345,15 @@ bool TilingManager::moveDirection(Edge direction) {
 	auto* m = this->tiledActive();
 	if (m == nullptr) return false;
 
+	// Special is a workspace of its own: its windows trade places with each
+	// other and never leave it for a desktop or screen behind it. Moving one
+	// to a desktop unpinned it, and special then dragged the user there.
+	if (m->layout->special) {
+		auto* next = this->neighbour(*m, direction);
+		if (next != nullptr && next->layout == m->layout) this->swapWindows(*m, *next);
+		return true;
+	}
+
 	if (auto* scroll = TilingManager::scrollingOf(m->layout)) {
 		this->prepareScrolling(m->layout);
 		if (scroll->moveWindow(idOf(m->window), direction)) {

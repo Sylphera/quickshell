@@ -341,6 +341,12 @@ void Scratchpad::setShown(bool shown) {
 		this->shownAt = GetTickCount64();
 		this->mShown = true;
 		this->preparing = true;
+		// A window Windows unpinned (moving it to a desktop does) would drag
+		// the user to its desktop the moment special focuses it.
+		auto* desktops = VirtualDesktops::instance();
+		for (const auto& entry: this->entries) {
+			if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd)) desktops->pinWindow(entry.hwnd, true);
+		}
 		this->slideOffset = this->slideDistance();
 		this->moveReal(this->slideOffset);
 		this->relayout();
