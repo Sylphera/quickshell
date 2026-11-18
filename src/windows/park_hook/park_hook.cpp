@@ -23,7 +23,9 @@ constexpr const wchar_t* PROP_X = L"qs.px";          // where the app wants it
 constexpr const wchar_t* PROP_Y = L"qs.py";
 constexpr DWORD GIVE_UP_MS = 5000;
 
-int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100; }
+int parkedTop() {
+	return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100;
+}
 
 // A plain resizable app window: what tiling takes. Same rules as the shell's.
 bool qualifies(HWND hwnd) {
@@ -49,7 +51,15 @@ void forget(HWND hwnd) {
 }
 
 void park(HWND hwnd, int x) {
-	SetWindowPos(hwnd, nullptr, x, parkedTop(), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	SetWindowPos(
+	    hwnd,
+	    nullptr,
+	    x,
+	    parkedTop(),
+	    0,
+	    0,
+	    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+	);
 }
 
 bool givenUp(HWND hwnd, ULONG_PTR parkedAt) {
@@ -69,7 +79,11 @@ void onPosChanging(HWND hwnd, const WINDOWPOS* pos) {
 	GetWindowRect(hwnd, &rect);
 	auto x = (pos->flags & SWP_NOMOVE) == 0 ? pos->x : rect.left;
 	auto y = (pos->flags & SWP_NOMOVE) == 0 ? pos->y : rect.top;
-	SetPropW(hwnd, PROP_PARKED, reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetTickCount() | 1))); // NOLINT
+	SetPropW(
+	    hwnd,
+	    PROP_PARKED,
+	    reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetTickCount() | 1))
+	); // NOLINT
 	remember(hwnd, x, y);
 	park(hwnd, x);
 }

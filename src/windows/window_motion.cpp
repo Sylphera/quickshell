@@ -83,7 +83,8 @@ HWND snapshotOf(const QRect& frame) {
 	BitBlt(dc, 0, 0, width, height, screen, frame.x(), frame.y(), SRCCOPY);
 	GdiFlush();
 	auto* bits = static_cast<quint32*>(raw);
-	for (qsizetype i = 0; i < static_cast<qsizetype>(width) * height; i++) bits[i] |= 0xff000000; // NOLINT
+	for (qsizetype i = 0; i < static_cast<qsizetype>(width) * height; i++)
+		bits[i] |= 0xff000000; // NOLINT
 
 	POINT origin {x, frame.top()};
 	SIZE size {width, height};
@@ -127,7 +128,9 @@ QRect lerp(const QRect& a, const QRect& b, double t) {
 
 // Whether `window` is above `reference` in the z-order.
 bool isAbove(HWND window, HWND reference) {
-	for (auto* hwnd = GetWindow(reference, GW_HWNDPREV); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDPREV)) {
+	for (auto* hwnd = GetWindow(reference, GW_HWNDPREV); hwnd != nullptr;
+	     hwnd = GetWindow(hwnd, GW_HWNDPREV))
+	{
 		if (hwnd == window) return true;
 	}
 	return false;
@@ -200,7 +203,12 @@ bool WindowMotion::ensureCover() {
 	if (this->cover == nullptr) return false;
 	SetLayeredWindowAttributes(this->cover, COVER_KEY, 255, LWA_COLORKEY);
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(this->cover, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    this->cover,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 	return true;
 }
 
@@ -226,7 +234,8 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	RECT raw {};
 	RECT bounds {};
 	if (!GetWindowRect(hwnd, &raw)) return;
-	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		bounds = raw;
 	auto left = bounds.left - raw.left;
 	auto top = bounds.top - raw.top;
 	auto right = raw.right - bounds.right;
@@ -257,7 +266,12 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		auto scale = 0.8 + 0.2 * eased;
 		auto size = QSizeF(entry.to.size()) * scale;
 		auto center = QRectF(entry.to).center();
-		shown = QRectF(center.x() - size.width() / 2, center.y() - size.height() / 2, size.width(), size.height())
+		shown = QRectF(
+		            center.x() - size.width() / 2,
+		            center.y() - size.height() / 2,
+		            size.width(),
+		            size.height()
+		)
 		            .toRect();
 		entry.current = entry.to;
 		opacity = 255.0 * eased;
@@ -266,7 +280,8 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		auto dest = shown.translated(-this->coverRect.topLeft());
 		DWM_THUMBNAIL_PROPERTIES props {};
 		props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
-		props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+		props.rcDestination =
+		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 		props.fVisible = TRUE;
 		DwmUpdateThumbnailProperties(entry.thumbnail, &props);
@@ -275,7 +290,9 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	RECT raw {};
 	RECT bounds {};
 	if (!GetWindowRect(entry.hwnd, &raw)
-	    || FAILED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	    || FAILED(
+	        DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
+	    ))
 	{
 		return;
 	}
@@ -283,15 +300,27 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 	              | DWM_TNP_SOURCECLIENTAREAONLY;
-	props.rcSource = {bounds.left - raw.left, bounds.top - raw.top, bounds.right - raw.left, bounds.bottom - raw.top};
-	props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+	props.rcSource = {
+	    bounds.left - raw.left,
+	    bounds.top - raw.top,
+	    bounds.right - raw.left,
+	    bounds.bottom - raw.top
+	};
+	props.rcDestination =
+	    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
 }
 
-bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QRect& parked, bool pop) {
+bool WindowMotion::begin(
+    HWND hwnd,
+    const QRect& from,
+    const QRect& to,
+    const QRect& parked,
+    bool pop
+) {
 	if (this->moving(hwnd)) {
 		this->retarget(hwnd, to, parked);
 		return true;
@@ -300,7 +329,8 @@ bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QR
 
 	HWND snapshot = !pop && WindowMotion::travelsAsStill(hwnd) ? snapshotOf(from) : nullptr;
 	HTHUMBNAIL thumbnail = nullptr;
-	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail))) {
+	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
+	{
 		if (snapshot != nullptr) DestroyWindow(snapshot);
 		if (this->entries.isEmpty()) this->closeCover();
 		return false;
@@ -341,7 +371,8 @@ bool WindowMotion::begin(HWND hwnd, const QRect& from, const QRect& to, const QR
 void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 	{
 		auto lock = std::lock_guard(this->mutex);
-		auto entry = std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+		auto entry =
+		    std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
 		if (entry == this->entries.end()) return;
 		if (entry->to == to && !entry->done) return;
 		entry->parked = parked;
@@ -381,7 +412,8 @@ void WindowMotion::run() {
 		do {
 			waitForCompositorFrame();
 		} while (!this->stop.load()
-		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last)
+		                    .count()
 		                < period * 0.75);
 		last = std::chrono::steady_clock::now();
 
@@ -515,7 +547,8 @@ void WindowPop::start(HWND hwnd, bool in) {
 		setCloaked(hwnd, false);
 		return;
 	}
-	auto frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+	auto frame =
+	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
 
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
@@ -550,12 +583,23 @@ void WindowPop::start(HWND hwnd, bool in) {
 	}
 	SetLayeredWindowAttributes(cover, COVER_KEY, 255, LWA_COLORKEY);
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(cover, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    cover,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 
-	RECT source {bounds.left - raw.left, bounds.top - raw.top, bounds.right - raw.left, bounds.bottom - raw.top};
+	RECT source {
+	    bounds.left - raw.left,
+	    bounds.top - raw.top,
+	    bounds.right - raw.left,
+	    bounds.bottom - raw.top
+	};
 	auto apply = [thumbnail, source, frame](double progress, bool in) {
 		auto eased = ease(progress);
-		auto scale = in ? POP_IN_SCALE + (1.0 - POP_IN_SCALE) * eased : 1.0 - (1.0 - POP_OUT_SCALE) * eased;
+		auto scale =
+		    in ? POP_IN_SCALE + (1.0 - POP_IN_SCALE) * eased : 1.0 - (1.0 - POP_OUT_SCALE) * eased;
 		auto alpha = in ? eased : 1.0 - eased;
 		auto width = frame.width() * scale;
 		auto height = frame.height() * scale;
@@ -579,7 +623,15 @@ void WindowPop::start(HWND hwnd, bool in) {
 
 	apply(0, in);
 	auto* above = GetWindow(hwnd, GW_HWNDPREV);
-	SetWindowPos(cover, above != nullptr ? above : HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	SetWindowPos(
+	    cover,
+	    above != nullptr ? above : HWND_TOP,
+	    0,
+	    0,
+	    0,
+	    0,
+	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+	);
 	ShowWindow(cover, SW_SHOWNOACTIVATE);
 	// The thumbnail takes the window's place in the same frame it hides.
 	setCloaked(hwnd, true);
@@ -595,10 +647,16 @@ void WindowPop::start(HWND hwnd, bool in) {
 		while (true) {
 			do {
 				waitForCompositorFrame();
-			} while (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
-			         < period * 0.75);
+			} while (
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+			    < period * 0.75
+			);
 			last = std::chrono::steady_clock::now();
-			auto progress = std::clamp(std::chrono::duration<double, std::milli>(last - start).count() / duration, 0.0, 1.0);
+			auto progress = std::clamp(
+			    std::chrono::duration<double, std::milli>(last - start).count() / duration,
+			    0.0,
+			    1.0
+			);
 			apply(progress, in);
 			if (progress >= 1.0) break;
 		}

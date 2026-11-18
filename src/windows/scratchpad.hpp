@@ -1,6 +1,5 @@
 #pragma once
 
-#include <qt_windows.h>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -8,11 +7,11 @@
 #include <thread>
 
 #include <dwmapi.h>
-
 #include <qlist.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qrect.h>
+#include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
 #include <qtmetamacros.h>

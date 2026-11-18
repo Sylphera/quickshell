@@ -2,14 +2,13 @@
 
 #include <array>
 
-#include <qt_windows.h>
-
 #include <qcolor.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qqmlintegration.h>
 #include <qrect.h>
 #include <qscreen.h>
+#include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
 

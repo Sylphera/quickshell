@@ -6,10 +6,9 @@
 #include <qguiapplication.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <windowsx.h>
 
 #include "util.hpp"
-
-#include <windowsx.h>
 
 namespace qs::windows {
 
@@ -54,10 +53,10 @@ NativeScreenCorners::~NativeScreenCorners() { this->destroyWindows(); }
 
 #define CORNER_SETTER(name, member, type)                                                          \
 	void NativeScreenCorners::name(type value) {                                                     \
-		if (value == this->member) return;                                                         \
-		this->member = value;                                                                      \
-		emit this->changed();                                                                      \
-		this->scheduleRebuild();                                                                   \
+		if (value == this->member) return;                                                             \
+		this->member = value;                                                                          \
+		emit this->changed();                                                                          \
+		this->scheduleRebuild();                                                                       \
 	}
 
 CORNER_SETTER(setRadius, mRadius, qint32)
@@ -110,8 +109,18 @@ void NativeScreenCorners::rebuild() {
 		if (this->screen != nullptr) QObject::disconnect(this->screen, nullptr, this, nullptr);
 		this->screen = screen;
 		if (screen != nullptr) {
-			QObject::connect(screen, &QScreen::geometryChanged, this, &NativeScreenCorners::scheduleRebuild);
-			QObject::connect(screen, &QScreen::physicalDotsPerInchChanged, this, &NativeScreenCorners::scheduleRebuild);
+			QObject::connect(
+			    screen,
+			    &QScreen::geometryChanged,
+			    this,
+			    &NativeScreenCorners::scheduleRebuild
+			);
+			QObject::connect(
+			    screen,
+			    &QScreen::physicalDotsPerInchChanged,
+			    this,
+			    &NativeScreenCorners::scheduleRebuild
+			);
 		}
 	}
 	if (screen == nullptr) return;
@@ -176,7 +185,8 @@ void NativeScreenCorners::rebuild() {
 		auto& corner = this->corners.at(index);
 		corner.hwnd = hwnd;
 		if (hot) {
-			corner.hot = QRect(right ? width - hotWidth : 0, bottom ? height - hotHeight : 0, hotWidth, hotHeight);
+			corner.hot =
+			    QRect(right ? width - hotWidth : 0, bottom ? height - hotHeight : 0, hotWidth, hotHeight);
 		}
 
 		// Premultiplied BGRA: the fill outside a quarter circle centred on the
@@ -228,7 +238,15 @@ void NativeScreenCorners::rebuild() {
 		DeleteObject(bitmap);
 
 		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+		SetWindowPos(
+		    hwnd,
+		    HWND_TOPMOST,
+		    0,
+		    0,
+		    0,
+		    0,
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+		);
 	}
 	ReleaseDC(nullptr, screenDc);
 
@@ -237,7 +255,8 @@ void NativeScreenCorners::rebuild() {
 	}
 }
 
-LRESULT CALLBACK NativeScreenCorners::windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK
+NativeScreenCorners::windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	auto* self = reinterpret_cast<NativeScreenCorners*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 	auto index = static_cast<int>(reinterpret_cast<quintptr>(GetPropW(hwnd, CORNER_PROP))) - 1;
 	if (self == nullptr || index < 0 || index > 3) return DefWindowProcW(hwnd, msg, wParam, lParam);

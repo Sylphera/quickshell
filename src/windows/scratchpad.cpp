@@ -1,15 +1,16 @@
 #include "scratchpad.hpp"
 #include <algorithm>
-#include <cmath>
 #include <array>
 #include <atomic>
+#include <cmath>
 
+#include <dwmapi.h>
 #include <qcoreapplication.h>
-#include <qscreen.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpointer.h>
 #include <qrect.h>
+#include <qscreen.h>
 #include <qtypes.h>
 
 #include "desktop_slide.hpp"
@@ -17,8 +18,6 @@
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_tracker.hpp"
-
-#include <dwmapi.h>
 
 namespace qs::windows {
 
@@ -212,8 +211,7 @@ bool Scratchpad::holds(const TrackedWindow* window) {
 
 Scratchpad::~Scratchpad() { this->closeCover(); }
 
-Scratchpad::Scratchpad(QObject* parent)
-    : QObject(parent) {
+Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 	if (recoverOrphans()) {
 		auto* retry = new QTimer(this);
 		retry->setInterval(ORPHAN_RETRY_MS);
@@ -249,7 +247,8 @@ Scratchpad::Scratchpad(QObject* parent)
 	// The real switch is deferred under the desktop slide; special leaves as
 	// soon as the switch is asked for, like Hyprland, not when it commits.
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::shownChanged, this, [this]() {
-		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop) this->hideNow();
+		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
+			this->hideNow();
 	});
 }
 
@@ -345,7 +344,8 @@ void Scratchpad::setShown(bool shown) {
 		// the user to its desktop the moment special focuses it.
 		auto* desktops = VirtualDesktops::instance();
 		for (const auto& entry: this->entries) {
-			if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd)) desktops->pinWindow(entry.hwnd, true);
+			if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd))
+				desktops->pinWindow(entry.hwnd, true);
 		}
 		this->slideOffset = this->slideDistance();
 		this->moveReal(this->slideOffset);
@@ -377,7 +377,9 @@ void Scratchpad::waitForTakeoff(int generation, int tries) {
 	for (const auto& entry: this->entries) {
 		RECT bounds {};
 		if (!frames.contains(entry.hwnd)
-		    || FAILED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))
+		    || FAILED(
+		        DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
+		    )
 		    || bounds.left != frames.value(entry.hwnd).left()
 		    || bounds.top != frames.value(entry.hwnd).top() + this->slideDistance())
 		{
@@ -423,7 +425,8 @@ void Scratchpad::jumpReal(int offset) {
 	if (delta != 0) {
 		for (const auto& entry: this->entries) {
 			RECT rect {};
-			if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !GetWindowRect(entry.hwnd, &rect)) continue;
+			if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !GetWindowRect(entry.hwnd, &rect))
+				continue;
 			SetWindowPos(
 			    entry.hwnd,
 			    nullptr,
@@ -511,7 +514,12 @@ void Scratchpad::openCover(bool show) {
 	this->coverOrigin = monitor.topLeft();
 	SetLayeredWindowAttributes(this->cover, COVER_KEY, 255, LWA_COLORKEY);
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(this->cover, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    this->cover,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 
 	// Thumbnails stack in the order they are registered: bottom first.
 	QList<HWND> stack;
@@ -527,7 +535,8 @@ void Scratchpad::openCover(bool show) {
 			frame = frames.value(hwnd);
 		} else {
 			RECT bounds {};
-			if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
+			if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+				continue;
 			frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
 			            .translated(0, -this->realOffset);
 		}
@@ -550,7 +559,9 @@ void Scratchpad::openCover(bool show) {
 void Scratchpad::placeCover() {
 	if (this->cover == nullptr) return;
 	HWND top = nullptr;
-	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && top == nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && top == nullptr;
+	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
+	{
 		for (const auto& entry: this->entries) {
 			if (entry.hwnd == hwnd) top = hwnd;
 		}
@@ -576,7 +587,9 @@ void Scratchpad::layoutCover(double offset) {
 		RECT window {};
 		RECT bounds {};
 		if (!GetWindowRect(thumb.hwnd, &window)
-		    || FAILED(DwmGetWindowAttribute(thumb.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		    || FAILED(
+		        DwmGetWindowAttribute(thumb.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
+		    ))
 		{
 			continue;
 		}
@@ -590,7 +603,8 @@ void Scratchpad::layoutCover(double offset) {
 		    bounds.bottom - window.top
 		};
 		auto dest = thumb.frame.translated(-this->coverOrigin).translated(0, shift);
-		props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+		props.rcDestination =
+		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		props.opacity = 255;
 		props.fVisible = TRUE;
 		props.fSourceClientAreaOnly = FALSE;
@@ -605,18 +619,22 @@ void Scratchpad::runSlide() {
 		do {
 			waitForCompositorFrame();
 		} while (!this->slideStop.load()
-		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last)
+		                    .count()
 		                < period * 0.75);
 		last = std::chrono::steady_clock::now();
 
 		auto lock = std::lock_guard(this->slideMutex);
 		auto elapsed = std::chrono::duration<double, std::milli>(last - this->slideStart).count();
 		auto progress = std::clamp(elapsed / (this->slideIn ? SLIDE_IN_MS : SLIDE_OUT_MS), 0.0, 1.0);
-		auto eased = this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
-		this->slideOffset = static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
+		auto eased =
+		    this->slideIn ? curve(0.05, 0.7, 0.1, 1.0, progress) : curve(0.3, 0.0, 0.8, 0.15, progress);
+		this->slideOffset =
+		    static_cast<int>(std::lround(this->slideFrom + (this->slideTo - this->slideFrom) * eased));
 		this->layoutCover(this->slideOffset);
 		if (this->dim != nullptr && this->slideSpan > 0) {
-			auto shown = std::clamp(1.0 - static_cast<double>(this->slideOffset) / this->slideSpan, 0.0, 1.0);
+			auto shown =
+			    std::clamp(1.0 - static_cast<double>(this->slideOffset) / this->slideSpan, 0.0, 1.0);
 			this->dimAlpha = static_cast<int>(std::lround(DIM_ALPHA * shown));
 			SetLayeredWindowAttributes(this->dim, 0, static_cast<BYTE>(this->dimAlpha), LWA_ALPHA);
 		}

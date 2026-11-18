@@ -1,27 +1,27 @@
 #include "desktop_slide.hpp"
-#include <limits>
-#include <cstddef>
-#include <mutex>
-#include <vector>
-#include <thread>
-#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #include <pdh.h>
 #include <qcoreapplication.h>
-#include <qset.h>
+#include <qdir.h>
+#include <qfile.h>
+#include <qhash.h>
+#include <qimage.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qpointer.h>
+#include <qset.h>
+#include <qstandardpaths.h>
 #include <qstringlist.h>
 #include <qtimer.h>
-#include <qdir.h>
-#include <qhash.h>
-#include <qfile.h>
-#include <qimage.h>
-#include <qstandardpaths.h>
 
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
@@ -63,7 +63,8 @@ QString snapshotDir() {
 }
 
 QString snapshotFile(HWND hwnd) {
-	return snapshotDir() + QStringLiteral("/%1.png").arg(reinterpret_cast<quintptr>(hwnd), 0, 16); // NOLINT
+	return snapshotDir()
+	     + QStringLiteral("/%1.png").arg(reinterpret_cast<quintptr>(hwnd), 0, 16); // NOLINT
 }
 
 DWORD processOf(HWND hwnd) {
@@ -73,7 +74,11 @@ DWORD processOf(HWND hwnd) {
 }
 
 QString frameText(const QRect& frame) {
-	return QStringLiteral("%1,%2,%3,%4").arg(frame.x()).arg(frame.y()).arg(frame.width()).arg(frame.height());
+	return QStringLiteral("%1,%2,%3,%4")
+	    .arg(frame.x())
+	    .arg(frame.y())
+	    .arg(frame.width())
+	    .arg(frame.height());
 }
 
 // Called on the GUI thread whenever a still is taken. Writing one costs a PNG
@@ -105,14 +110,21 @@ QList<quint32> loadSnapshot(HWND hwnd, const QRect& frame) {
 	if (image.size() != frame.size()) return {};
 	QList<quint32> pixels(static_cast<qsizetype>(frame.width()) * frame.height());
 	for (auto y = 0; y < frame.height(); y++) {
-		std::memcpy(pixels.data() + static_cast<qsizetype>(y) * frame.width(), image.constScanLine(y), sizeof(quint32) * frame.width());
+		std::memcpy(
+		    pixels.data() + static_cast<qsizetype>(y) * frame.width(),
+		    image.constScanLine(y),
+		    sizeof(quint32) * frame.width()
+		);
 	}
 	return pixels;
 }
 
 // Stills of windows that are gone.
 void pruneSnapshotFiles() {
-	for (const auto& name: QDir(snapshotDir()).entryList({QStringLiteral("*.png"), QStringLiteral("*.tmp")}, QDir::Files)) {
+	for (const auto& name:
+	     QDir(snapshotDir())
+	         .entryList({QStringLiteral("*.png"), QStringLiteral("*.tmp")}, QDir::Files))
+	{
 		bool ok = false;
 		auto value = name.section('.', 0, 0).toULongLong(&ok, 16);
 		if (!ok || !IsWindow(reinterpret_cast<HWND>(static_cast<quintptr>(value)))) { // NOLINT
@@ -247,7 +259,8 @@ double refreshPeriodMs() {
 	if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing)) && timing.qpcRefreshPeriod > 0
 	    && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
 	{
-		return static_cast<double>(timing.qpcRefreshPeriod) * 1000.0 / static_cast<double>(frequency.QuadPart);
+		return static_cast<double>(timing.qpcRefreshPeriod) * 1000.0
+		     / static_cast<double>(frequency.QuadPart);
 	}
 	return 1000.0 / 60.0;
 }
@@ -275,17 +288,26 @@ OffDisplay& offDisplay() {
 bool displayLuid(LUID& luid) {
 	UINT32 pathCount = 0;
 	UINT32 modeCount = 0;
-	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) return false;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS)
+		return false;
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr)
+	if (QueryDisplayConfig(
+	        QDC_ONLY_ACTIVE_PATHS,
+	        &pathCount,
+	        paths.data(),
+	        &modeCount,
+	        modes.data(),
+	        nullptr
+	    )
 	    != ERROR_SUCCESS)
 	{
 		return false;
 	}
 	for (UINT32 i = 0; i < pathCount; i++) {
 		auto index = paths[i].sourceInfo.modeInfoIdx;
-		if (index >= modeCount || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) continue;
+		if (index >= modeCount || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+			continue;
 		const auto& position = modes[index].sourceMode.position;
 		if (position.x != 0 || position.y != 0) continue;
 		luid = paths[i].sourceInfo.adapterId;
@@ -305,17 +327,22 @@ QSet<QString> scanOffDisplayProcesses() {
 	using OpenQuery = PDH_STATUS(WINAPI*)(LPCWSTR, DWORD_PTR, PDH_HQUERY*);
 	using AddCounter = PDH_STATUS(WINAPI*)(PDH_HQUERY, LPCWSTR, DWORD_PTR, PDH_HCOUNTER*);
 	using Collect = PDH_STATUS(WINAPI*)(PDH_HQUERY);
-	using GetArray = PDH_STATUS(WINAPI*)(PDH_HCOUNTER, DWORD, LPDWORD, LPDWORD, PPDH_FMT_COUNTERVALUE_ITEM_W);
+	using GetArray =
+	    PDH_STATUS(WINAPI*)(PDH_HCOUNTER, DWORD, LPDWORD, LPDWORD, PPDH_FMT_COUNTERVALUE_ITEM_W);
 	using CloseQuery = PDH_STATUS(WINAPI*)(PDH_HQUERY);
 	static auto* pdh = LoadLibraryW(L"pdh.dll");
 	if (pdh == nullptr) return found;
-	auto resolve = [](const char* name) { return reinterpret_cast<void*>(GetProcAddress(pdh, name)); };
+	auto resolve = [](const char* name) {
+		return reinterpret_cast<void*>(GetProcAddress(pdh, name));
+	};
 	auto open = reinterpret_cast<OpenQuery>(resolve("PdhOpenQueryW"));
 	auto add = reinterpret_cast<AddCounter>(resolve("PdhAddEnglishCounterW"));
 	auto collect = reinterpret_cast<Collect>(resolve("PdhCollectQueryData"));
 	auto getArray = reinterpret_cast<GetArray>(resolve("PdhGetFormattedCounterArrayW"));
 	auto close = reinterpret_cast<CloseQuery>(resolve("PdhCloseQuery"));
-	if (open == nullptr || add == nullptr || collect == nullptr || getArray == nullptr || close == nullptr) {
+	if (open == nullptr || add == nullptr || collect == nullptr || getArray == nullptr
+	    || close == nullptr)
+	{
 		return found;
 	}
 
@@ -327,7 +354,9 @@ QSet<QString> scanOffDisplayProcesses() {
 	{
 		DWORD size = 0;
 		DWORD count = 0;
-		if (getArray(counter, PDH_FMT_LARGE, &size, &count, nullptr) == static_cast<PDH_STATUS>(0x800007D2L)) {
+		if (getArray(counter, PDH_FMT_LARGE, &size, &count, nullptr)
+		    == static_cast<PDH_STATUS>(0x800007D2L))
+		{
 			std::vector<std::byte> buffer(size);
 			auto* items = reinterpret_cast<PPDH_FMT_COUNTERVALUE_ITEM_W>(buffer.data());
 			if (getArray(counter, PDH_FMT_LARGE, &size, &count, items) == ERROR_SUCCESS) {
@@ -336,7 +365,8 @@ QSet<QString> scanOffDisplayProcesses() {
 					unsigned pid = 0;
 					unsigned high = 0;
 					unsigned low = 0;
-					if (swscanf_s(items[i].szName, L"pid_%u_luid_0x%x_0x%x", &pid, &high, &low) != 3) continue;
+					if (swscanf_s(items[i].szName, L"pid_%u_luid_0x%x_0x%x", &pid, &high, &low) != 3)
+						continue;
 					if (low == display.LowPart && static_cast<LONG>(high) == display.HighPart) continue;
 					auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 					if (process == nullptr) continue;
@@ -356,12 +386,23 @@ QSet<QString> scanOffDisplayProcesses() {
 
 bool heavyWindow(const TrackedWindow* window) {
 	static const QStringList names = {
-	    QStringLiteral("zen.exe"),      QStringLiteral("firefox.exe"),  QStringLiteral("librewolf.exe"),
-	    QStringLiteral("floorp.exe"),   QStringLiteral("waterfox.exe"), QStringLiteral("chrome.exe"),
-	    QStringLiteral("msedge.exe"),   QStringLiteral("brave.exe"),    QStringLiteral("opera.exe"),
-	    QStringLiteral("vivaldi.exe"),  QStringLiteral("chromium.exe"), QStringLiteral("thorium.exe"),
-	    QStringLiteral("mpv.exe"),      QStringLiteral("vlc.exe"),      QStringLiteral("mpc-hc64.exe"),
-	    QStringLiteral("mpc-be64.exe"), QStringLiteral("potplayermini64.exe"),
+	    QStringLiteral("zen.exe"),
+	    QStringLiteral("firefox.exe"),
+	    QStringLiteral("librewolf.exe"),
+	    QStringLiteral("floorp.exe"),
+	    QStringLiteral("waterfox.exe"),
+	    QStringLiteral("chrome.exe"),
+	    QStringLiteral("msedge.exe"),
+	    QStringLiteral("brave.exe"),
+	    QStringLiteral("opera.exe"),
+	    QStringLiteral("vivaldi.exe"),
+	    QStringLiteral("chromium.exe"),
+	    QStringLiteral("thorium.exe"),
+	    QStringLiteral("mpv.exe"),
+	    QStringLiteral("vlc.exe"),
+	    QStringLiteral("mpc-hc64.exe"),
+	    QStringLiteral("mpc-be64.exe"),
+	    QStringLiteral("potplayermini64.exe"),
 	};
 	{
 		auto& state = offDisplay();
@@ -407,11 +448,18 @@ HWND createSnapshotHost(int x, int width, int height) {
 	);
 	if (host == nullptr) return nullptr;
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(host, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    host,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 	return host;
 }
 
-RECT toRect(const QRect& rect) { return {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1}; }
+RECT toRect(const QRect& rect) {
+	return {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1};
+}
 
 } // namespace
 
@@ -461,7 +509,12 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	this->overlay = createOverlay(this->monitor);
 	if (this->overlay == nullptr) return false;
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(this->overlay, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    this->overlay,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
 	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
 
@@ -479,8 +532,8 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 		if (FAILED(DwmRegisterThumbnail(this->overlay, hwnd, &thumbnail))) continue;
 		auto local = rect.translated(-this->monitor.topLeft());
 		DWM_THUMBNAIL_PROPERTIES props {};
-		props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY
-		              | DWM_TNP_SOURCECLIENTAREAONLY;
+		props.dwFlags =
+		    DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
 		props.fVisible = TRUE;
 		props.opacity = 255;
 		props.rcDestination = toRect(local);
@@ -527,7 +580,8 @@ void DesktopSlide::retarget(qsizetype to) {
 
 		auto now = std::chrono::steady_clock::now();
 		auto elapsed = std::chrono::duration<double, std::milli>(now - this->startedAt).count();
-		auto progress = this->cameraFrom == this->cameraTo ? 1.0 : std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
+		auto progress =
+		    this->cameraFrom == this->cameraTo ? 1.0 : std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
 		// Like Hyprland, only the desktop under the camera and the requested one
@@ -604,7 +658,9 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		auto frame = local;
 		RECT bounds {};
 		if (source.size() == rect.size()
-		    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		    && SUCCEEDED(
+		        DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
+		    ))
 		{
 			frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
 			            .translated(-this->monitor.topLeft());
@@ -617,7 +673,8 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		// resized the window: it is stretched to where the window is now.
 		if (!snapshot && heavy) {
 			auto known = this->snapshots.constFind(hwnd);
-			snapshot = known != this->snapshots.constEnd() && IsWindow(known->host) && !known->frame.isEmpty();
+			snapshot =
+			    known != this->snapshots.constEnd() && IsWindow(known->host) && !known->frame.isEmpty();
 		}
 		if (snapshot) {
 			const auto& copy = this->snapshots.value(hwnd);
@@ -625,7 +682,8 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 			HTHUMBNAIL thumbnail = nullptr;
 			if (SUCCEEDED(DwmRegisterThumbnail(this->overlay, copy.host, &thumbnail))) {
 				DWM_THUMBNAIL_PROPERTIES props {};
-				props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
+				props.dwFlags =
+				    DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
 				props.rcSource = {0, 0, copied.width(), copied.height()};
 				props.opacity = 255;
 				props.fVisible = FALSE;
@@ -639,7 +697,8 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 		if (FAILED(DwmRegisterThumbnail(this->overlay, hwnd, &thumbnail))) continue;
 
 		DWM_THUMBNAIL_PROPERTIES props {};
-		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
+		props.dwFlags =
+		    DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY | DWM_TNP_VISIBLE;
 		props.rcSource = toRect(source);
 		props.opacity = 255;
 		props.fVisible = FALSE;
@@ -659,11 +718,15 @@ void DesktopSlide::run() {
 		do {
 			waitForFrame();
 		} while (!this->stop.load()
-		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last).count()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last)
+		                    .count()
 		                < period * 0.75);
 		last = std::chrono::steady_clock::now();
 		auto lock = std::lock_guard(this->mutex);
-		auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - this->startedAt).count();
+		auto elapsed = std::chrono::duration<double, std::milli>(
+		                   std::chrono::steady_clock::now() - this->startedAt
+		)
+		                   .count();
 		auto progress = std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
@@ -706,7 +769,8 @@ void DesktopSlide::onCommit() {
 void DesktopSlide::setClickThrough(bool through) {
 	if (this->overlay == nullptr) return;
 	auto style = GetWindowLongPtrW(this->overlay, GWL_EXSTYLE);
-	auto wanted = through ? style | WS_EX_TRANSPARENT : style & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
+	auto wanted =
+	    through ? style | WS_EX_TRANSPARENT : style & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT);
 	if (wanted != style) SetWindowLongPtrW(this->overlay, GWL_EXSTYLE, wanted);
 }
 
@@ -779,7 +843,17 @@ void DesktopSlide::prepareBackdrop() {
 		auto* fullBitmap = CreateCompatibleBitmap(screen, r.right - r.left, r.bottom - r.top);
 		auto* fullPrevious = SelectObject(full, fullBitmap);
 		if (PrintWindow(desktop, full, PW_RENDERFULLCONTENT)) {
-			BitBlt(this->wallDc, 0, 0, width, height, full, this->monitor.x() - r.left, this->monitor.y() - r.top, SRCCOPY);
+			BitBlt(
+			    this->wallDc,
+			    0,
+			    0,
+			    width,
+			    height,
+			    full,
+			    this->monitor.x() - r.left,
+			    this->monitor.y() - r.top,
+			    SRCCOPY
+			);
 		}
 		SelectObject(full, fullPrevious);
 		DeleteObject(fullBitmap);
@@ -791,7 +865,17 @@ void DesktopSlide::prepareBackdrop() {
 	SIZE size {width, height};
 	POINT source {0, 0};
 	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, 0};
-	UpdateLayeredWindow(this->overlay, screen, &origin, &size, this->wallDc, &source, 0, &blend, ULW_OPAQUE);
+	UpdateLayeredWindow(
+	    this->overlay,
+	    screen,
+	    &origin,
+	    &size,
+	    this->wallDc,
+	    &source,
+	    0,
+	    &blend,
+	    ULW_OPAQUE
+	);
 	ReleaseDC(nullptr, screen);
 }
 
@@ -839,7 +923,17 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
 	auto* dc = CreateCompatibleDC(screen);
 	SelectObject(dc, bitmap);
-	BitBlt(dc, 0, 0, width, height, screen, this->monitor.x() + frame.x(), this->monitor.y() + frame.y(), SRCCOPY);
+	BitBlt(
+	    dc,
+	    0,
+	    0,
+	    width,
+	    height,
+	    screen,
+	    this->monitor.x() + frame.x(),
+	    this->monitor.y() + frame.y(),
+	    SRCCOPY
+	);
 	GdiFlush();
 
 	auto* bits = static_cast<quint32*>(raw);
@@ -856,7 +950,9 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 		for (auto x = 0; x < width; x++) {
 			auto& p = bits[y * width + x];
 			auto cornerColumn = x < zone || x >= width - zone;
-			if (cornerRow && cornerColumn && close(p, this->wallBits[(frame.y() + y) * wallWidth + frame.x() + x])) {
+			if (cornerRow && cornerColumn
+			    && close(p, this->wallBits[(frame.y() + y) * wallWidth + frame.x() + x]))
+			{
 				p = 0;
 			} else {
 				p |= 0xff000000u;
@@ -865,7 +961,9 @@ bool DesktopSlide::takeSnapshot(HWND hwnd, const QRect& frame) {
 	}
 
 	// Copied for the disk while the bitmap is still alive.
-	auto still = QImage(static_cast<const uchar*>(raw), width, height, QImage::Format_ARGB32_Premultiplied).copy();
+	auto still =
+	    QImage(static_cast<const uchar*>(raw), width, height, QImage::Format_ARGB32_Premultiplied)
+	        .copy();
 	POINT origin {parkX, 0};
 	SIZE size {width, height};
 	POINT source {0, 0};
@@ -918,12 +1016,16 @@ void DesktopSlide::warmCapture() {
 	this->pruneSnapshots();
 
 	for (auto* window: tracker->windows()) {
-		if (window->minimized() || window->desktop() < 0 || window->desktop() == desktops->currentIndex()) continue;
+		if (window->minimized() || window->desktop() < 0
+		    || window->desktop() == desktops->currentIndex())
+			continue;
 		if (!heavyWindow(window)) continue;
 		auto* hwnd = window->hwnd();
 		RECT bounds {};
-		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
-		auto frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+			continue;
+		auto frame =
+		    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
 		auto known = this->snapshots.constFind(hwnd);
 		if (known != this->snapshots.constEnd() && known->frame == frame) continue;
 		if (frame.isEmpty()) continue;
@@ -1004,7 +1106,10 @@ void DesktopSlide::warmCapture() {
 					}
 				}
 				auto mean = samples > 0 ? sum / static_cast<double>(samples) : 0.0;
-				auto spread = samples > 0 ? std::sqrt(std::max(0.0, squares / static_cast<double>(samples) - mean * mean)) : 0.0;
+				auto spread =
+				    samples > 0
+				        ? std::sqrt(std::max(0.0, squares / static_cast<double>(samples) - mean * mean))
+				        : 0.0;
 				if (samples > 0 && (lit * 100 < samples * 2 || spread < 4.0)) pixels.clear();
 			}
 			auto fromDisk = pixels.isEmpty();
@@ -1014,7 +1119,8 @@ void DesktopSlide::warmCapture() {
 			QMetaObject::invokeMethod(
 			    self.data(),
 			    [self, hwnd, frame, pixels, fromDisk]() {
-				    if (!self.isNull() && self->overlay == nullptr) self->storeSnapshot(hwnd, frame, pixels, !fromDisk);
+				    if (!self.isNull() && self->overlay == nullptr)
+					    self->storeSnapshot(hwnd, frame, pixels, !fromDisk);
 			    },
 			    Qt::QueuedConnection
 			);
@@ -1022,7 +1128,12 @@ void DesktopSlide::warmCapture() {
 	}
 }
 
-void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist) {
+void DesktopSlide::storeSnapshot(
+    HWND hwnd,
+    const QRect& frame,
+    const QList<quint32>& pixels,
+    bool persist
+) {
 	if (!IsWindow(hwnd)) return;
 	auto width = frame.width();
 	auto height = frame.height();
@@ -1064,7 +1175,17 @@ void DesktopSlide::storeSnapshot(HWND hwnd, const QRect& frame, const QList<quin
 	ShowWindow(snapshot.host, SW_SHOWNOACTIVATE);
 	snapshot.frame = frame;
 	if (persist) {
-		saveSnapshot(hwnd, frame, QImage(reinterpret_cast<const uchar*>(pixels.constData()), width, height, QImage::Format_ARGB32_Premultiplied).copy()); // NOLINT
+		saveSnapshot(
+		    hwnd,
+		    frame,
+		    QImage(
+		        reinterpret_cast<const uchar*>(pixels.constData()),
+		        width,
+		        height,
+		        QImage::Format_ARGB32_Premultiplied
+		    )
+		        .copy()
+		); // NOLINT
 	}
 }
 

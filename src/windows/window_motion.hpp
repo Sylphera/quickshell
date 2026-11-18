@@ -1,6 +1,5 @@
 #pragma once
 
-#include <qt_windows.h>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -10,6 +9,7 @@
 #include <qlist.h>
 #include <qobject.h>
 #include <qrect.h>
+#include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 
 namespace qs::windows {

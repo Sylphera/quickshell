@@ -10,7 +10,7 @@ namespace qs::windows {
 // WinEvent callbacks arrive in an ordered queue. Deduplicate repeated events
 // without losing the first-observed order when a batch is registered with the
 // tiling manager (whose split tree depends on insertion order).
-template<typename Handle>
+template <typename Handle>
 class OrderedWindowCandidates {
 public:
 	void insert(Handle handle) {

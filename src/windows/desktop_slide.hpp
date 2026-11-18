@@ -1,6 +1,5 @@
 #pragma once
 
-#include <qt_windows.h>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -11,6 +10,7 @@
 #include <qlist.h>
 #include <qobject.h>
 #include <qrect.h>
+#include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
 #include <qtypes.h>
@@ -57,7 +57,8 @@ private:
 	void pruneSnapshots();
 	void warmUp();
 	void warmCapture();
-	void storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist = true);
+	void
+	storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist = true);
 
 	struct Snapshot {
 		HWND host = nullptr;
