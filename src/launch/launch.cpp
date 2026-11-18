@@ -20,6 +20,12 @@
 #include <qthreadpool.h>
 #include <qtimer.h>
 
+#ifdef _WIN32
+#include <qt_windows.h>
+#include <dxgi.h>
+#include <vector>
+#endif
+
 #include "../core/common.hpp"
 #include "../core/instanceinfo.hpp"
 #include "../core/logcat.hpp"
@@ -73,6 +79,62 @@ QString base36Encode(T number) {
 namespace {
 QS_LOGGING_CATEGORY(logStartup, "quickshell.startup", QtWarningMsg);
 }
+
+#ifdef _WIN32
+// The index, in DXGI's adapter order, of the GPU that scans out the primary
+// monitor, or -1. On a hybrid laptop the discrete GPU lists the integrated
+// GPU's outputs too, so the display path's own adapter is asked instead.
+// dxgi.dll is loaded at run time, so nothing links to it.
+int displayAdapterIndex() {
+	UINT32 pathCount = 0;
+	UINT32 modeCount = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) return -1;
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+	if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr)
+	    != ERROR_SUCCESS)
+	{
+		return -1;
+	}
+
+	LUID luid {};
+	auto haveLuid = false;
+	for (UINT32 i = 0; i < pathCount && !haveLuid; i++) {
+		auto index = paths[i].sourceInfo.modeInfoIdx;
+		if (index >= modeCount || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) continue;
+		const auto& position = modes[index].sourceMode.position;
+		if (position.x != 0 || position.y != 0) continue;
+		luid = paths[i].sourceInfo.adapterId;
+		haveLuid = true;
+	}
+	if (!haveLuid) return -1;
+
+	using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+	auto* dxgi = LoadLibraryW(L"dxgi.dll");
+	if (dxgi == nullptr) return -1;
+	auto create = reinterpret_cast<CreateFactory>(
+	    reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1"))
+	);
+	IDXGIFactory1* factory = nullptr;
+	if (create == nullptr || FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+		return -1;
+	}
+
+	auto found = -1;
+	IDXGIAdapter1* adapter = nullptr;
+	for (UINT i = 0; found < 0 && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+		DXGI_ADAPTER_DESC1 desc {};
+		if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.AdapterLuid.LowPart == luid.LowPart
+		    && desc.AdapterLuid.HighPart == luid.HighPart)
+		{
+			found = static_cast<int>(i);
+		}
+		adapter->Release();
+	}
+	factory->Release();
+	return found;
+}
+#endif
 
 int launch(const LaunchArgs& args, char** argv) {
 	auto timer = QElapsedTimer();
@@ -211,6 +273,13 @@ int launch(const LaunchArgs& args, char** argv) {
 #ifdef _WIN32
 	if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) {
 		qputenv("QT_QPA_PLATFORM", "windows:fontengine=freetype");
+	}
+
+	// On a laptop with two GPUs Qt can pick the one that drives no display, and
+	// then the compositor copies every frame of every shell window across GPUs.
+	if (!qEnvironmentVariableIsSet("QT_D3D_ADAPTER_INDEX")) {
+		auto adapter = displayAdapterIndex();
+		if (adapter >= 0) qputenv("QT_D3D_ADAPTER_INDEX", QByteArray::number(adapter));
 	}
 
 	_setmaxstdio(8192);
