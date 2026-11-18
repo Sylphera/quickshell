@@ -17,7 +17,9 @@
 
 #include "input_mask.hpp"
 #include "keyboard_hook.hpp"
+#include "scratchpad.hpp"
 #include "tiling.hpp"
+#include "virtual_desktops.hpp"
 #include "util.hpp"
 #include "window_tracker.hpp"
 
@@ -41,6 +43,7 @@ constexpr UINT WM_SD_TILED_RESIZE = WM_APP + 2;
 constexpr UINT WM_SD_ENDED = WM_APP + 3;
 constexpr UINT WM_SD_WHEEL = WM_APP + 4;
 constexpr UINT WM_SD_WORKSPACE_WHEEL = WM_APP + 5;
+constexpr UINT WM_SD_HOVER = WM_APP + 6;
 
 constexpr LPARAM FLAG_RESIZE = 1;
 constexpr LPARAM FLAG_LEFT = 2;
@@ -72,6 +75,8 @@ std::atomic<uint64_t> gTiledDelta = 0;   // NOLINT
 std::atomic<bool> gTiledPending = false; // NOLINT
 std::atomic<bool> gWheelColumns = false; // NOLINT
 std::atomic<bool> gWheelWorkspaces = false; // NOLINT
+std::atomic<bool> gFocusFollows = false;    // NOLINT
+std::atomic<bool> gHoverPending = false;    // NOLINT
 
 struct HookState {
 	bool active = false;
@@ -610,6 +615,51 @@ void SuperDragManager::setWorkspaceWheel(std::function<void(int, WheelBind)> han
 	else tracker->releaseHook();
 }
 
+void SuperDragManager::setFocusFollowsMouse(bool enabled) {
+	if (enabled == this->mFocusFollowsMouse) return;
+	this->mFocusFollowsMouse = enabled;
+	gFocusFollows.store(enabled);
+
+	auto* tracker = InputMaskTracker::instance();
+	if (enabled) tracker->acquireHook();
+	else tracker->releaseHook();
+	emit this->focusFollowsMouseChanged();
+}
+
+// Only app windows take focus this way, and only when nothing else owns the
+// pointer: the shell's own UI, an open menu, a capture, a drag, special
+// leaving or a desktop switch on its way.
+void SuperDragManager::onHover(POINT point) {
+	auto* hit = WindowFromPoint(point);
+	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
+	if (root == nullptr || isOwnProcessWindow(root)) return;
+
+	auto* foreground = GetForegroundWindow();
+	if (root == foreground) return;
+	if (foreground != nullptr) {
+		if (isOwnProcessWindow(foreground)) return;
+		GUITHREADINFO gui {.cbSize = sizeof(GUITHREADINFO)};
+		if (GetGUIThreadInfo(GetWindowThreadProcessId(foreground, nullptr), &gui)) {
+			constexpr DWORD busy = GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE;
+			if ((gui.flags & busy) != 0 || gui.hwndCapture != nullptr) return;
+		}
+	}
+
+	auto* window = WindowTracker::instance()->windowFor(root);
+	if (window == nullptr || window->minimized() || !IsWindowVisible(root)) return;
+
+	auto* scratchpad = Scratchpad::instance();
+	if (scratchpad->shown() && !scratchpad->contains(window)) return;
+
+	auto* desktops = VirtualDesktops::instance();
+	if (desktops->shownIndex() != desktops->currentIndex()) return;
+
+	forceForegroundWindow(root);
+}
+
+bool SuperDrag::focusFollowsMouse() const { return SuperDragManager::instance()->focusFollowsMouse(); }
+void SuperDrag::setFocusFollowsMouse(bool enabled) { SuperDragManager::instance()->setFocusFollowsMouse(enabled); }
+
 bool SuperDragManager::startWorker() {
 	if (this->workerRunning) return true;
 
@@ -701,6 +751,17 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 		return SuperDragManager::onWheel(message, info);
 	}
 
+	// Focus follows the pointer; the GUI thread decides, one move at a time.
+	if (message == WM_MOUSEMOVE && gFocusFollows.load(std::memory_order_relaxed)
+	    && !isDown(VK_LBUTTON) && !isDown(VK_RBUTTON) && !isDown(VK_MBUTTON)
+	    && !gHoverPending.exchange(true))
+	{
+		auto* gui = gGuiWindow.load();
+		if (gui == nullptr || !PostMessageW(gui, WM_SD_HOVER, 0, static_cast<LPARAM>(pack(info->pt)))) {
+			gHoverPending.store(false);
+		}
+	}
+
 	auto resize = message == WM_RBUTTONDOWN;
 	if (message != WM_LBUTTONDOWN && !resize) return false;
 	if (!gEnabled.load(std::memory_order_relaxed) || !superAlone()) return false;
@@ -787,6 +848,10 @@ SuperDragManager::messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 	case WM_SD_STARTED: return SuperDragManager::instance()->onStarted(target, lParam);
 	case WM_SD_TILED_RESIZE: SuperDragManager::instance()->onTiledResize(); return 0;
 	case WM_SD_ENDED: SuperDragManager::instance()->onEnded(target, lParam); return 0;
+	case WM_SD_HOVER:
+		gHoverPending.store(false);
+		SuperDragManager::instance()->onHover(unpack(static_cast<uint64_t>(lParam)));
+		return 0;
 	case WM_SD_WORKSPACE_WHEEL: {
 		auto* manager = SuperDragManager::instance();
 		if (manager->workspaceWheel) {
@@ -862,6 +927,12 @@ void SuperDragManager::finishGuiDrag(const POINT* delta) {
 }
 
 SuperDrag::SuperDrag(QObject* parent): QObject(parent) {
+	QObject::connect(
+	    SuperDragManager::instance(),
+	    &SuperDragManager::focusFollowsMouseChanged,
+	    this,
+	    &SuperDrag::focusFollowsMouseChanged
+	);
 	QObject::connect(
 	    SuperDragManager::instance(),
 	    &SuperDragManager::enabledChanged,
