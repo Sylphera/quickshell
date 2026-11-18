@@ -126,6 +126,17 @@ void raise(HWND hwnd) {
 	);
 }
 
+// The window left special without going through remove(): the tracker lost it
+// for a moment, or it was recreated. If it's still alive it must not stay
+// pinned to every desktop, or it follows the user around.
+void release(HWND hwnd, const QRect& rect) {
+	if (IsWindow(hwnd)) {
+		if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
+		VirtualDesktops::instance()->pinWindow(hwnd, false);
+	}
+	forget(hwnd);
+}
+
 QPoint parkPosition() {
 	return QPoint(
 	    GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 100,
@@ -727,7 +738,7 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 	for (auto i = this->entries.size() - 1; i >= 0; i--) {
 		const auto& entry = this->entries[i];
 		if (entry.window != window) continue;
-		forget(entry.hwnd);
+		release(entry.hwnd, entry.rect);
 		this->entries.removeAt(i);
 	}
 	this->prune();
@@ -760,7 +771,7 @@ void Scratchpad::prune() {
 	for (auto i = this->entries.size() - 1; i >= 0; i--) {
 		const auto& entry = this->entries[i];
 		if (entry.window != nullptr && IsWindow(entry.hwnd)) continue;
-		forget(entry.hwnd);
+		release(entry.hwnd, entry.rect);
 		this->entries.removeAt(i);
 	}
 }
