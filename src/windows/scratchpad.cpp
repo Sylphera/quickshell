@@ -758,9 +758,20 @@ void Scratchpad::showDim() {
 
 	auto work = monitorRects(this->mMonitor).work;
 	if (work.isEmpty()) return;
+
+	// Hyprland draws dim_special over what lies under special and below the
+	// top layer, so end-4's bar and dock never dim. The dim goes right under
+	// the lowest of the shell's own topmost windows; special's windows are
+	// raised above everything already.
+	HWND under = HWND_TOPMOST;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (hwnd == this->dim || hwnd == this->cover || !IsWindowVisible(hwnd) || !isOwnProcessWindow(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
+		under = hwnd;
+	}
 	SetWindowPos(
 	    this->dim,
-	    HWND_TOPMOST,
+	    under,
 	    work.x(),
 	    work.y(),
 	    work.width(),
