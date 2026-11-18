@@ -32,10 +32,10 @@ constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
 constexpr int HOLD_MS = 150;
-// end-4's curve has covered 95 % of the way by then. The real switch happens
-// there, under the cover, so the new windows take input while the last few
-// pixels glide in, and the heavy work lands where the motion is slowest.
-constexpr int COMMIT_MS = 200;
+// end-4's curve has covered 99.5 % of the way by then (about 10 px left,
+// moving about 1 px a frame). The real switch happens there, under the cover:
+// any stutter it causes is too small to see, and the new windows take input.
+constexpr int COMMIT_MS = 400;
 constexpr auto* SNAPSHOT_CLASS = L"QuickshellDesktopSlideSnapshot";
 constexpr int CORNER_ZONE = 40;
 constexpr int CORNER_TOLERANCE = 6;
