@@ -429,6 +429,7 @@ QRect parkedFrame(const QRect& tile, bool peek = false) {
 	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + (peek ? -1 : 100);
 	return QRect(QPoint(x, tile.top()), tile.size());
 }
+
 } // namespace
 
 // end-4's windowsMove: a tiled window that settled somewhere and gets a new
@@ -1817,6 +1818,31 @@ QHash<HWND, QRect> TilingManager::specialFrames() const {
 		}
 	}
 	return frames;
+}
+
+TrackedWindow* TilingManager::tileAt(const QPoint& point) {
+	if (this->tracker == nullptr || this->desktops == nullptr) return nullptr;
+	auto* screen = this->tracker->screenFor(MonitorFromPoint({point.x(), point.y()}, MONITOR_DEFAULTTONEAREST));
+	if (screen == nullptr) return nullptr;
+
+	Layout* layout = nullptr;
+	auto* scratchpad = Scratchpad::instance();
+	if (scratchpad->shown() && screenForMonitor(scratchpad->monitor()) == screen) {
+		layout = this->layoutAt(SPECIAL_DESKTOP, screen, false);
+	} else {
+		auto current = this->desktops->currentIndex();
+		if (current < 0 || current >= this->desktops->count()) return nullptr;
+		layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	}
+	if (layout == nullptr) return nullptr;
+
+	for (auto id: layout->tree->ids()) {
+		if (layout->tree->isHidden(id) || layout->tree->isParked(id)) continue;
+		if (!layout->tree->box(id).contains(point)) continue;
+		auto* window = this->windowOf(id);
+		if (window != nullptr && this->stateOf(this->managed.at(window)) == State::Tiled) return window;
+	}
+	return nullptr;
 }
 
 bool TilingManager::focusIdleStrip() {

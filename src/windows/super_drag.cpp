@@ -14,6 +14,7 @@
 #include <qobject.h>
 #include <qpoint.h>
 #include <qpointer.h>
+#include <qtimer.h>
 
 #include "input_mask.hpp"
 #include "keyboard_hook.hpp"
@@ -44,6 +45,8 @@ constexpr UINT WM_SD_ENDED = WM_APP + 3;
 constexpr UINT WM_SD_WHEEL = WM_APP + 4;
 constexpr UINT WM_SD_WORKSPACE_WHEEL = WM_APP + 5;
 constexpr UINT WM_SD_HOVER = WM_APP + 6;
+// After Windows hands focus on to the window it picks.
+constexpr int REFOCUS_AFTER_CLOSE_MS = 100;
 
 constexpr LPARAM FLAG_RESIZE = 1;
 constexpr LPARAM FLAG_LEFT = 2;
@@ -555,6 +558,16 @@ SuperDragManager::SuperDragManager(QObject* parent): QObject(parent) {
 	}
 
 	gGuiWindow.store(this->messageWindow);
+
+	// Hyprland refocuses through the pointer when a window goes away, so with
+	// follow_mouse the window under it takes focus, not the one Windows picks.
+	QObject::connect(WindowTracker::instance(), &WindowTracker::windowRemoved, this, [this]() {
+		if (!this->mFocusFollowsMouse) return;
+		QTimer::singleShot(REFOCUS_AFTER_CLOSE_MS, this, [this]() {
+			POINT cursor {};
+			if (this->mFocusFollowsMouse && GetCursorPos(&cursor)) this->onHover(cursor, true);
+		});
+	});
 }
 
 SuperDragManager::~SuperDragManager() {
@@ -626,12 +639,38 @@ void SuperDragManager::setFocusFollowsMouse(bool enabled) {
 	emit this->focusFollowsMouseChanged();
 }
 
+namespace {
+bool isMotionCover(HWND hwnd) {
+	wchar_t cls[64] {};
+	if (GetClassNameW(hwnd, cls, 64) == 0) return false;
+	return wcscmp(cls, L"QuickshellWindowMotion") == 0 || wcscmp(cls, L"QuickshellWindowPop") == 0
+	    || wcscmp(cls, L"QuickshellMotionSnapshot") == 0;
+}
+} // namespace
+
 // Only app windows take focus this way, and only when nothing else owns the
 // pointer: the shell's own UI, an open menu, a capture, a drag, special
 // leaving or a desktop switch on its way.
-void SuperDragManager::onHover(POINT point) {
+void SuperDragManager::onHover(POINT point, bool byLayout) {
 	auto* hit = WindowFromPoint(point);
 	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
+	// The shell's own UI keeps the pointer; its window animations don't.
+	if (root != nullptr && isOwnProcessWindow(root) && !isMotionCover(root)) return;
+
+	// Like Hyprland, a tiled window takes focus where its tile is, not where it
+	// is drawn: while windows slide, what's under the pointer is an animation
+	// cover, the wallpaper or a neighbour passing through. A floating window on
+	// top still takes it where it is.
+	auto* hitWindow = root != nullptr ? WindowTracker::instance()->windowFor(root) : nullptr;
+	auto* tiling = TilingManager::active();
+	if (byLayout && tiling != nullptr && (hitWindow == nullptr || tiling->isTiled(hitWindow))) {
+		if (auto* tile = tiling->tileAt(QPoint(point.x, point.y))) root = tile->hwnd();
+		else if (hitWindow == nullptr) return;
+	}
+	if (byLayout) {
+		qCDebug(logSuperDrag) << "Refocus after close: under the pointer" << root << "foreground"
+		                      << GetForegroundWindow();
+	}
 	if (root == nullptr || isOwnProcessWindow(root)) return;
 
 	auto* foreground = GetForegroundWindow();
@@ -651,7 +690,6 @@ void SuperDragManager::onHover(POINT point) {
 	// Hyprland's float_switch_override_focus = 1 (end-4 keeps the default): the
 	// pointer moves focus between tiled and floating windows, not from one
 	// floating window to another.
-	auto* tiling = TilingManager::active();
 	auto floating = [tiling](TrackedWindow* w) { return tiling == nullptr || !tiling->isTiled(w); };
 	auto* focused = WindowTracker::instance()->windowFor(foreground);
 	if (focused != nullptr && floating(focused) && floating(window)) return;

@@ -137,6 +137,9 @@ public:
 
 	[[nodiscard]] const QList<TrackedWindow*>& windows() const { return this->mWindows; }
 	[[nodiscard]] TrackedWindow* activeWindow() const { return this->mActive; }
+	// Reads the foreground window now. Windows doesn't always announce a
+	// change (handing focus on after a close, or after a desktop switch).
+	void syncActive() { this->updateActive(); }
 	[[nodiscard]] TrackedWindow* windowFor(HWND hwnd) const { return this->byHwnd.value(hwnd); }
 	[[nodiscard]] VirtualDesktops* desktops() const { return this->mDesktops; }
 

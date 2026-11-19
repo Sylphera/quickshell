@@ -223,6 +223,8 @@ void warpToFocusChange(WindowTracker* tracker) {
 // killactive closes the focused window, as in Hyprland, or the shell's own
 // window in front when no app window is focused.
 void closeFocused(WindowTracker* tracker) {
+	// The window focused now: Windows doesn't always announce handing focus on.
+	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
 		window->close();
 	} else {
@@ -341,7 +343,10 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 	} else if (fn == "hl.dsp.window.move") {
 		auto* window = this->resolveWindow(windowArg);
 		if (t.contains("workspace")) {
-			if (!t.contains("window")) window = this->ipc->tracker()->activeWindow();
+			if (!t.contains("window")) {
+				this->ipc->tracker()->syncActive();
+				window = this->ipc->tracker()->activeWindow();
+			}
 			this->moveToWorkspace(window, t.value("workspace"), t.value("follow") != "false");
 		} else if (t.contains("x") || t.contains("y")) {
 			this->moveWindowPixel(window, t.value("x"), t.value("y"));
@@ -414,6 +419,7 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		auto comma = args.indexOf(',');
 		auto workspace = comma == -1 ? args : args.left(comma);
 		auto window = comma == -1 ? QString() : args.mid(comma + 1);
+		if (window.trimmed().isEmpty()) tracker->syncActive();
 		auto* target = window.trimmed().isEmpty() ? tracker->activeWindow() : this->resolveWindow(window);
 		this->moveToWorkspace(target, workspace, name == "movetoworkspace");
 	} else if (name == "killactive") {

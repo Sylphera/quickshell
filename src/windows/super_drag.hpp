@@ -42,7 +42,7 @@ signals:
 
 private:
 	explicit SuperDragManager(QObject* parent);
-	void onHover(POINT point);
+	void onHover(POINT point, bool byLayout = false);
 
 	struct GuiDrag {
 		HWND hwnd = nullptr;
