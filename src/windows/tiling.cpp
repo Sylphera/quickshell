@@ -430,6 +430,23 @@ QRect parkedFrame(const QRect& tile, bool peek = false) {
 	return QRect(QPoint(x, tile.top()), tile.size());
 }
 
+// Where a new window waits to pop in. Resized off every screen, Chromium lays
+// itself out without its invisible resize borders (it skips WM_NCCALCSIZE with
+// no monitor), and then Windows neither rounds nor colors its frame. So it
+// waits with one column of those borders on screen, which shows nothing.
+QRect waitingFrame(HWND hwnd, const QRect& tile) {
+	auto parked = parkedFrame(tile);
+	RECT raw {};
+	RECT frame {};
+	if (GetWindowRect(hwnd, &raw)
+	    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))
+	    && frame.left - raw.left > 1)
+	{
+		auto right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+		parked.moveLeft(right - 1 + (frame.left - raw.left));
+	}
+	return parked;
+}
 } // namespace
 
 // end-4's windowsMove: a tiled window that settled somewhere and gets a new
@@ -452,9 +469,10 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	// end-4's windowsIn: a window that just opened pops in at its tile.
 	if (m.target.isNull() && this->canPop(m, layout, tile)) {
 		m.fresh = false;
-		if (motion->begin(m.window->hwnd(), tile, tile, parkedFrame(tile), true)) {
+		auto waiting = waitingFrame(m.window->hwnd(), tile);
+		if (motion->begin(m.window->hwnd(), tile, tile, waiting, true)) {
 			this->moving.insert(m.window, tile);
-			this->place(m, parkedFrame(tile));
+			this->place(m, waiting);
 			return;
 		}
 	}
