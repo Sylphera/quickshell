@@ -68,20 +68,8 @@ private:
 	void releaseThumb(const Thumb& thumb);
 	void carryPanels();
 	void liftFullscreen(qsizetype desktop = -1);
-	void addLegacyDesktop(qsizetype desktop, bool capture);
 	void prepareBackdrop();
 	void releaseBackdrop();
-	bool takeSnapshot(HWND hwnd, const QRect& frame);
-	void pruneSnapshots();
-	void warmUp();
-	void warmCapture();
-	void
-	storeSnapshot(HWND hwnd, const QRect& frame, const QList<quint32>& pixels, bool persist = true);
-
-	struct Snapshot {
-		HWND host = nullptr;
-		QRect frame;
-	};
 	void run();
 	void layoutThumbs(double camera);
 	void onSettled();
@@ -100,8 +88,6 @@ private:
 	bool liveWarmPending = false;
 	QRect monitor;
 	bool panelsCarried = false;
-	bool comparisonStills = false;
-	bool legacySlide = false;
 	int travel = 0;
 
 	std::mutex mutex;
@@ -126,9 +112,6 @@ private:
 	QList<HWND> raised;
 	HDC wallDc = nullptr;
 	HBITMAP wallBitmap = nullptr;
-	quint32* wallBits = nullptr;
-	QHash<HWND, Snapshot> snapshots;
-	QTimer warmTimer;
 };
 
 } // namespace qs::windows
