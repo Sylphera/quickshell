@@ -41,6 +41,9 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
+	// The work area changed in a way Qt doesn't report (a shell appbar
+	// reserving its space): every layout is placed again.
+	void workAreaChanged() { this->markAll(); }
 	// The tiled window whose tile holds the point, by layout: also while windows
 	// slide and only their animation covers are on screen.
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);

@@ -15,6 +15,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "tiling.hpp"
 #include "util.hpp"
 
 namespace qs::windows {
@@ -210,7 +211,13 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 	this->mMonitor = monitor;
 	this->mSize = size;
 	this->mPositionValid = true;
-	setOwnReservation(hwnd, monitor, edge, this->mReserved);
+	// Tiling placed windows before this bar had its space (as the shell
+	// starts), and Explorer may never report it: they go clear of it now.
+	if (setOwnReservation(hwnd, monitor, edge, this->mReserved)) {
+		QTimer::singleShot(0, QCoreApplication::instance(), []() {
+			TilingManager::instance()->workAreaChanged();
+		});
+	}
 	return this->mReserved;
 }
 
@@ -223,6 +230,9 @@ void WinAppBar::remove() {
 	auto data = appBarData(this->mHwnd);
 	SHAppBarMessage(ABM_REMOVE, &data);
 	clearOwnReservation(this->mHwnd);
+	QTimer::singleShot(0, QCoreApplication::instance(), []() {
+		TilingManager::instance()->workAreaChanged();
+	});
 	forgetRegistration(this->mHwnd);
 	this->invalidate();
 }

@@ -67,9 +67,12 @@ struct OwnReservation {
 };
 std::unordered_map<HWND, OwnReservation> gOwnReservations; // NOLINT
 
-void setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& reserved) {
+bool setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& reserved) {
 	auto lock = std::lock_guard(gExpectedMutex);
-	gOwnReservations[hwnd] = {.monitor = monitor, .edge = edge, .reserved = reserved};
+	auto& own = gOwnReservations[hwnd];
+	auto changed = own.monitor != monitor || own.edge != edge || own.reserved != reserved;
+	own = {.monitor = monitor, .edge = edge, .reserved = reserved};
+	return changed;
 }
 
 void clearOwnReservation(HWND hwnd) {
