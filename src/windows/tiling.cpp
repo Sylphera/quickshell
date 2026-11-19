@@ -34,7 +34,6 @@
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
-#include "window_motion.hpp"
 #include "window_tracker.hpp"
 
 #include <dwmapi.h>
@@ -371,7 +370,6 @@ TilingManager* TilingManager::active() {
 
 TilingManager::TilingManager() {
 	gManager = this;
-	QObject::connect(WindowMotion::instance(), &WindowMotion::landed, this, &TilingManager::onMotionLanded);
 
 	this->syncTimer.setSingleShot(true);
 	this->syncTimer.setInterval(SYNC_DELAY_MS);
@@ -412,146 +410,6 @@ void TilingManager::setEnabled(bool enabled) {
 
 	this->syncWheel();
 	emit this->enabledChanged();
-}
-
-void TilingManager::setAnimateMoves(bool animate) {
-	if (animate == this->mAnimateMoves) return;
-	this->mAnimateMoves = animate;
-	emit this->animateMovesChanged();
-}
-
-namespace {
-// Where a sliding window waits: past the right edge of every screen, at the
-// size of its new tile, so it is laid out and repainted before it shows. With
-// peek, one column stays on screen: Chromium stops painting a window it thinks
-// is hidden, and then can't travel live.
-QRect parkedFrame(const QRect& tile, bool peek = false) {
-	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + (peek ? -1 : 100);
-	return QRect(QPoint(x, tile.top()), tile.size());
-}
-
-// Where a new window waits to pop in. Resized off every screen, Chromium lays
-// itself out without its invisible resize borders (it skips WM_NCCALCSIZE with
-// no monitor), and then Windows neither rounds nor colors its frame. So it
-// waits with one column of those borders on screen, which shows nothing.
-QRect waitingFrame(HWND hwnd, const QRect& tile) {
-	auto parked = parkedFrame(tile);
-	RECT raw {};
-	RECT frame {};
-	if (GetWindowRect(hwnd, &raw)
-	    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))
-	    && frame.left - raw.left > 1)
-	{
-		auto right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-		parked.moveLeft(right - 1 + (frame.left - raw.left));
-	}
-	return parked;
-}
-} // namespace
-
-// end-4's windowsMove: a tiled window that settled somewhere and gets a new
-// tile slides there instead of jumping. While it slides, tiling's own target
-// for it is the parked spot, so its checks don't pull it back on screen.
-void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& tile) {
-	auto* motion = WindowMotion::instance();
-	auto found = this->moving.find(m.window);
-	if (found != this->moving.end()) {
-		// It keeps waiting where it is, at the size it had: only the thumbnail
-		// heads somewhere else.
-		auto parked = m.target.isNull() ? parkedFrame(tile) : m.target;
-		if (*found != tile) {
-			*found = tile;
-			motion->retarget(m.window->hwnd(), tile, parked);
-		}
-		this->place(m, parked);
-		return;
-	}
-	// end-4's windowsIn: a window that just opened pops in at its tile.
-	if (m.target.isNull() && this->canPop(m, layout, tile)) {
-		m.fresh = false;
-		auto waiting = waitingFrame(m.window->hwnd(), tile);
-		if (motion->begin(m.window->hwnd(), tile, tile, waiting, true)) {
-			this->moving.insert(m.window, tile);
-			this->place(m, waiting);
-			return;
-		}
-	}
-	m.fresh = false;
-	if (this->canAnimate(m, layout, tile)) {
-		// Where it grows, the app takes its new size right away and its live
-		// thumbnail shows it while it travels. Chromium only paints while some of
-		// it is on screen, so it waits with a column showing. While the bar
-		// toggles it can't: a window partly on screen fits itself into the new
-		// work area and jumps back, so then it travels as a still, fully off
-		// screen, at the size it had.
-		auto from = this->managedFrame(m);
-		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
-		auto still = chromium && this->barMoving;
-		// While it travels it keeps the larger of its old and new size, as in
-		// Winland: its picture then only ever shrinks or gets cut off to fit,
-		// never blown up. It takes its new size when it lands.
-		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size())
-		                    : QRect(parkedFrame(tile, chromium).topLeft(), tile.size().expandedTo(from.size()));
-		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
-			this->moving.insert(m.window, tile);
-			this->place(m, parked);
-			return;
-		}
-	}
-	this->place(m, tile);
-}
-
-bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& tile) const {
-	if (!this->mAnimateMoves || !m.fresh || layout->special || m.window == this->dragging) return false;
-	if (QDateTime::currentMSecsSinceEpoch() - m.managedAt > 2000) return false;
-	auto* hwnd = m.window->hwnd();
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
-	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
-	if (m.window->desktop() != this->desktops->currentIndex()) return false;
-	auto rects = monitorRects(monitorForScreen(layout->screen));
-	return rects.valid && rects.monitor.contains(tile);
-}
-
-bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
-	// Special too: closing or moving a window there slides the others, as on a
-	// normal desktop.
-	if (!this->mAnimateMoves || m.target.isNull() || tile == m.target) return false;
-	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
-
-	auto* hwnd = m.window->hwnd();
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
-	// Still where tiling left it. A few pixels off is the app nudging itself
-	// when the work area changes (Chromium does), which shouldn't cost the
-	// slide; anything more is someone else's move.
-	auto frame = this->managedFrame(m);
-	if (frame != m.target) {
-		auto off = std::max({
-		    std::abs(frame.left() - m.target.left()),
-		    std::abs(frame.top() - m.target.top()),
-		    std::abs(frame.right() - m.target.right()),
-		    std::abs(frame.bottom() - m.target.bottom()),
-		});
-		if (off > 48) return false;
-	}
-
-	// Only what is on screen now: not a desktop on its way out or in.
-	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
-	if (m.window->desktop() != this->desktops->currentIndex()) return false;
-
-	auto rects = monitorRects(monitorForScreen(layout->screen));
-	return rects.valid && rects.monitor.contains(m.target) && rects.monitor.contains(tile) ;
-}
-
-void TilingManager::onMotionLanded(HWND hwnd, const QRect& /*frame*/) {
-	for (auto iter = this->moving.begin(); iter != this->moving.end(); ++iter) {
-		if (iter.key()->hwnd() != hwnd) continue;
-		auto* window = iter.key();
-		auto tile = iter.value();
-		this->moving.erase(iter);
-		auto found = this->managed.find(window);
-		if (found != this->managed.end()) this->place(found->second, tile);
-		return;
-	}
 }
 
 void TilingManager::setSuppressWindowShadows(bool suppress) {
@@ -832,30 +690,8 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 	else work.setBottom(std::max(rects.monitor.bottom() - physical, work.top()));
 	expectWorkArea(monitor, work, 1500);
 
-	this->barMoving = true;
 	this->relayout();
 	this->sync();
-	this->barMoving = false;
-
-	// Maximized windows aren't tiled: Windows fits them to the work area by
-	// itself, without a slide. They slide to it here like the tiled ones; the
-	// motion leaves them at the new work area, still maximized.
-	if (!this->mAnimateMoves || this->desktops->shownIndex() != this->desktops->currentIndex()) return;
-	auto* motion = WindowMotion::instance();
-	for (auto& [window, m]: this->managed) {
-		if (!window->maximized() || window->minimized() || m.elevated) continue;
-		if (window->desktop() != this->desktops->currentIndex() || Scratchpad::holds(window)) continue;
-		if (monitorForScreen(window->screen()) != monitor) continue;
-		auto* hwnd = window->hwnd();
-		if (!IsWindowVisible(hwnd) || IsHungAppWindow(hwnd)) continue;
-		RECT bounds {};
-		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
-		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
-		if (from == work && !motion->moving(hwnd)) continue;
-		auto still = WindowMotion::travelsAsStill(hwnd);
-		auto parked = still ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
-		motion->begin(hwnd, from, work, parked, false, still);
-	}
 }
 
 void TilingManager::markAll() {
@@ -993,8 +829,6 @@ void TilingManager::manage(TrackedWindow* window) {
 
 	auto& m = this->managed[window];
 	m.window = window;
-	m.fresh = startup::settled();
-	m.managedAt = QDateTime::currentMSecsSinceEpoch();
 	m.elevated = isMoreElevated(window->hwnd());
 
 	if (m.elevated) {
@@ -1028,12 +862,6 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	            && TilingManager::scrollingOf(from) != nullptr;
 
 	QObject::disconnect(window, nullptr, this, nullptr);
-	if (auto moved = this->moving.find(window); moved != this->moving.end()) {
-		// A window leaving tiling mid-slide goes straight to where it was going.
-		WindowMotion::instance()->cancel(window->hwnd());
-		if (IsWindow(window->hwnd())) setFrame(window->hwnd(), moved.value());
-		this->moving.erase(moved);
-	}
 	this->takeOut(iter->second);
 	if (iter->second.offscreen) forgetParked(window->hwnd());
 	this->managed.erase(iter);
@@ -1184,8 +1012,10 @@ void TilingManager::schedule() {
 }
 
 void TilingManager::sync() {
+	// Parked even without animations: a new window then shows straight in its
+	// tile, not for a moment where the app put it.
 	setParkNewWindows(
-	    this->mEnabled && this->mAnimateMoves && startup::settled()
+	    this->mEnabled && startup::settled()
 	    && this->desktops->shownIndex() == this->desktops->currentIndex()
 	);
 	if (!this->mEnabled) return;
@@ -1410,7 +1240,7 @@ void TilingManager::apply(Layout* layout) {
 		if (parked) restore = clampInto(scroll->visibleBox(id).adjusted(in, in, -in, -in), rects.work);
 		this->markOffscreen(m, parked, restore);
 
-		this->placeMoving(m, layout, this->tileRect(layout, window));
+		this->place(m, this->tileRect(layout, window));
 	}
 }
 
@@ -2934,7 +2764,6 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 	auto* manager = TilingManager::instance();
 	QObject::connect(manager, &TilingManager::enabledChanged, this, &Tiling::enabledChanged);
 	QObject::connect(manager, &TilingManager::suppressWindowShadowsChanged, this, &Tiling::suppressWindowShadowsChanged);
-	QObject::connect(manager, &TilingManager::animateMovesChanged, this, &Tiling::animateMovesChanged);
 	QObject::connect(manager, &TilingManager::gapsInChanged, this, &Tiling::gapsInChanged);
 	QObject::connect(manager, &TilingManager::gapsOutChanged, this, &Tiling::gapsOutChanged);
 	// clang-format off
@@ -2966,8 +2795,6 @@ void Tiling::expectBarSpace(const QString& screenName, bool top, int reserved) {
 bool Tiling::enabled() const { return TilingManager::instance()->enabled(); }
 void Tiling::setEnabled(bool enabled) { TilingManager::instance()->setEnabled(enabled); }
 bool Tiling::suppressWindowShadows() const { return TilingManager::instance()->suppressWindowShadows(); }
-bool Tiling::animateMoves() const { return TilingManager::instance()->animateMoves(); }
-void Tiling::setAnimateMoves(bool animate) { TilingManager::instance()->setAnimateMoves(animate); }
 void Tiling::setSuppressWindowShadows(bool suppress) { TilingManager::instance()->setSuppressWindowShadows(suppress); }
 qint32 Tiling::gapsIn() const { return TilingManager::instance()->gapsIn(); }
 void Tiling::setGapsIn(qint32 gaps) { TilingManager::instance()->setGapsIn(gaps); }
