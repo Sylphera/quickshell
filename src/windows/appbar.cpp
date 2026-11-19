@@ -210,6 +210,7 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 	this->mMonitor = monitor;
 	this->mSize = size;
 	this->mPositionValid = true;
+	setOwnReservation(hwnd, monitor, edge, this->mReserved);
 	return this->mReserved;
 }
 
@@ -221,6 +222,7 @@ void WinAppBar::remove() {
 
 	auto data = appBarData(this->mHwnd);
 	SHAppBarMessage(ABM_REMOVE, &data);
+	clearOwnReservation(this->mHwnd);
 	forgetRegistration(this->mHwnd);
 	this->invalidate();
 }

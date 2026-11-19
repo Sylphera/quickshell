@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 #include "util.hpp"
@@ -17,6 +18,7 @@
 #include <qwindow.h>
 
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <objbase.h>
 
 namespace qs::windows {
@@ -58,6 +60,23 @@ void expectWorkArea(HMONITOR monitor, const QRect& work, int ms) {
 	gExpectedWork[monitor] = {.work = work, .until = static_cast<qint64>(GetTickCount64()) + ms};
 }
 
+struct OwnReservation {
+	QRect monitor;
+	UINT edge = 0;
+	QRect reserved;
+};
+std::unordered_map<HWND, OwnReservation> gOwnReservations; // NOLINT
+
+void setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& reserved) {
+	auto lock = std::lock_guard(gExpectedMutex);
+	gOwnReservations[hwnd] = {.monitor = monitor, .edge = edge, .reserved = reserved};
+}
+
+void clearOwnReservation(HWND hwnd) {
+	auto lock = std::lock_guard(gExpectedMutex);
+	gOwnReservations.erase(hwnd);
+}
+
 MonitorRects monitorRects(HMONITOR monitor) {
 	MonitorRects rects;
 	if (monitor == nullptr) return rects;
@@ -77,6 +96,16 @@ MonitorRects monitorRects(HMONITOR monitor) {
 			gExpectedWork.erase(found);
 		} else {
 			rects.work = found->second.work;
+		}
+	}
+	for (const auto& [hwnd, own]: gOwnReservations) {
+		if (own.monitor != rects.monitor || !rects.work.intersects(own.reserved)) continue;
+		switch (own.edge) {
+		case ABE_TOP: rects.work.setTop(std::max(rects.work.top(), own.reserved.bottom() + 1)); break;
+		case ABE_BOTTOM: rects.work.setBottom(std::min(rects.work.bottom(), own.reserved.top() - 1)); break;
+		case ABE_LEFT: rects.work.setLeft(std::max(rects.work.left(), own.reserved.right() + 1)); break;
+		case ABE_RIGHT: rects.work.setRight(std::min(rects.work.right(), own.reserved.left() - 1)); break;
+		default: break;
 		}
 	}
 	return rects;
