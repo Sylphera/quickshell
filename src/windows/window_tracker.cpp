@@ -53,6 +53,8 @@ constexpr UINT WM_QS_WINEVENTS = WM_APP + 1;
 constexpr int MOVING_FLUSH_MS = 50;
 constexpr int SWEEP_INTERVAL_MS = 10000;
 constexpr int CLOAK_SETTLE_MS = 250;
+constexpr int FOREGROUND_RETRY_MS = 100;
+constexpr int FOREGROUND_RETRIES = 20;
 
 std::mutex gEventMutex;                       // NOLINT
 std::vector<WindowEvent> gEvents;             // NOLINT
@@ -663,6 +665,12 @@ WindowTracker::WindowTracker() {
 	    &WindowTracker::settleCloakChanges
 	);
 
+	// Switching desktops, Windows can hand focus to a window there without a
+	// foreground event, so look again for a while instead of keeping none.
+	this->foregroundRetryTimer.setSingleShot(true);
+	this->foregroundRetryTimer.setInterval(FOREGROUND_RETRY_MS);
+	QObject::connect(&this->foregroundRetryTimer, &QTimer::timeout, this, &WindowTracker::updateActive);
+
 	this->sweepTimer.setInterval(SWEEP_INTERVAL_MS);
 	QObject::connect(&this->sweepTimer, &QTimer::timeout, this, [this]() {
 		if (this->sweepDestroyed()) {
@@ -1026,6 +1034,9 @@ void WindowTracker::updateActive() {
 	if (window != nullptr && !isShown(foreground)) {
 		qCDebug(logTracker) << "Foreground" << window->addressHex() << "is on another desktop";
 		window = nullptr;
+		if (this->foregroundRetries++ < FOREGROUND_RETRIES) this->foregroundRetryTimer.start();
+	} else {
+		this->foregroundRetries = 0;
 	}
 
 	this->setActive(window);

@@ -196,6 +196,8 @@ private:
 	QHash<HWND, bool> cloakSettling;
 	QTimer cloakSettleTimer;
 	bool foregroundDirty = false;
+	QTimer foregroundRetryTimer;
+	int foregroundRetries = 0;
 	QTimer flushTimer;
 	QTimer sweepTimer;
 
