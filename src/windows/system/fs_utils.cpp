@@ -48,8 +48,13 @@ QStringList FsUtils::listDir(const QString& path) {
 	return QDir(path).entryList(QDir::Files, QDir::Name);
 }
 
+QStringList FsUtils::listDir(const QString& path, bool includeHidden) {
+	if (!includeHidden) return listDir(path);
+	return QDir(path).entryList(QDir::Files | QDir::Hidden | QDir::System, QDir::Name);
+}
+
 QStringList FsUtils::listDirs(const QString& path) {
-	return QDir(path).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+	return QDir(path).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDir::Name);
 }
 
 QString FsUtils::findExecutable(const QString& name) {

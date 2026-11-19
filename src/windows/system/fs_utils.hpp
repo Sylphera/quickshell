@@ -21,6 +21,8 @@ public:
 	Q_INVOKABLE static bool isAccessibleDir(const QString& path);
 
 	Q_INVOKABLE static QStringList listDir(const QString& path);
+	// With hidden and system files too (Windows' account pictures are).
+	Q_INVOKABLE static QStringList listDir(const QString& path, bool includeHidden);
 	// The folders in `path`, by name.
 	Q_INVOKABLE static QStringList listDirs(const QString& path);
 
