@@ -478,7 +478,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	}
 	m.fresh = false;
 	if (this->canAnimate(m, layout, tile)) {
-		// As in Hyprland, the app takes its new size right away and its live
+		// Where it grows, the app takes its new size right away and its live
 		// thumbnail shows it while it travels. Chromium only paints while some of
 		// it is on screen, so it waits with a column showing. While the bar
 		// toggles it can't: a window partly on screen fits itself into the new
@@ -487,7 +487,11 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		auto from = this->managedFrame(m);
 		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
 		auto still = chromium && this->barMoving;
-		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size()) : parkedFrame(tile, chromium);
+		// While it travels it keeps the larger of its old and new size, as in
+		// Winland: its picture then only ever shrinks or gets cut off to fit,
+		// never blown up. It takes its new size when it lands.
+		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size())
+		                    : QRect(parkedFrame(tile, chromium).topLeft(), tile.size().expandedTo(from.size()));
 		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);

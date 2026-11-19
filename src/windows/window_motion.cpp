@@ -255,6 +255,25 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	);
 }
 
+namespace {
+
+// How much of a picture of `source` to show in `frame` without stretching it,
+// as Winland does: one scale for both sides, just enough to cover the frame,
+// with the picture held at its top left and cut off on the right and bottom.
+QSize coveringPart(const QSize& source, const QSize& frame) {
+	if (source.isEmpty() || frame.isEmpty()) return source;
+	auto scale = std::max(
+	    static_cast<double>(frame.width()) / source.width(),
+	    static_cast<double>(frame.height()) / source.height()
+	);
+	return {
+	    std::min(source.width(), static_cast<int>(std::lround(frame.width() / scale))),
+	    std::min(source.height(), static_cast<int>(std::lround(frame.height() / scale)))
+	};
+}
+
+} // namespace
+
 // Called with the mutex held. The source follows the window's own frame, so it
 // shows the window at whatever size it has reached.
 void WindowMotion::layout(Entry& entry, double progress) {
@@ -279,8 +298,10 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	}
 	if (entry.snapshot != nullptr) {
 		auto dest = shown.translated(-this->coverRect.topLeft());
+		auto part = coveringPart(entry.from.size(), shown.size());
 		DWM_THUMBNAIL_PROPERTIES props {};
-		props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		props.rcSource = {0, 0, part.width(), part.height()};
 		props.rcDestination =
 		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
@@ -301,11 +322,14 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 	              | DWM_TNP_SOURCECLIENTAREAONLY;
+	auto frame = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
+	// Popping in keeps the picture's shape anyway; a resize would stretch it.
+	auto part = entry.pop ? frame : coveringPart(frame, shown.size());
 	props.rcSource = {
 	    bounds.left - raw.left,
 	    bounds.top - raw.top,
-	    bounds.right - raw.left,
-	    bounds.bottom - raw.top
+	    bounds.left - raw.left + part.width(),
+	    bounds.top - raw.top + part.height()
 	};
 	props.rcDestination =
 	    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
