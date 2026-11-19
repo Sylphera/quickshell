@@ -274,6 +274,7 @@ private:
 	[[nodiscard]] Managed* neighbour(const Managed& from, Edge direction);
 	[[nodiscard]] QScreen* screenInDirection(QScreen* from, Edge direction) const;
 	void swapWindows(Managed& a, Managed& b);
+	void moveInDwindle(Managed& m, Edge direction);
 	void moveToLayout(Managed& m, Layout* layout, TrackedWindow* target);
 
 	WindowTracker* tracker = nullptr;

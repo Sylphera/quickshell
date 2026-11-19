@@ -2489,7 +2489,9 @@ bool TilingManager::moveDirection(Edge direction) {
 
 	auto* next = this->neighbour(*m, direction);
 
-	if (next != nullptr && next->layout == m->layout) {
+	if (next != nullptr && next->layout == m->layout && m->layout->tree->kind() == tiling::Kind::Dwindle) {
+		this->moveInDwindle(*m, direction);
+	} else if (next != nullptr && next->layout == m->layout) {
 		this->swapWindows(*m, *next);
 	} else if (next != nullptr) {
 		this->moveToLayout(*m, next->layout, next->window);
@@ -2498,6 +2500,33 @@ bool TilingManager::moveDirection(Edge direction) {
 	}
 
 	return true;
+}
+
+// Hyprland's Dwindle movewindow: the window leaves the tree and goes back in
+// at the point just past its edge, splitting whatever is there, so the whole
+// layout reflows around it instead of two windows trading places.
+void TilingManager::moveInDwindle(Managed& m, Edge direction) {
+	auto* layout = m.layout;
+	auto id = idOf(m.window);
+	auto box = layout->tree->box(id);
+	auto center = box.center();
+
+	QPoint focal;
+	switch (direction) {
+	case Edge::Left: focal = QPoint(box.left() - 1, center.y()); break;
+	case Edge::Right: focal = QPoint(rightOf(box) + 1, center.y()); break;
+	case Edge::Top: focal = QPoint(center.x(), box.top() - 1); break;
+	case Edge::Bottom: focal = QPoint(center.x(), bottomOf(box) + 1); break;
+	}
+
+	layout->tree->remove(id);
+	layout->tree->configure(this->options());
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	if (rects.valid) layout->tree->compute(rects.work);
+	auto target = tiling::cursorInsertionTarget(*layout->tree, focal);
+	layout->tree->insert(id, target, &focal);
+	layout->lastFocused = m.window;
+	this->markLayout(layout);
 }
 
 bool TilingManager::swapDirection(Edge direction) {
