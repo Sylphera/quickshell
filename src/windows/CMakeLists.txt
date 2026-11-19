@@ -20,6 +20,7 @@ qt_add_library(quickshell-windows STATIC
 	window_manager.cpp
 	scratchpad.cpp
 	desktop_slide.cpp
+	touchpad_gestures.cpp
 	window_motion.cpp
 	native_corners.cpp
 	super_drag.cpp

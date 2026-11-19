@@ -36,6 +36,10 @@ Q_LOGGING_CATEGORY(logSlide, "quickshell.windows.slide", QtWarningMsg);
 
 constexpr auto* OVERLAY_CLASS = L"QuickshellDesktopSlide";
 constexpr double SLIDE_MS = 700;
+// end-4's gestures: workspace_swipe_cancel_ratio = 0.2, and a quick flick
+// switches even short of it (workspace_swipe_min_speed_to_force).
+constexpr double SWIPE_CANCEL_RATIO = 0.2;
+constexpr double SWIPE_FORCE_SPEED = 1.5;
 constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
@@ -491,6 +495,76 @@ bool DesktopSlide::begin(qsizetype from, qsizetype to) {
 	return this->overlay != nullptr;
 }
 
+void DesktopSlide::swipeUpdate(double offset) {
+	auto* desktops = VirtualDesktops::instance();
+	if (!this->swiping) {
+		// A swipe starts from what is on screen, even mid-slide.
+		this->swiping = true;
+		this->swipeFrom = desktops->shownIndex();
+	}
+	auto from = this->swipeFrom;
+	auto way = offset > 0 ? 1 : (offset < 0 ? -1 : 0);
+	auto to = from + way;
+	// Past the first or last desktop there is nothing to swipe to.
+	if (way == 0 || to < 0 || to >= desktops->count()) {
+		to = from;
+		offset = 0;
+	}
+	this->swipeOffset = offset;
+
+	if (this->overlay == nullptr) {
+		if (to == from) return;
+		if (!this->start(from, to)) {
+			qCDebug(logSlide) << "Swipe from" << from << "to" << to << "has no slide to drive";
+			return;
+		}
+		qCDebug(logSlide) << "Swipe from" << from << "to" << to << "drives the slide";
+	}
+	{
+		auto lock = std::lock_guard(this->mutex);
+		this->manual = true;
+		this->manualCamera = this->bases.value(from) + std::clamp(offset, -1.0, 1.0) * this->travel;
+	}
+	this->retarget(to);
+}
+
+void DesktopSlide::swipeEnd(double velocity) {
+	if (!this->swiping) return;
+	this->swiping = false;
+	auto goesBy = [velocity](double offset) {
+		return std::abs(offset) > SWIPE_CANCEL_RATIO
+		    || (std::abs(velocity) > SWIPE_FORCE_SPEED && velocity * offset > 0);
+	};
+	// Nothing on either desktop to slide: switch without one.
+	if (this->overlay == nullptr) {
+		if (this->swipeOffset != 0 && goesBy(this->swipeOffset)) {
+			VirtualDesktops::instance()->switchToAsync(this->swipeFrom + (this->swipeOffset > 0 ? 1 : -1));
+		}
+		return;
+	}
+
+	qsizetype to = -1;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		auto offset = (this->manualCamera - this->bases.value(this->swipeFrom)) / this->travel;
+		auto goes = this->target != this->swipeFrom && goesBy(offset);
+		to = goes ? this->target : this->swipeFrom;
+	}
+	qCDebug(logSlide) << "Swipe let go toward" << to << "from" << this->swipeFrom << "velocity" << velocity;
+	// Retargets from where the fingers left it, then carries on by the clock.
+	this->retarget(to);
+	{
+		auto lock = std::lock_guard(this->mutex);
+		this->cameraFrom = this->manualCamera;
+		this->cameraTo = this->bases.value(to);
+		this->startedAt = std::chrono::steady_clock::now();
+		this->settledSent = false;
+		this->commitSent = false;
+		this->manual = false;
+	}
+	if (to != this->swipeFrom) VirtualDesktops::instance()->switchToAsync(to);
+}
+
 bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	auto* tracker = WindowTracker::instance();
 	if (tracker == nullptr) return false;
@@ -585,7 +659,9 @@ void DesktopSlide::retarget(qsizetype to) {
 		auto elapsed = std::chrono::duration<double, std::milli>(now - this->startedAt).count();
 		auto progress =
 		    this->cameraFrom == this->cameraTo ? 1.0 : std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
-		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
+		auto camera = this->manual
+		                ? this->manualCamera
+		                : this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
 		// Like Hyprland, only the desktop under the camera and the requested one
 		// sit side by side: the new one goes right next to what is on screen, and
@@ -732,6 +808,10 @@ void DesktopSlide::run() {
 		                   .count();
 		auto progress = std::clamp(elapsed / SLIDE_MS, 0.0, 1.0);
 		auto camera = this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
+		if (this->manual) {
+			this->layoutThumbs(this->manualCamera);
+			continue;
+		}
 
 		this->layoutThumbs(camera);
 

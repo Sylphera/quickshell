@@ -37,6 +37,14 @@ public:
 	// Returns whether a slide now covers the switch.
 	bool begin(qsizetype from, qsizetype to);
 
+	// Hyprland's workspace swipe: the slide follows a gesture instead of its
+	// clock. `offset` is how far the gesture has gone, in desktop widths;
+	// positive heads for the next desktop, negative for the previous one.
+	void swipeUpdate(double offset);
+	// The gesture lets go, at `velocity` desktop widths a second: like Hyprland,
+	// it switches if it went far or fast enough that way, and slides back if not.
+	void swipeEnd(double velocity);
+
 private:
 	explicit DesktopSlide(QObject* parent);
 	~DesktopSlide() override;
@@ -85,6 +93,12 @@ private:
 	std::chrono::steady_clock::time_point startedAt;
 	bool settledSent = false;
 	bool commitSent = false;
+	// While a swipe drives the camera.
+	bool manual = false;
+	double manualCamera = 0;
+	bool swiping = false;
+	qsizetype swipeFrom = -1;
+	double swipeOffset = 0;
 
 	std::thread worker;
 	std::atomic<bool> stop = false;
