@@ -125,6 +125,7 @@ public:
 	// cover it and back. False if it can't (minimized, maximized, elevated).
 	bool toggleFullscreen(TrackedWindow* window);
 	void updateShellFullscreen();
+	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
 	void edgeDrag(const QPoint& delta);
@@ -212,6 +213,7 @@ private:
 		bool fullscreen = false;
 		// Where a floating window was before it went fullscreen (raw rect).
 		QRect fullscreenRestore;
+		bool fullscreenWasMaximized = false;
 	};
 
 	bool start();

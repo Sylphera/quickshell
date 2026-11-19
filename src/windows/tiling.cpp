@@ -868,6 +868,8 @@ void TilingManager::manage(TrackedWindow* window) {
 		ShowWindowAsync(window->hwnd(), SW_RESTORE);
 	}
 
+	this->restoreLeftFullscreen(window);
+
 	auto mark = [this, window]() { this->markWindow(window); };
 	QObject::connect(window, &TrackedWindow::minimizedChanged, this, mark);
 	QObject::connect(window, &TrackedWindow::maximizedChanged, this, mark);
@@ -926,8 +928,13 @@ TilingManager::State TilingManager::stateOf(const Managed& m) const {
 	if (window->minimized()) return State::Hidden;
 	if (window->maximized()) return State::Suspended;
 
-	if (window->fullscreen()) {
-			if (m.layout == nullptr || m.target.isNull() || this->managedFrame(m) != m.target) {
+	// An app's own fullscreen drops its frame. A window that keeps its title bar
+	// and border only happens to cover the screen (osu! reopening at the size
+	// it was left), and is tiled like any other.
+	auto framed = (GetWindowLongPtrW(window->hwnd(), GWL_STYLE) & (WS_CAPTION | WS_THICKFRAME))
+	           == (WS_CAPTION | WS_THICKFRAME);
+	if (window->fullscreen() && !framed) {
+		if (m.layout == nullptr || m.target.isNull() || this->managedFrame(m) != m.target) {
 			return State::Suspended;
 		}
 	}
@@ -2576,6 +2583,60 @@ bool TilingManager::toggleFullWidth(TrackedWindow* window) {
 	return true;
 }
 
+namespace {
+
+// A fullscreen window carries where it was, as the parking hook's marks do, so
+// a shell that restarts (or crashed) mid-fullscreen puts it back.
+constexpr const wchar_t* FULLSCREEN_PROP = L"qs.fullscreen";
+constexpr const wchar_t* FULLSCREEN_X = L"qs.fsx";
+constexpr const wchar_t* FULLSCREEN_Y = L"qs.fsy";
+constexpr const wchar_t* FULLSCREEN_W = L"qs.fsw";
+constexpr const wchar_t* FULLSCREEN_H = L"qs.fsh";
+
+HANDLE propOf(int value) { return reinterpret_cast<HANDLE>(static_cast<INT_PTR>(value)); } // NOLINT
+int valueOf(HWND hwnd, const wchar_t* name) {
+	return static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, name))); // NOLINT
+}
+
+void markFullscreen(HWND hwnd, const QRect& raw, bool maximized) {
+	SetPropW(hwnd, FULLSCREEN_PROP, propOf(maximized ? 2 : 1));
+	SetPropW(hwnd, FULLSCREEN_X, propOf(raw.x()));
+	SetPropW(hwnd, FULLSCREEN_Y, propOf(raw.y()));
+	SetPropW(hwnd, FULLSCREEN_W, propOf(raw.width()));
+	SetPropW(hwnd, FULLSCREEN_H, propOf(raw.height()));
+}
+
+void unmarkFullscreen(HWND hwnd) {
+	for (const auto* name: {FULLSCREEN_PROP, FULLSCREEN_X, FULLSCREEN_Y, FULLSCREEN_W, FULLSCREEN_H}) {
+		RemovePropW(hwnd, name);
+	}
+}
+
+void setFullscreenLook(HWND hwnd, bool fullscreen) {
+	// No rounded corners or border on the whole screen, as for a maximized
+	// window: they left gaps of wallpaper in its corners.
+	DWORD corners = fullscreen ? DWMWCP_DONOTROUND : DWMWCP_DEFAULT;
+	DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+	COLORREF border = fullscreen ? DWMWA_COLOR_NONE : DWMWA_COLOR_DEFAULT;
+	DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+}
+
+} // namespace
+
+// Put back a window a previous shell left fullscreen.
+void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {
+	auto* hwnd = window->hwnd();
+	auto mark = valueOf(hwnd, FULLSCREEN_PROP);
+	if (mark == 0) return;
+	auto raw = QRect(valueOf(hwnd, FULLSCREEN_X), valueOf(hwnd, FULLSCREEN_Y), valueOf(hwnd, FULLSCREEN_W), valueOf(hwnd, FULLSCREEN_H));
+	unmarkFullscreen(hwnd);
+	setFullscreenLook(hwnd, false);
+	qCInfo(logTiling) << "Window" << window->addressHex() << window->appId()
+	                  << "was left fullscreen by a previous shell; putting it back.";
+	if (!raw.isEmpty()) setRawRect(hwnd, raw);
+	if (mark == 2) ShowWindowAsync(hwnd, SW_MAXIMIZE);
+}
+
 bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return false;
@@ -2583,31 +2644,35 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 	auto* hwnd = window->hwnd();
 
 	if (!m.fullscreen) {
-		auto tiled = m.layout != nullptr && this->stateOf(m) == State::Tiled;
-		if (!tiled) {
-			// A floating window (a game with a fixed size, say) is moved to cover
-			// its monitor, and back where it was afterwards.
-			if (m.elevated || window->minimized() || window->maximized()) return false;
-			auto rects = monitorRects(monitorForScreen(window->screen()));
-			RECT raw {};
-			if (!rects.valid || !GetWindowRect(hwnd, &raw)) return false;
-			m.fullscreenRestore = QRect(QPoint(raw.left, raw.top), QPoint(raw.right - 1, raw.bottom - 1));
-			setFrame(hwnd, fullscreenFrame(hwnd, rects.monitor));
-		}
-	} else if (!m.fullscreenRestore.isNull()) {
-		setRawRect(hwnd, m.fullscreenRestore);
+		if (m.elevated || window->minimized()) return false;
+		auto rects = monitorRects(monitorForScreen(window->screen()));
+		if (!rects.valid) return false;
+		// A maximized window (osu!, say) goes fullscreen from its normal size and
+		// is maximized again when it leaves.
+		auto wasMaximized = IsZoomed(hwnd) != FALSE;
+		if (wasMaximized) ShowWindow(hwnd, SW_RESTORE);
+		RECT raw {};
+		if (!GetWindowRect(hwnd, &raw)) return false;
+		auto before = QRect(QPoint(raw.left, raw.top), QPoint(raw.right - 1, raw.bottom - 1));
+		auto tiled = m.layout != nullptr && (wasMaximized || this->stateOf(m) == State::Tiled);
+		// A floating window (a game with a fixed size, say) goes back where it
+		// was afterwards; a tiled one goes back to its tile.
+		m.fullscreenRestore = tiled ? QRect() : before;
+		m.fullscreenWasMaximized = wasMaximized;
+		markFullscreen(hwnd, before, wasMaximized);
+		setFrame(hwnd, fullscreenFrame(hwnd, rects.monitor));
+	} else {
+		if (!m.fullscreenRestore.isNull()) setRawRect(hwnd, m.fullscreenRestore);
+		if (m.fullscreenWasMaximized) ShowWindowAsync(hwnd, SW_MAXIMIZE);
 		m.fullscreenRestore = QRect();
+		m.fullscreenWasMaximized = false;
+		unmarkFullscreen(hwnd);
 	}
 
 	m.fullscreen = !m.fullscreen;
 	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
 	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen");
-	// No rounded corners or border on the whole screen, as for a maximized
-	// window: they left gaps of wallpaper in its corners.
-	DWORD corners = m.fullscreen ? DWMWCP_DONOTROUND : DWMWCP_DEFAULT;
-	DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
-	COLORREF border = m.fullscreen ? DWMWA_COLOR_NONE : DWMWA_COLOR_DEFAULT;
-	DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+	setFullscreenLook(hwnd, m.fullscreen);
 	if (m.layout != nullptr) this->markLayout(m.layout);
 	if (m.fullscreen) window->activate();
 	this->updateShellFullscreen();
