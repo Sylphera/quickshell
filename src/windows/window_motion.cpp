@@ -132,8 +132,6 @@ int WindowPop::popOut(HWND hwnd) {
 	return static_cast<int>(POP_OUT_MS);
 }
 
-namespace {
-
 // Acrylic glass for a window with a see-through backdrop (Windows Terminal's
 // acrylic, Windows 11's mica): a thumbnail carries the app's content but not
 // the backdrop DWM draws behind it, which then showed up only once the window
@@ -151,7 +149,7 @@ struct CompositionData {
 };
 using SetCompositionFn = BOOL(WINAPI*)(HWND, CompositionData*);
 
-bool hasBackdrop(HWND hwnd) {
+bool hasWindowBackdrop(HWND hwnd) {
 	wchar_t cls[64] {};
 	GetClassNameW(hwnd, cls, 64);
 	if (wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0) return true;
@@ -161,7 +159,9 @@ bool hasBackdrop(HWND hwnd) {
 	    && backdrop > 1;
 }
 
-HWND createGlass(const QRect& rect) {
+namespace {
+
+HWND createWindowGlass(const QRect& rect) {
 	static const auto setComposition = []() -> SetCompositionFn {
 		auto* user32 = GetModuleHandleW(L"user32.dll");
 		return user32 == nullptr ? nullptr
@@ -172,7 +172,10 @@ HWND createGlass(const QRect& rect) {
 	if (setComposition == nullptr) return nullptr;
 	static const auto* className = []() {
 		WNDCLASSW wc {};
-		wc.lpfnWndProc = DefWindowProcW;
+		wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) -> LRESULT {
+			if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+			return DefWindowProcW(hwnd, msg, wparam, lparam);
+		};
 		wc.hInstance = GetModuleHandleW(nullptr);
 		wc.lpszClassName = L"QuickshellPopGlass";
 		RegisterClassW(&wc);
@@ -198,30 +201,25 @@ HWND createGlass(const QRect& rect) {
 	constexpr DWORD WCA_ACCENT = 19;
 	AccentPolicy policy {ACCENT_ACRYLIC, ACCENT_GRADIENT, 0x01000000, 0};
 	CompositionData data {WCA_ACCENT, &policy, sizeof(policy)};
-	setComposition(glass, &data);
+	if (!setComposition(glass, &data)) {
+		DestroyWindow(glass);
+		return nullptr;
+	}
 	auto corners = DWMWCP_ROUND;
 	DwmSetWindowAttribute(glass, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
 	COLORREF border = DWMWA_COLOR_NONE;
 	DwmSetWindowAttribute(glass, DWMWA_BORDER_COLOR, &border, sizeof(border));
 	BOOL noTransitions = TRUE;
-	DwmSetWindowAttribute(glass, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	DwmSetWindowAttribute(
+	    glass,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
 	return glass;
 }
 
-// A cover in `frame` that shows `source` (its `sourceRect`) popping in or out,
-// stacked just above `below`. `shown` runs once the cover is up and `done`
-// on the GUI thread when the animation ends.
-bool popCover(
-    HWND source,
-    const QRect& frame,
-    RECT sourceRect,
-    HWND below,
-    bool in,
-    std::function<void()> shown,
-    std::function<void()> done,
-    int lingerMs = 0,
-    HWND glass = nullptr
-) {
+HWND createMotionCover(const QRect& frame) {
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
 	if (!registered) {
@@ -247,12 +245,11 @@ bool popCover(
 	    instance,
 	    nullptr
 	);
-	HTHUMBNAIL thumbnail = nullptr;
-	if (cover == nullptr || FAILED(DwmRegisterThumbnail(cover, source, &thumbnail))) {
-		if (cover != nullptr) DestroyWindow(cover);
-		return false;
+	if (cover == nullptr) return nullptr;
+	if (!SetLayeredWindowAttributes(cover, COVER_KEY, 255, LWA_COLORKEY)) {
+		DestroyWindow(cover);
+		return nullptr;
 	}
-	SetLayeredWindowAttributes(cover, COVER_KEY, 255, LWA_COLORKEY);
 	BOOL noTransitions = TRUE;
 	DwmSetWindowAttribute(
 	    cover,
@@ -260,6 +257,29 @@ bool popCover(
 	    &noTransitions,
 	    sizeof(noTransitions)
 	);
+	return cover;
+}
+
+// A cover in `frame` that shows `source` (its `sourceRect`) popping in or out,
+// stacked just above `below`. `shown` runs once the cover is up and `done`
+// on the GUI thread when the animation ends.
+bool popCover(
+    HWND source,
+    const QRect& frame,
+    RECT sourceRect,
+    HWND below,
+    bool in,
+    std::function<void()> shown,
+    std::function<void()> done,
+    int lingerMs = 0,
+    HWND glass = nullptr
+) {
+	auto* cover = createMotionCover(frame);
+	HTHUMBNAIL thumbnail = nullptr;
+	if (cover == nullptr || FAILED(DwmRegisterThumbnail(cover, source, &thumbnail))) {
+		if (cover != nullptr) DestroyWindow(cover);
+		return false;
+	}
 
 	auto apply = [thumbnail, sourceRect, frame, glass](double progress, bool in) {
 		auto eased = ease(progress);
@@ -458,7 +478,7 @@ void popInNow(HWND hwnd, const QRect& frame, const std::function<void()>& land) 
 	auto left = current.left() - raw.left;
 	auto top = current.top() - raw.top;
 	RECT source {left, top, left + current.width(), top + current.height()};
-	auto* glass = hasBackdrop(hwnd) ? createGlass(frame) : nullptr;
+	auto* glass = hasWindowBackdrop(hwnd) ? createWindowGlass(frame) : nullptr;
 	auto popped = popCover(hwnd, frame, source, nullptr, true, nullptr, land, LAND_LINGER_MS, glass);
 	if (!popped) {
 		if (glass != nullptr) DestroyWindow(glass);

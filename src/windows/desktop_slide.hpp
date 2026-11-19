@@ -52,13 +52,20 @@ private:
 	struct Thumb {
 		HTHUMBNAIL thumbnail = nullptr;
 		QRect rect;
-		QRect source;
 		qsizetype desktop = -1;
+		HWND window = nullptr;
+		QRect visible;
 	};
 
 	bool start(qsizetype from, qsizetype to);
 	void retarget(qsizetype to);
-	void addDesktop(qsizetype desktop, bool capture);
+	bool addLiveDesktop(qsizetype desktop);
+	void warmLiveThumbs();
+	bool prepareLiveOverlay(const QRect& monitor, const QList<HWND>& windows);
+	HTHUMBNAIL liveThumbnail(HWND window);
+	void clearLiveOverlay();
+	void releaseThumb(const Thumb& thumb);
+	void addLegacyDesktop(qsizetype desktop, bool capture);
 	void prepareBackdrop();
 	void releaseBackdrop();
 	bool takeSnapshot(HWND hwnd, const QRect& frame);
@@ -81,7 +88,16 @@ private:
 	void placeUnderPanels();
 
 	HWND overlay = nullptr;
+	HWND liveOverlay = nullptr;
+	QRect liveMonitor;
+	QList<HWND> liveBackdropSources;
+	QHash<HWND, HTHUMBNAIL> liveThumbnails;
+	QList<HWND> liveThumbnailOrder;
+	QTimer liveWarmTimer;
+	bool liveWarmPending = false;
 	QRect monitor;
+	bool comparisonStills = false;
+	bool legacySlide = false;
 	int travel = 0;
 
 	std::mutex mutex;

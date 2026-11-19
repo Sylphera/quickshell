@@ -7,6 +7,8 @@
 
 namespace qs::windows {
 
+bool hasWindowBackdrop(HWND hwnd);
+
 // end-4's windowsIn and windowsOut (popin 80% / 90% with a fade) for the
 // shell's own windows, such as settings. The window is cloaked (it is ours, so
 // DWMWA_CLOAK is allowed) while a thumbnail of it scales and fades on a small
