@@ -55,6 +55,7 @@ private:
 		qsizetype desktop = -1;
 		HWND window = nullptr;
 		QRect visible;
+		QRect source;
 	};
 
 	bool start(qsizetype from, qsizetype to);
@@ -65,6 +66,8 @@ private:
 	HTHUMBNAIL liveThumbnail(HWND window);
 	void clearLiveOverlay();
 	void releaseThumb(const Thumb& thumb);
+	void carryPanels();
+	void liftFullscreen(qsizetype desktop = -1);
 	void addLegacyDesktop(qsizetype desktop, bool capture);
 	void prepareBackdrop();
 	void releaseBackdrop();
@@ -96,6 +99,7 @@ private:
 	QTimer liveWarmTimer;
 	bool liveWarmPending = false;
 	QRect monitor;
+	bool panelsCarried = false;
 	bool comparisonStills = false;
 	bool legacySlide = false;
 	int travel = 0;

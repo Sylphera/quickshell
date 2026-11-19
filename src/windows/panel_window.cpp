@@ -963,6 +963,7 @@ void WinPanelWindow::updateDimensions() {
 
 namespace {
 bool gCoverActive = false; // NOLINT
+bool gCoverOverPanels = false; // NOLINT
 }
 
 void WinPanelWindow::updateLayer() {
@@ -994,7 +995,8 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Top:
 	{
 		auto* stack = WinPanelStack::instance();
-		auto behind = (stack->fullscreenAppActive() && !gCoverActive) || stack->shellFullscreen();
+		auto behind = (stack->fullscreenAppActive() && !gCoverActive) || stack->shellFullscreen()
+		           || gCoverOverPanels;
 		insertAfter = behind ? HWND_BOTTOM : HWND_TOPMOST;
 	}
 		break;
@@ -1019,6 +1021,17 @@ QList<HWND> WinPanelWindow::aboveWindowHandles() {
 }
 
 void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }
+
+void WinPanelWindow::setCoverOverPanels(bool active) {
+	if (active == gCoverOverPanels) return;
+	gCoverOverPanels = active;
+	for (auto* panel: WinPanelStack::instance()->panels()) {
+		if (panel->isEmbedded() || !panel->aboveWindows()) continue;
+		auto* hwnd = panel->hwnd();
+		if (hwnd == nullptr || !IsWindowVisible(hwnd)) continue;
+		panel->updateLayer();
+	}
+}
 
 void WinPanelWindow::setShellFullscreen(bool active) { WinPanelStack::instance()->setShellFullscreen(active); }
 

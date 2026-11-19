@@ -95,6 +95,10 @@ public:
 	static QList<HWND> raiseDemoted();
 	static void restack(const QList<HWND>& hwnds);
 	static void setCoverActive(bool active);
+	// A desktop slide carries copies of the top panels, so a window made
+	// fullscreen slides over the bar as in Hyprland: meanwhile the real ones
+	// step behind windows, under the cover.
+	static void setCoverOverPanels(bool active);
 	// A window the shell made fullscreen (Super+F) is on the desktop on screen:
 	// top panels (the bar, the dock) step behind windows, even while a desktop
 	// slide is on, as for an app that went fullscreen itself.
