@@ -677,6 +677,17 @@ void SuperDragManager::onHover(POINT point, bool byLayout) {
 	if (root == foreground) return;
 	if (foreground != nullptr) {
 		if (isOwnProcessWindow(foreground)) return;
+		// A popup, menu or dialog of the window under the pointer keeps focus: in
+		// Hyprland those are part of their window. Taking focus back closed a
+		// browser's extension popup as soon as the pointer moved.
+		if (GetAncestor(foreground, GA_ROOTOWNER) == root) return;
+		if (WindowTracker::instance()->windowFor(foreground) == nullptr) {
+			DWORD foregroundPid = 0;
+			DWORD rootPid = 0;
+			GetWindowThreadProcessId(foreground, &foregroundPid);
+			GetWindowThreadProcessId(root, &rootPid);
+			if (foregroundPid == rootPid) return;
+		}
 		GUITHREADINFO gui {.cbSize = sizeof(GUITHREADINFO)};
 		if (GetGUIThreadInfo(GetWindowThreadProcessId(foreground, nullptr), &gui)) {
 			constexpr DWORD busy = GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE;
