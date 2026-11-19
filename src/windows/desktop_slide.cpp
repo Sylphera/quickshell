@@ -426,6 +426,22 @@ bool heavyWindow(const TrackedWindow* window) {
 	auto name = path.mid(path.lastIndexOf(QLatin1Char('\\')) + 1).toLower();
 	if (names.contains(name)) return true;
 
+	// A window with a see-through backdrop (Windows Terminal's acrylic, Windows
+	// 11's mica): a live thumbnail leaves the backdrop out and slid as a bare
+	// sharp-edged window. A copy from the screen has the blur in it.
+	{
+		wchar_t cls[64] {};
+		GetClassNameW(window->hwnd(), cls, 64);
+		if (wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0) return true;
+		DWORD backdrop = 0;
+		constexpr DWORD SYSTEMBACKDROP_TYPE = 38;
+		if (SUCCEEDED(DwmGetWindowAttribute(window->hwnd(), SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop)))
+		    && backdrop > 1)
+		{
+			return true;
+		}
+	}
+
 	// Every Chromium-based app (Electron: Discord, Spotify, VS Code, Slack...)
 	// stops painting while its desktop is hidden, just like the browsers, so
 	// its live thumbnail is empty on the way in. They share a window class.

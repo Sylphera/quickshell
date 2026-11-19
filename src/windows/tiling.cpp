@@ -1288,6 +1288,7 @@ void TilingManager::apply(Layout* layout) {
 		// Fullscreen covers the monitor, and the shell's bar and dock step
 		// behind it (updateShellFullscreen).
 		if (m.fullscreen) tile = fullscreenFrame(window->hwnd(), rects.monitor);
+		if (m.popping) continue;
 		auto fresh = std::exchange(m.fresh, false);
 		if (fresh && m.target.isNull() && !m.fullscreen && this->popIn(m, tile)) continue;
 		this->place(m, tile);
@@ -2665,12 +2666,18 @@ bool TilingManager::popIn(Managed& m, const QRect& tile) {
 
 	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId() << "pops in";
 	this->place(m, waitingFrame(hwnd, tile));
+	m.popping = true;
 	auto target = QPointer<TrackedWindow>(window);
-	WindowPop::popInAt(hwnd, tile, [this, target, tile]() {
+	WindowPop::popInAt(hwnd, tile, [this, target]() {
 		if (!target) return;
 		auto found = this->managed.find(target.data());
 		if (found == this->managed.end()) return;
-		this->place(found->second, tile);
+		// It lands where its tile is now, in case the layout changed meanwhile.
+		found->second.popping = false;
+		if (found->second.layout != nullptr) {
+			this->markLayout(found->second.layout);
+			this->sync();
+		}
 	});
 	return true;
 }

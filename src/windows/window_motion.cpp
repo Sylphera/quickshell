@@ -38,6 +38,9 @@ double ease(double x) {
 	return bezierAt(CURVE_Y1, CURVE_Y2, (lo + hi) / 2);
 }
 
+// How long a window that was asked to close may take before it comes back.
+constexpr int CLOSE_GIVE_BACK_MS = 1500;
+
 // A still of what is on screen in `frame`, in a window of its own off screen.
 HWND snapshotOf(const QRect& frame) {
 	auto width = frame.width();
@@ -131,6 +134,80 @@ int WindowPop::popOut(HWND hwnd) {
 
 namespace {
 
+// Acrylic glass for a window with a see-through backdrop (Windows Terminal's
+// acrylic, Windows 11's mica): a thumbnail carries the app's content but not
+// the backdrop DWM draws behind it, which then showed up only once the window
+// landed. This sits under the cover and follows the thumbnail's rect.
+struct AccentPolicy {
+	DWORD accentState;
+	DWORD accentFlags;
+	DWORD gradientColor;
+	DWORD animationId;
+};
+struct CompositionData {
+	DWORD attribute;
+	PVOID data;
+	SIZE_T size;
+};
+using SetCompositionFn = BOOL(WINAPI*)(HWND, CompositionData*);
+
+bool hasBackdrop(HWND hwnd) {
+	wchar_t cls[64] {};
+	GetClassNameW(hwnd, cls, 64);
+	if (wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0) return true;
+	DWORD backdrop = 0;
+	constexpr DWORD SYSTEMBACKDROP_TYPE = 38;
+	return SUCCEEDED(DwmGetWindowAttribute(hwnd, SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop)))
+	    && backdrop > 1;
+}
+
+HWND createGlass(const QRect& rect) {
+	static const auto setComposition = []() -> SetCompositionFn {
+		auto* user32 = GetModuleHandleW(L"user32.dll");
+		return user32 == nullptr ? nullptr
+		                         : reinterpret_cast<SetCompositionFn>( // NOLINT
+		                               GetProcAddress(user32, "SetWindowCompositionAttribute")
+		                           );
+	}();
+	if (setComposition == nullptr) return nullptr;
+	static const auto* className = []() {
+		WNDCLASSW wc {};
+		wc.lpfnWndProc = DefWindowProcW;
+		wc.hInstance = GetModuleHandleW(nullptr);
+		wc.lpszClassName = L"QuickshellPopGlass";
+		RegisterClassW(&wc);
+		return L"QuickshellPopGlass";
+	}();
+	auto* glass = CreateWindowExW(
+	    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+	    className,
+	    L"",
+	    WS_POPUP,
+	    rect.x(),
+	    rect.y(),
+	    rect.width(),
+	    rect.height(),
+	    nullptr,
+	    nullptr,
+	    GetModuleHandleW(nullptr),
+	    nullptr
+	);
+	if (glass == nullptr) return nullptr;
+	constexpr DWORD ACCENT_ACRYLIC = 4;
+	constexpr DWORD ACCENT_GRADIENT = 2;
+	constexpr DWORD WCA_ACCENT = 19;
+	AccentPolicy policy {ACCENT_ACRYLIC, ACCENT_GRADIENT, 0x01000000, 0};
+	CompositionData data {WCA_ACCENT, &policy, sizeof(policy)};
+	setComposition(glass, &data);
+	auto corners = DWMWCP_ROUND;
+	DwmSetWindowAttribute(glass, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+	COLORREF border = DWMWA_COLOR_NONE;
+	DwmSetWindowAttribute(glass, DWMWA_BORDER_COLOR, &border, sizeof(border));
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(glass, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
+	return glass;
+}
+
 // A cover in `frame` that shows `source` (its `sourceRect`) popping in or out,
 // stacked just above `below`. `shown` runs once the cover is up and `done`
 // on the GUI thread when the animation ends.
@@ -142,7 +219,8 @@ bool popCover(
     bool in,
     std::function<void()> shown,
     std::function<void()> done,
-    int lingerMs = 0
+    int lingerMs = 0,
+    HWND glass = nullptr
 ) {
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
@@ -183,7 +261,7 @@ bool popCover(
 	    sizeof(noTransitions)
 	);
 
-	auto apply = [thumbnail, sourceRect, frame](double progress, bool in) {
+	auto apply = [thumbnail, sourceRect, frame, glass](double progress, bool in) {
 		auto eased = ease(progress);
 		auto scale =
 		    in ? POP_IN_SCALE + (1.0 - POP_IN_SCALE) * eased : 1.0 - (1.0 - POP_OUT_SCALE) * eased;
@@ -206,6 +284,17 @@ bool popCover(
 		props.fVisible = TRUE;
 		props.fSourceClientAreaOnly = FALSE;
 		DwmUpdateThumbnailProperties(thumbnail, &props);
+		if (glass != nullptr) {
+			SetWindowPos(
+			    glass,
+			    nullptr,
+			    frame.x() + props.rcDestination.left,
+			    frame.y() + props.rcDestination.top,
+			    props.rcDestination.right - props.rcDestination.left,
+			    props.rcDestination.bottom - props.rcDestination.top,
+			    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS
+			);
+		}
 	};
 
 	apply(0, in);
@@ -220,12 +309,15 @@ bool popCover(
 	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
 	);
 	ShowWindow(cover, SW_SHOWNOACTIVATE);
+	if (glass != nullptr) {
+		SetWindowPos(glass, cover, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	}
 	if (shown) shown();
 	DwmFlush();
 
 	// A short animation on its own thread, on the compositor clock; the cover
 	// is released back on the thread that owns it.
-	std::thread([cover, thumbnail, apply, in, lingerMs, done = std::move(done)]() {
+	std::thread([cover, thumbnail, apply, in, lingerMs, glass, done = std::move(done)]() {
 		auto duration = in ? POP_IN_MS : POP_OUT_MS;
 		auto start = std::chrono::steady_clock::now();
 		auto period = compositorRefreshMs();
@@ -248,13 +340,14 @@ bool popCover(
 		}
 		QMetaObject::invokeMethod(
 		    QCoreApplication::instance(),
-		    [cover, thumbnail, done, lingerMs]() {
+		    [cover, thumbnail, done, lingerMs, glass]() {
 			    if (done) done();
 			    // Over a window that just moved into place, the cover stays a
 			    // moment, until the window is there.
-			    QTimer::singleShot(lingerMs, QCoreApplication::instance(), [cover, thumbnail]() {
+			    QTimer::singleShot(lingerMs, QCoreApplication::instance(), [cover, thumbnail, glass]() {
 				    DwmUnregisterThumbnail(thumbnail);
 				    DestroyWindow(cover);
+				    if (glass != nullptr) DestroyWindow(glass);
 			    });
 		    },
 		    Qt::QueuedConnection
@@ -309,13 +402,27 @@ bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
 	// A still of it as it looks now: the app is gone a moment later.
 	auto* still = snapshotOf(frame);
 	if (still == nullptr) return false;
+	// The real window leaves the screen as its still starts popping out, or it
+	// showed whole behind the still until the app was done closing. An app
+	// that doesn't close (it asks to save, say) gets it back.
+	RECT raw {};
+	GetWindowRect(hwnd, &raw);
+	auto away = [hwnd, raw, close]() {
+		auto right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+		SetWindowPos(hwnd, nullptr, right + 100, raw.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+		close();
+		QTimer::singleShot(CLOSE_GIVE_BACK_MS, QCoreApplication::instance(), [hwnd, raw]() {
+			if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) return;
+			SetWindowPos(hwnd, nullptr, raw.left, raw.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+		});
+	};
 	auto popped = popCover(
 	    still,
 	    frame,
 	    RECT {0, 0, frame.width(), frame.height()},
 	    hwnd,
 	    false,
-	    close,
+	    away,
 	    [still]() { DestroyWindow(still); }
 	);
 	if (!popped) DestroyWindow(still);
@@ -351,8 +458,12 @@ void popInNow(HWND hwnd, const QRect& frame, const std::function<void()>& land) 
 	auto left = current.left() - raw.left;
 	auto top = current.top() - raw.top;
 	RECT source {left, top, left + current.width(), top + current.height()};
-	auto popped = popCover(hwnd, frame, source, nullptr, true, nullptr, land, LAND_LINGER_MS);
-	if (!popped) land();
+	auto* glass = hasBackdrop(hwnd) ? createGlass(frame) : nullptr;
+	auto popped = popCover(hwnd, frame, source, nullptr, true, nullptr, land, LAND_LINGER_MS, glass);
+	if (!popped) {
+		if (glass != nullptr) DestroyWindow(glass);
+		land();
+	}
 }
 } // namespace
 

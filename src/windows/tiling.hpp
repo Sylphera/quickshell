@@ -213,6 +213,8 @@ private:
 		bool fullscreen = false;
 		// Opened after the shell started and not placed yet.
 		bool fresh = false;
+		// Popping in: it waits off screen until the pop lands.
+		bool popping = false;
 		// Where a floating window was before it went fullscreen (raw rect).
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
