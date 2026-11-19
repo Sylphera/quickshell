@@ -24,6 +24,7 @@
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_manager.hpp"
+#include "../window_motion.hpp"
 #include "../window_tracker.hpp"
 #include "connection.hpp"
 #include "workspace.hpp"
@@ -226,7 +227,12 @@ void closeFocused(WindowTracker* tracker) {
 	// The window focused now: Windows doesn't always announce handing focus on.
 	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
-		window->close();
+		// end-4's windowsOut: a still of it pops out while it closes.
+		auto target = QPointer<TrackedWindow>(window);
+		auto close = [target]() {
+			if (target) target->close();
+		};
+		if (!WindowPop::closeOut(window->hwnd(), close)) window->close();
 	} else {
 		closeShellWindow(GetForegroundWindow());
 	}

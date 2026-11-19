@@ -1,6 +1,7 @@
 #include "window_motion.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include <qcoreapplication.h>
 #include <qpointer.h>
@@ -541,18 +542,20 @@ int WindowPop::popOut(HWND hwnd) {
 	return static_cast<int>(POP_OUT_MS);
 }
 
-void WindowPop::start(HWND hwnd, bool in) {
-	RECT raw {};
-	RECT bounds {};
-	if (!IsWindow(hwnd) || !GetWindowRect(hwnd, &raw)
-	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
-	{
-		setCloaked(hwnd, false);
-		return;
-	}
-	auto frame =
-	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+namespace {
 
+// A cover in `frame` that shows `source` (its `sourceRect`) popping in or out,
+// stacked just above `below`. `shown` runs once the cover is up and `done`
+// on the GUI thread when the animation ends.
+bool popCover(
+    HWND source,
+    const QRect& frame,
+    RECT sourceRect,
+    HWND below,
+    bool in,
+    std::function<void()> shown,
+    std::function<void()> done
+) {
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
 	if (!registered) {
@@ -579,10 +582,9 @@ void WindowPop::start(HWND hwnd, bool in) {
 	    nullptr
 	);
 	HTHUMBNAIL thumbnail = nullptr;
-	if (cover == nullptr || FAILED(DwmRegisterThumbnail(cover, hwnd, &thumbnail))) {
+	if (cover == nullptr || FAILED(DwmRegisterThumbnail(cover, source, &thumbnail))) {
 		if (cover != nullptr) DestroyWindow(cover);
-		setCloaked(hwnd, !in);
-		return;
+		return false;
 	}
 	SetLayeredWindowAttributes(cover, COVER_KEY, 255, LWA_COLORKEY);
 	BOOL noTransitions = TRUE;
@@ -593,13 +595,7 @@ void WindowPop::start(HWND hwnd, bool in) {
 	    sizeof(noTransitions)
 	);
 
-	RECT source {
-	    bounds.left - raw.left,
-	    bounds.top - raw.top,
-	    bounds.right - raw.left,
-	    bounds.bottom - raw.top
-	};
-	auto apply = [thumbnail, source, frame](double progress, bool in) {
+	auto apply = [thumbnail, sourceRect, frame](double progress, bool in) {
 		auto eased = ease(progress);
 		auto scale =
 		    in ? POP_IN_SCALE + (1.0 - POP_IN_SCALE) * eased : 1.0 - (1.0 - POP_OUT_SCALE) * eased;
@@ -611,7 +607,7 @@ void WindowPop::start(HWND hwnd, bool in) {
 		DWM_THUMBNAIL_PROPERTIES props {};
 		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 		              | DWM_TNP_SOURCECLIENTAREAONLY;
-		props.rcSource = source;
+		props.rcSource = sourceRect;
 		props.rcDestination = {
 		    static_cast<LONG>(std::lround(left)),
 		    static_cast<LONG>(std::lround(top)),
@@ -625,7 +621,7 @@ void WindowPop::start(HWND hwnd, bool in) {
 	};
 
 	apply(0, in);
-	auto* above = GetWindow(hwnd, GW_HWNDPREV);
+	auto* above = GetWindow(below, GW_HWNDPREV);
 	SetWindowPos(
 	    cover,
 	    above != nullptr ? above : HWND_TOP,
@@ -636,13 +632,12 @@ void WindowPop::start(HWND hwnd, bool in) {
 	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
 	);
 	ShowWindow(cover, SW_SHOWNOACTIVATE);
-	// The thumbnail takes the window's place in the same frame it hides.
-	setCloaked(hwnd, true);
+	if (shown) shown();
 	DwmFlush();
 
 	// A short animation on its own thread, on the compositor clock; the cover
-	// and the cloak are released back on the thread that owns them.
-	std::thread([hwnd, cover, thumbnail, apply, in]() {
+	// is released back on the thread that owns it.
+	std::thread([cover, thumbnail, apply, in, done = std::move(done)]() {
 		auto duration = in ? POP_IN_MS : POP_OUT_MS;
 		auto start = std::chrono::steady_clock::now();
 		auto period = compositorRefreshMs();
@@ -665,14 +660,74 @@ void WindowPop::start(HWND hwnd, bool in) {
 		}
 		QMetaObject::invokeMethod(
 		    QCoreApplication::instance(),
-		    [hwnd, cover, thumbnail, in]() {
-			    if (in && IsWindow(hwnd)) setCloaked(hwnd, false);
+		    [cover, thumbnail, done]() {
+			    if (done) done();
 			    DwmUnregisterThumbnail(thumbnail);
 			    DestroyWindow(cover);
 		    },
 		    Qt::QueuedConnection
 		);
 	}).detach();
+	return true;
+}
+
+} // namespace
+
+void WindowPop::start(HWND hwnd, bool in) {
+	RECT raw {};
+	RECT bounds {};
+	if (!IsWindow(hwnd) || !GetWindowRect(hwnd, &raw)
+	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	{
+		setCloaked(hwnd, false);
+		return;
+	}
+	auto frame =
+	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+	RECT source {
+	    bounds.left - raw.left,
+	    bounds.top - raw.top,
+	    bounds.right - raw.left,
+	    bounds.bottom - raw.top
+	};
+	// The thumbnail takes the window's place in the same frame it hides.
+	auto popped = popCover(
+	    hwnd,
+	    frame,
+	    source,
+	    hwnd,
+	    in,
+	    [hwnd]() { setCloaked(hwnd, true); },
+	    [hwnd, in]() {
+		    if (in && IsWindow(hwnd)) setCloaked(hwnd, false);
+	    }
+	);
+	if (!popped) setCloaked(hwnd, !in);
+}
+
+bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
+	RECT bounds {};
+	if (!IsWindow(hwnd) || IsIconic(hwnd)
+	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	{
+		return false;
+	}
+	auto frame =
+	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+	// A still of it as it looks now: the app is gone a moment later.
+	auto* still = snapshotOf(frame);
+	if (still == nullptr) return false;
+	auto popped = popCover(
+	    still,
+	    frame,
+	    RECT {0, 0, frame.width(), frame.height()},
+	    hwnd,
+	    false,
+	    close,
+	    [still]() { DestroyWindow(still); }
+	);
+	if (!popped) DestroyWindow(still);
+	return popped;
 }
 
 } // namespace qs::windows

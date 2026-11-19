@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include <atomic>
 #include <chrono>
@@ -104,6 +105,9 @@ public:
 	static int popOut(HWND hwnd);
 	// Starts the pop-in of a window cloaked by popIn.
 	static void start(HWND hwnd, bool in);
+	// end-4's windowsOut for an app window: a still of it pops out over it while
+	// `close` closes it. False if it couldn't, and then `close` hasn't run.
+	static bool closeOut(HWND hwnd, const std::function<void()>& close);
 };
 
 } // namespace qs::windows
