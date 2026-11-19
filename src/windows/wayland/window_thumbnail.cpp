@@ -1,4 +1,5 @@
 #include "window_thumbnail.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -165,6 +166,7 @@ void WindowThumbnail::unregister() {
 	this->mSource = nullptr;
 	this->mApplied = {};
 	this->mSourcePixels = {};
+	this->mSourceFrame = {};
 }
 
 void WindowThumbnail::sync() {
@@ -179,7 +181,22 @@ void WindowThumbnail::sync() {
 		this->setSourceSize(QSize());
 		return;
 	}
+	// DWM reports the size of the visible frame, but rcSource counts from the
+	// window's corner, invisible resize borders included: offset by them, or the
+	// thumbnail shows a transparent strip and loses as much on the other side.
+	RECT frame {0, 0, source.cx, source.cy};
+	RECT bounds {};
+	RECT visible {};
+	if (!IsIconic(this->mSource) && GetWindowRect(this->mSource, &bounds)
+	    && SUCCEEDED(DwmGetWindowAttribute(this->mSource, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))))
+	{
+		auto left = std::max(LONG(0), visible.left - bounds.left);
+		auto top = std::max(LONG(0), visible.top - bounds.top);
+		frame = {left, top, left + source.cx, top + source.cy};
+	}
+
 	this->mSourcePixels = source;
+	this->mSourceFrame = frame;
 	this->setSourceSize(QSize(static_cast<int>(source.cx), static_cast<int>(source.cy)));
 }
 
@@ -229,11 +246,12 @@ void WindowThumbnail::place() {
 
 		auto sx = static_cast<qreal>(source.cx) / rect.width();
 		auto sy = static_cast<qreal>(source.cy) / rect.height();
+		auto frame = this->mSourceFrame;
 		props.rcSource = {
-		    rounded((shown.left() - rect.left()) * sx),
-		    rounded((shown.top() - rect.top()) * sy),
-		    rounded((shown.right() - rect.left()) * sx),
-		    rounded((shown.bottom() - rect.top()) * sy),
+		    frame.left + rounded((shown.left() - rect.left()) * sx),
+		    frame.top + rounded((shown.top() - rect.top()) * sy),
+		    frame.left + rounded((shown.right() - rect.left()) * sx),
+		    frame.top + rounded((shown.bottom() - rect.top()) * sy),
 		};
 	}
 

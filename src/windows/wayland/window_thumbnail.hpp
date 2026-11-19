@@ -71,6 +71,7 @@ private:
 	QMetaObject::Connection mFrameConnection;
 	QMetaObject::Connection mPlaceConnection;
 	SIZE mSourcePixels {};
+	RECT mSourceFrame {}; // the visible frame within the source, without the invisible resize borders
 	DWM_THUMBNAIL_PROPERTIES mApplied {};
 	bool mCompleted = false;
 };
