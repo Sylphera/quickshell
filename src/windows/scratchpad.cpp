@@ -859,8 +859,23 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 		this->entries.removeAt(i);
 	}
 	this->prune();
-	if (this->mShown && this->entries.isEmpty()) this->setShown(false);
-	else this->relayout();
+	if (this->mShown && this->entries.isEmpty()) {
+		this->setShown(false);
+		return;
+	}
+	this->relayout();
+	if (!this->mShown) return;
+
+	// Closing a window in special hands focus to another one there, as in
+	// Hyprland. Windows hands it to a window behind special instead, which read
+	// as leaving special and hid it while it still had windows.
+	this->shownAt = GetTickCount64();
+	QTimer::singleShot(0, this, [this]() {
+		if (!this->mShown || this->entries.isEmpty()) return;
+		auto* active = WindowTracker::instance()->activeWindow();
+		if (active != nullptr && this->contains(active)) return;
+		forceForegroundWindow(this->entries.last().hwnd);
+	});
 }
 
 void Scratchpad::onActiveWindowChanged() {
