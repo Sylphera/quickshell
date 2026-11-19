@@ -391,6 +391,12 @@ QSet<QString> scanOffDisplayProcesses() {
 	return found;
 }
 
+bool isChromium(HWND hwnd) {
+	wchar_t cls[64] {};
+	GetClassNameW(hwnd, cls, 64);
+	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
+}
+
 bool heavyWindow(const TrackedWindow* window) {
 	static const QStringList names = {
 	    QStringLiteral("zen.exe"),
@@ -754,6 +760,10 @@ void DesktopSlide::addDesktop(qsizetype desktop, bool capture) {
 			auto known = this->snapshots.constFind(hwnd);
 			snapshot =
 			    known != this->snapshots.constEnd() && IsWindow(known->host) && !known->frame.isEmpty();
+			// Only a browser needs a copy that no longer fits (it paints nothing
+			// while hidden). Anything else, a game gone fullscreen say, slides
+			// live rather than as an old picture stretched to its new size.
+			if (snapshot && known->frame.size() != frame.size() && !isChromium(hwnd)) snapshot = false;
 		}
 		if (snapshot) {
 			const auto& copy = this->snapshots.value(hwnd);

@@ -120,6 +120,11 @@ public:
 	bool centerColumn(TrackedWindow* window);
 	bool toggleFit(TrackedWindow* window);
 	bool toggleFullWidth(TrackedWindow* window);
+	// Hyprland's fullscreen, without touching the window's frame or styles: a
+	// tiled window's tile becomes the whole monitor, a floating one is moved to
+	// cover it and back. False if it can't (minimized, maximized, elevated).
+	bool toggleFullscreen(TrackedWindow* window);
+	void updateShellFullscreen();
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
 	void edgeDrag(const QPoint& delta);
@@ -204,6 +209,9 @@ private:
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
+		bool fullscreen = false;
+		// Where a floating window was before it went fullscreen (raw rect).
+		QRect fullscreenRestore;
 	};
 
 	bool start();

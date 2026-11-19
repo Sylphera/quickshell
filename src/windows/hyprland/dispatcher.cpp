@@ -652,7 +652,11 @@ void Dispatcher::fullscreen(TrackedWindow* window, int mode) {
 	if (window == nullptr) return;
 
 	if (mode != 1) {
-		window->setFullscreen(!window->fullscreen());
+		// Inside tiling, without touching the window's styles: stripping its
+		// frame broke it for good when the shell restarted mid-fullscreen.
+		auto* tiling = TilingManager::active();
+		if (tiling != nullptr && tiling->toggleFullscreen(window)) return;
+		window->setMaximized(!window->maximized());
 		return;
 	}
 

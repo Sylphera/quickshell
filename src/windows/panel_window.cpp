@@ -362,12 +362,22 @@ public:
 	}
 
 	[[nodiscard]] bool fullscreenAppActive() const { return this->mFullscreenApp; }
+	[[nodiscard]] bool shellFullscreen() const { return this->mShellFullscreen; }
 	[[nodiscard]] const QList<WinPanelWindow*>& panels() const { return this->mPanels; }
 
 	void setFullscreenAppActive(bool active) {
 		if (active == this->mFullscreenApp) return;
 		this->mFullscreenApp = active;
+		this->restackTop();
+	}
 
+	void setShellFullscreen(bool active) {
+		if (active == this->mShellFullscreen) return;
+		this->mShellFullscreen = active;
+		this->restackTop();
+	}
+
+	void restackTop() {
 		for (auto* panel: this->mPanels) {
 			if (panel->bLayer == PanelLayer::Top) panel->updateLayer();
 		}
@@ -376,6 +386,7 @@ public:
 private:
 	QList<WinPanelWindow*> mPanels;
 	bool mFullscreenApp = false;
+	bool mShellFullscreen = false;
 };
 
 bool WinProxiedWindow::event(QEvent* event) {
@@ -981,8 +992,11 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Background:
 	case PanelLayer::Bottom: insertAfter = HWND_BOTTOM; break;
 	case PanelLayer::Top:
-		insertAfter = WinPanelStack::instance()->fullscreenAppActive() && !gCoverActive ? HWND_BOTTOM
-		                                                                                  : HWND_TOPMOST;
+	{
+		auto* stack = WinPanelStack::instance();
+		auto behind = (stack->fullscreenAppActive() && !gCoverActive) || stack->shellFullscreen();
+		insertAfter = behind ? HWND_BOTTOM : HWND_TOPMOST;
+	}
 		break;
 	case PanelLayer::Overlay: insertAfter = HWND_TOPMOST; break;
 	}
@@ -1005,6 +1019,8 @@ QList<HWND> WinPanelWindow::aboveWindowHandles() {
 }
 
 void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }
+
+void WinPanelWindow::setShellFullscreen(bool active) { WinPanelStack::instance()->setShellFullscreen(active); }
 
 QList<HWND> WinPanelWindow::raiseDemoted() {
 	QList<HWND> raised;

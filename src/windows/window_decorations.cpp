@@ -312,6 +312,11 @@ void DecorationManager::apply(TrackedWindow* window) {
 	auto mode = supported ? this->borderMode() : BorderMode::System;
 	auto color = active ? this->mActiveColor : this->mInactiveColor;
 	if (mode == BorderMode::Colors && !color.isValid()) mode = BorderMode::System;
+	// A window covering its monitor (fullscreen) gets neither a border nor
+	// rounded corners, as Windows does for maximized ones: they left gaps of
+	// wallpaper in the screen's corners.
+	auto covering = supported && window->fullscreen();
+	if (covering) mode = BorderMode::None;
 
 	if (!tinyRoundedTile && mode != BorderMode::System) {
 		auto value = mode == BorderMode::None ? DWMWA_COLOR_NONE : colorRef(color);
@@ -325,6 +330,7 @@ void DecorationManager::apply(TrackedWindow* window) {
 	}
 
 	auto preference = supported ? this->cornerPreference() : DWORD(DWMWCP_DEFAULT);
+	if (covering) preference = DWMWCP_DONOTROUND;
 	if (!tinyRoundedTile && preference != DWMWCP_DEFAULT) {
 		if ((!state.corner || state.preference != preference) && setCorner(hwnd, preference)) {
 			state.corner = true;
@@ -411,7 +417,9 @@ void DecorationManager::watch(TrackedWindow* window) {
 	this->watched.insert(
 	    window,
 	    {QObject::connect(window, &TrackedWindow::rectChanged, this, reapply),
-	     QObject::connect(window, &TrackedWindow::fullscreenChanged, this, reapply)}
+	     QObject::connect(window, &TrackedWindow::fullscreenChanged, this, [this, window]() {
+		     if (this->running) this->apply(window);
+	     })}
 	);
 }
 

@@ -27,6 +27,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "panel_window.hpp"
 #include "scratchpad.hpp"
 #include "super_drag.hpp"
 #include "tiling_target.hpp"
@@ -243,6 +244,25 @@ bool hasSystemCaption(HWND hwnd) {
 	POINT origin {client.left, client.top};
 	if (!ClientToScreen(hwnd, &origin)) return false;
 	return origin.y - window.top >= SYSTEM_CAPTION_MIN;
+}
+
+// Where a fullscreen window's frame goes: one pixel past each edge of the
+// monitor (the border line stays inside the frame even with no border color),
+// and with a system title bar, that bar above the top edge so the app's own
+// content fills the screen. Apps that draw their title bar keep it on screen.
+QRect fullscreenFrame(HWND hwnd, const QRect& monitor) {
+	auto frame = monitor.adjusted(-1, -1, 1, 1);
+	if (!hasSystemCaption(hwnd)) return frame;
+	RECT bounds {};
+	POINT origin {0, 0};
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))
+	    || !ClientToScreen(hwnd, &origin))
+	{
+		return frame;
+	}
+	auto caption = origin.y - bounds.top;
+	if (caption > 0) frame.setTop(frame.top() - caption);
+	return frame;
 }
 
 QPoint cursorPos() {
@@ -748,6 +768,9 @@ bool TilingManager::start() {
 	    this,
 	    &TilingManager::onMoveSizeEnded
 	));
+	c.append(QObject::connect(this->desktops, &VirtualDesktops::shownChanged, this, [this]() {
+		this->updateShellFullscreen();
+	}));
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::desktopsChanged, this, [this]() {
 		this->markAll();
 	}));
@@ -1066,6 +1089,7 @@ void TilingManager::sync() {
 	for (auto& [key, layout]: this->layouts) {
 		if (layouts.contains(layout.get())) this->apply(layout.get());
 	}
+	this->updateShellFullscreen();
 }
 
 void TilingManager::syncWindow(TrackedWindow* window) {
@@ -1249,7 +1273,11 @@ void TilingManager::apply(Layout* layout) {
 		if (parked) restore = clampInto(scroll->visibleBox(id).adjusted(in, in, -in, -in), rects.work);
 		this->markOffscreen(m, parked, restore);
 
-		this->place(m, this->tileRect(layout, window));
+		auto tile = this->tileRect(layout, window);
+		// Fullscreen covers the monitor, and the shell's bar and dock step
+		// behind it (updateShellFullscreen).
+		if (m.fullscreen) tile = fullscreenFrame(window->hwnd(), rects.monitor);
+		this->place(m, tile);
 	}
 }
 
@@ -2546,6 +2574,55 @@ bool TilingManager::toggleFullWidth(TrackedWindow* window) {
 	scroll->toggleFullWidth(idOf(window));
 	this->settle(layout);
 	return true;
+}
+
+bool TilingManager::toggleFullscreen(TrackedWindow* window) {
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end()) return false;
+	auto& m = iter->second;
+	auto* hwnd = window->hwnd();
+
+	if (!m.fullscreen) {
+		auto tiled = m.layout != nullptr && this->stateOf(m) == State::Tiled;
+		if (!tiled) {
+			// A floating window (a game with a fixed size, say) is moved to cover
+			// its monitor, and back where it was afterwards.
+			if (m.elevated || window->minimized() || window->maximized()) return false;
+			auto rects = monitorRects(monitorForScreen(window->screen()));
+			RECT raw {};
+			if (!rects.valid || !GetWindowRect(hwnd, &raw)) return false;
+			m.fullscreenRestore = QRect(QPoint(raw.left, raw.top), QPoint(raw.right - 1, raw.bottom - 1));
+			setFrame(hwnd, fullscreenFrame(hwnd, rects.monitor));
+		}
+	} else if (!m.fullscreenRestore.isNull()) {
+		setRawRect(hwnd, m.fullscreenRestore);
+		m.fullscreenRestore = QRect();
+	}
+
+	m.fullscreen = !m.fullscreen;
+	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
+	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen");
+	// No rounded corners or border on the whole screen, as for a maximized
+	// window: they left gaps of wallpaper in its corners.
+	DWORD corners = m.fullscreen ? DWMWCP_DONOTROUND : DWMWCP_DEFAULT;
+	DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+	COLORREF border = m.fullscreen ? DWMWA_COLOR_NONE : DWMWA_COLOR_DEFAULT;
+	DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+	if (m.layout != nullptr) this->markLayout(m.layout);
+	if (m.fullscreen) window->activate();
+	this->updateShellFullscreen();
+	return true;
+}
+
+// The bar and the dock step behind a fullscreen window on the desktop on
+// screen, as Hyprland's top layer does, from the start of a slide to it.
+void TilingManager::updateShellFullscreen() {
+	auto shown = this->desktops != nullptr ? this->desktops->shownIndex() : -1;
+	auto any = false;
+	for (auto& [window, m]: this->managed) {
+		if (m.fullscreen && window->desktop() == shown && !window->minimized()) any = true;
+	}
+	WinPanelWindow::setShellFullscreen(any);
 }
 
 bool TilingManager::toggleSplit(TrackedWindow* window) {
