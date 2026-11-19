@@ -8,9 +8,11 @@
 
 #include <shellapi.h>
 
+#include <qcoreapplication.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qrect.h>
+#include <qtimer.h>
 #include <qtypes.h>
 
 #include "util.hpp"
@@ -173,11 +175,36 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 
 	auto granted = toQRect(data.rc);
 
-	if (this->mEdge != edge || this->mReserved != granted) {
+	// Explorer recomputes the work area now and then (as the shell hides its
+	// taskbar at startup, say) and may leave this bar's space out; the same
+	// place granted again must then be set again. Only then: setting it
+	// notifies the shell's other appbars, which would answer in kind.
+	auto workLost = false;
+	MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
+	if (GetMonitorInfoW(MonitorFromRect(&data.rc, MONITOR_DEFAULTTONEAREST), &info)) {
+		RECT overlap {};
+		workLost = IntersectRect(&overlap, &info.rcWork, &data.rc) != FALSE;
+	}
+
+	if (this->mEdge != edge || this->mReserved != granted || workLost) {
 		SHAppBarMessage(ABM_SETPOS, &data);
 		this->mEdge = edge;
 		this->mReserved = toQRect(data.rc);
 		qCDebug(logAppBar) << "Reserved" << this->mReserved << "on edge" << edge << "for" << hwnd;
+
+		// Explorer can recompute the work area right after, without a word to
+		// appbars (hiding its taskbar as the shell starts does): look again.
+		for (auto delay: {1500, 5000}) {
+			QTimer::singleShot(delay, QCoreApplication::instance(), [hwnd, data]() mutable {
+				if (!IsWindow(hwnd)) return;
+				MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
+				if (!GetMonitorInfoW(MonitorFromRect(&data.rc, MONITOR_DEFAULTTONEAREST), &info)) return;
+				RECT overlap {};
+				if (!IntersectRect(&overlap, &info.rcWork, &data.rc)) return;
+				SHAppBarMessage(ABM_SETPOS, &data);
+				qCInfo(logAppBar) << "Work area had lost the space of" << hwnd << "; set it again";
+			});
+		}
 	}
 
 	this->mMonitor = monitor;
