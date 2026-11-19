@@ -21,6 +21,8 @@ public:
 	Q_INVOKABLE static bool isAccessibleDir(const QString& path);
 
 	Q_INVOKABLE static QStringList listDir(const QString& path);
+	// The folders in `path`, by name.
+	Q_INVOKABLE static QStringList listDirs(const QString& path);
 
 	Q_INVOKABLE static QString findExecutable(const QString& name);
 

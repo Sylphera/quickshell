@@ -48,6 +48,10 @@ QStringList FsUtils::listDir(const QString& path) {
 	return QDir(path).entryList(QDir::Files, QDir::Name);
 }
 
+QStringList FsUtils::listDirs(const QString& path) {
+	return QDir(path).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+}
+
 QString FsUtils::findExecutable(const QString& name) {
 	if (name.isEmpty()) return QString();
 
