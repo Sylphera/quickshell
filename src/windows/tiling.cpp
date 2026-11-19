@@ -836,6 +836,15 @@ void TilingManager::manage(TrackedWindow* window) {
 		                   << "belongs to a more privileged process; it floats.";
 	}
 
+	// end-4 ignores apps' maximize requests (suppress_event = "maximize") so a
+	// restored window state doesn't override tiling: a window that opens
+	// maximized, as Settings does when it was left so, is restored and tiled.
+	if (!m.elevated && startup::settled() && window->maximized() && !window->minimized()) {
+		qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
+		                   << "opened maximized; restoring it to tile it.";
+		ShowWindowAsync(window->hwnd(), SW_RESTORE);
+	}
+
 	auto mark = [this, window]() { this->markWindow(window); };
 	QObject::connect(window, &TrackedWindow::minimizedChanged, this, mark);
 	QObject::connect(window, &TrackedWindow::maximizedChanged, this, mark);
