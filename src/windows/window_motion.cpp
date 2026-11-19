@@ -6,6 +6,8 @@
 #include <thread>
 
 #include <qcoreapplication.h>
+#include <qpointer.h>
+#include <qtimer.h>
 
 #include "desktop_slide.hpp"
 
@@ -139,7 +141,8 @@ bool popCover(
     HWND below,
     bool in,
     std::function<void()> shown,
-    std::function<void()> done
+    std::function<void()> done,
+    int lingerMs = 0
 ) {
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
@@ -222,7 +225,7 @@ bool popCover(
 
 	// A short animation on its own thread, on the compositor clock; the cover
 	// is released back on the thread that owns it.
-	std::thread([cover, thumbnail, apply, in, done = std::move(done)]() {
+	std::thread([cover, thumbnail, apply, in, lingerMs, done = std::move(done)]() {
 		auto duration = in ? POP_IN_MS : POP_OUT_MS;
 		auto start = std::chrono::steady_clock::now();
 		auto period = compositorRefreshMs();
@@ -245,10 +248,14 @@ bool popCover(
 		}
 		QMetaObject::invokeMethod(
 		    QCoreApplication::instance(),
-		    [cover, thumbnail, done]() {
+		    [cover, thumbnail, done, lingerMs]() {
 			    if (done) done();
-			    DwmUnregisterThumbnail(thumbnail);
-			    DestroyWindow(cover);
+			    // Over a window that just moved into place, the cover stays a
+			    // moment, until the window is there.
+			    QTimer::singleShot(lingerMs, QCoreApplication::instance(), [cover, thumbnail]() {
+				    DwmUnregisterThumbnail(thumbnail);
+				    DestroyWindow(cover);
+			    });
 		    },
 		    Qt::QueuedConnection
 		);
@@ -313,6 +320,58 @@ bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
 	);
 	if (!popped) DestroyWindow(still);
 	return popped;
+}
+
+namespace {
+// How long a new window may take to reach its tile's size before popping in
+// anyway, and how long the cover stays once the window is in place.
+constexpr int SIZE_WAIT_MS = 300;
+constexpr int SIZE_POLL_MS = 16;
+constexpr int LAND_LINGER_MS = 60;
+
+QRect frameOf(HWND hwnd, RECT* raw = nullptr) {
+	RECT bounds {};
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)
+	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	{
+		return {};
+	}
+	if (raw != nullptr) *raw = rect;
+	return {bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top};
+}
+
+void popInNow(HWND hwnd, const QRect& frame, const std::function<void()>& land) {
+	RECT raw {};
+	auto current = frameOf(hwnd, &raw);
+	if (current.isEmpty()) {
+		land();
+		return;
+	}
+	auto left = current.left() - raw.left;
+	auto top = current.top() - raw.top;
+	RECT source {left, top, left + current.width(), top + current.height()};
+	auto popped = popCover(hwnd, frame, source, nullptr, true, nullptr, land, LAND_LINGER_MS);
+	if (!popped) land();
+}
+} // namespace
+
+void WindowPop::popInAt(HWND hwnd, const QRect& frame, const std::function<void()>& land) {
+	// The app may still be at the size it opened with: popping that in blew its
+	// content up. Wait (briefly) for it to take its tile's size first.
+	auto* timer = new QTimer(QCoreApplication::instance());
+	auto started = std::chrono::steady_clock::now();
+	timer->setInterval(SIZE_POLL_MS);
+	QObject::connect(timer, &QTimer::timeout, [timer, hwnd, frame, land, started]() {
+		auto waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+		auto current = frameOf(hwnd);
+		if (IsWindow(hwnd) && current.size() != frame.size() && waited < SIZE_WAIT_MS) return;
+		timer->stop();
+		timer->deleteLater();
+		if (!IsWindow(hwnd)) return;
+		popInNow(hwnd, frame, land);
+	});
+	timer->start();
 }
 
 } // namespace qs::windows

@@ -211,6 +211,8 @@ private:
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
+		// Opened after the shell started and not placed yet.
+		bool fresh = false;
 		// Where a floating window was before it went fullscreen (raw rect).
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
@@ -243,6 +245,7 @@ private:
 	void apply(Layout* layout);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
+	bool popIn(Managed& m, const QRect& tile);
 	void updateTinyCorners(Managed& m, const QRect& frame);
 	void restoreTinyCorners(Managed& m);
 	void reassertTinyDecorations();

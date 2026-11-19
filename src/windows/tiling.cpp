@@ -9,6 +9,8 @@
 #include <memory>
 #include <utility>
 
+#include <qpointer.h>
+
 #include <qcoreapplication.h>
 #include <qdatetime.h>
 #include <qfileinfo.h>
@@ -35,6 +37,7 @@
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
+#include "window_motion.hpp"
 #include "window_tracker.hpp"
 
 #include <dwmapi.h>
@@ -869,6 +872,7 @@ void TilingManager::manage(TrackedWindow* window) {
 	}
 
 	this->restoreLeftFullscreen(window);
+	m.fresh = startup::settled();
 
 	auto mark = [this, window]() { this->markWindow(window); };
 	QObject::connect(window, &TrackedWindow::minimizedChanged, this, mark);
@@ -1284,6 +1288,8 @@ void TilingManager::apply(Layout* layout) {
 		// Fullscreen covers the monitor, and the shell's bar and dock step
 		// behind it (updateShellFullscreen).
 		if (m.fullscreen) tile = fullscreenFrame(window->hwnd(), rects.monitor);
+		auto fresh = std::exchange(m.fresh, false);
+		if (fresh && m.target.isNull() && !m.fullscreen && this->popIn(m, tile)) continue;
 		this->place(m, tile);
 	}
 }
@@ -2622,6 +2628,52 @@ void setFullscreenLook(HWND hwnd, bool fullscreen) {
 }
 
 } // namespace
+
+namespace {
+// Where a new window waits to pop in: past the right edge of the screens, at
+// its tile's size, with one column of its invisible resize borders still on
+// screen. Resized off every screen, Chromium lays itself out without them and
+// loses its rounded corners and border; that column shows nothing.
+QRect waitingFrame(HWND hwnd, const QRect& tile) {
+	auto right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	auto parked = QRect(QPoint(right + 100, tile.top()), tile.size());
+	RECT raw {};
+	RECT frame {};
+	if (GetWindowRect(hwnd, &raw)
+	    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))
+	    && frame.left - raw.left > 1)
+	{
+		parked.moveLeft(right - 1 + (frame.left - raw.left));
+	}
+	return parked;
+}
+} // namespace
+
+// end-4's windowsIn, for the first window of an empty desktop only: no other
+// window moves then, so it can pop in cleanly. It waits off screen at its
+// tile's size while a live thumbnail of it pops in there.
+bool TilingManager::popIn(Managed& m, const QRect& tile) {
+	auto* window = m.window;
+	auto* hwnd = window->hwnd();
+	auto current = this->desktops->currentIndex();
+	if (this->desktops->shownIndex() != current || window->desktop() != current) return false;
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd) || Scratchpad::holds(window)) return false;
+	for (auto& [other, om]: this->managed) {
+		if (other == window || other->minimized() || Scratchpad::holds(other)) continue;
+		if (other->desktop() == window->desktop()) return false;
+	}
+
+	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId() << "pops in";
+	this->place(m, waitingFrame(hwnd, tile));
+	auto target = QPointer<TrackedWindow>(window);
+	WindowPop::popInAt(hwnd, tile, [this, target, tile]() {
+		if (!target) return;
+		auto found = this->managed.find(target.data());
+		if (found == this->managed.end()) return;
+		this->place(found->second, tile);
+	});
+	return true;
+}
 
 // Put back a window a previous shell left fullscreen.
 void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {

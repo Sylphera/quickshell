@@ -2,6 +2,7 @@
 #include <functional>
 
 #include <dwmapi.h>
+#include <qrect.h>
 #include <qt_windows.h>
 
 namespace qs::windows {
@@ -21,6 +22,10 @@ public:
 	// end-4's windowsOut for an app window: a still of it pops out over it while
 	// `close` closes it. False if it couldn't, and then `close` hasn't run.
 	static bool closeOut(HWND hwnd, const std::function<void()>& close);
+	// end-4's windowsIn for an app window waiting off screen at the size of
+	// `frame`: a live thumbnail of it pops in at `frame`, then `land` puts the
+	// window there.
+	static void popInAt(HWND hwnd, const QRect& frame, const std::function<void()>& land);
 };
 
 } // namespace qs::windows
