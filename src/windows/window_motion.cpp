@@ -36,6 +36,67 @@ double ease(double x) {
 	return bezierAt(CURVE_Y1, CURVE_Y2, (lo + hi) / 2);
 }
 
+// A still of what is on screen in `frame`, in a window of its own off screen.
+HWND snapshotOf(const QRect& frame) {
+	auto width = frame.width();
+	auto height = frame.height();
+	if (width <= 0 || height <= 0) return nullptr;
+
+	static const auto* className = []() {
+		WNDCLASSW wc {};
+		wc.lpfnWndProc = DefWindowProcW;
+		wc.hInstance = GetModuleHandleW(nullptr);
+		wc.lpszClassName = L"QuickshellMotionSnapshot";
+		RegisterClassW(&wc);
+		return L"QuickshellMotionSnapshot";
+	}();
+	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) - width - 100;
+	auto* host = CreateWindowExW(
+	    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+	    className,
+	    L"",
+	    WS_POPUP,
+	    x,
+	    frame.top(),
+	    width,
+	    height,
+	    nullptr,
+	    nullptr,
+	    GetModuleHandleW(nullptr),
+	    nullptr
+	);
+	if (host == nullptr) return nullptr;
+
+	auto* screen = GetDC(nullptr);
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	void* raw = nullptr;
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
+	auto* dc = CreateCompatibleDC(screen);
+	auto* old = SelectObject(dc, bitmap);
+	BitBlt(dc, 0, 0, width, height, screen, frame.x(), frame.y(), SRCCOPY);
+	GdiFlush();
+	auto* bits = static_cast<quint32*>(raw);
+	for (qsizetype i = 0; i < static_cast<qsizetype>(width) * height; i++)
+		bits[i] |= 0xff000000; // NOLINT
+
+	POINT origin {x, frame.top()};
+	SIZE size {width, height};
+	POINT source {0, 0};
+	BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+	UpdateLayeredWindow(host, screen, &origin, &size, dc, &source, 0, &blend, ULW_ALPHA);
+	SelectObject(dc, old);
+	DeleteDC(dc);
+	DeleteObject(bitmap);
+	ReleaseDC(nullptr, screen);
+	ShowWindow(host, SW_SHOWNOACTIVATE);
+	return host;
+}
+
 } // namespace
 
 namespace {
@@ -227,6 +288,31 @@ void WindowPop::start(HWND hwnd, bool in) {
 	    }
 	);
 	if (!popped) setCloaked(hwnd, !in);
+}
+
+bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
+	RECT bounds {};
+	if (!IsWindow(hwnd) || IsIconic(hwnd)
+	    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+	{
+		return false;
+	}
+	auto frame =
+	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+	// A still of it as it looks now: the app is gone a moment later.
+	auto* still = snapshotOf(frame);
+	if (still == nullptr) return false;
+	auto popped = popCover(
+	    still,
+	    frame,
+	    RECT {0, 0, frame.width(), frame.height()},
+	    hwnd,
+	    false,
+	    close,
+	    [still]() { DestroyWindow(still); }
+	);
+	if (!popped) DestroyWindow(still);
+	return popped;
 }
 
 } // namespace qs::windows

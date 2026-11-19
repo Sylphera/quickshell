@@ -24,6 +24,7 @@
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_manager.hpp"
+#include "../window_motion.hpp"
 #include "../window_tracker.hpp"
 #include "connection.hpp"
 #include "workspace.hpp"
@@ -222,10 +223,31 @@ void warpToFocusChange(WindowTracker* tracker) {
 
 // killactive closes the focused window, as in Hyprland, or the shell's own
 // window in front when no app window is focused.
+// Whether nothing else shows on the window's desktop (or in special with it).
+bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
+	auto special = Scratchpad::holds(window);
+	for (auto* other: tracker->windows()) {
+		if (other == window || other->minimized()) continue;
+		if (Scratchpad::holds(other) != special) continue;
+		if (!special && other->desktop() != window->desktop()) continue;
+		return false;
+	}
+	return true;
+}
+
 void closeFocused(WindowTracker* tracker) {
 	// The window focused now: Windows doesn't always announce handing focus on.
 	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
+		// end-4's windowsOut, for the last window of a desktop only: no other
+		// window moves then, so a still of it can pop out cleanly.
+		if (aloneOnDesktop(tracker, window)) {
+			auto target = QPointer<TrackedWindow>(window);
+			auto close = [target]() {
+				if (target) target->close();
+			};
+			if (WindowPop::closeOut(window->hwnd(), close)) return;
+		}
 		window->close();
 	} else {
 		closeShellWindow(GetForegroundWindow());
