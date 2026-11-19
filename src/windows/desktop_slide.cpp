@@ -32,6 +32,8 @@ namespace qs::windows {
 
 namespace {
 
+Q_LOGGING_CATEGORY(logSlide, "quickshell.windows.slide", QtWarningMsg);
+
 constexpr auto* OVERLAY_CLASS = L"QuickshellDesktopSlide";
 constexpr double SLIDE_MS = 700;
 constexpr int WORKSPACE_GAP = 50;
@@ -808,15 +810,55 @@ void DesktopSlide::placeUnderPanels() {
 		if (hwnd == this->overlay || !ownWindow(hwnd) || !topmost(hwnd)) continue;
 		lowest = hwnd;
 	}
+	// Into the topmost band first: placed after a panel alone, the cover could
+	// land among plain windows, and the desktop it leaves then stayed over the
+	// slide until the real switch.
 	SetWindowPos(
 	    this->overlay,
-	    lowest != nullptr ? lowest : HWND_TOPMOST,
+	    HWND_TOPMOST,
 	    0,
 	    0,
 	    0,
 	    0,
 	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
 	);
+	if (lowest != nullptr) {
+		SetWindowPos(
+		    this->overlay,
+		    lowest,
+		    0,
+		    0,
+		    0,
+		    0,
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+		);
+	}
+
+	// Whether anything that isn't the shell's sits over the cover now.
+	wchar_t lowestClass[64] {};
+	if (lowest != nullptr) GetClassNameW(lowest, lowestClass, 64);
+	HWND over = nullptr;
+	for (auto* hwnd = GetWindow(this->overlay, GW_HWNDPREV); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDPREV)) {
+		if (IsWindowVisible(hwnd) && !ownWindow(hwnd) && !topmost(hwnd)) {
+			over = hwnd;
+			break;
+		}
+	}
+	qCDebug(logSlide) << "Cover placed under" << lowest << QString::fromWCharArray(lowestClass) << "topmost"
+	                  << topmost(this->overlay) << "plain window over it" << over;
+	// That panel had dropped among plain windows itself: then over everything.
+	if (over != nullptr) {
+		SetWindowPos(
+		    this->overlay,
+		    HWND_TOPMOST,
+		    0,
+		    0,
+		    0,
+		    0,
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+		);
+		qCInfo(logSlide) << "A window was over the cover; put the cover over everything";
+	}
 }
 
 void DesktopSlide::prepareBackdrop() {
