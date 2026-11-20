@@ -1,4 +1,5 @@
 #include "window_motion.hpp"
+#include "util.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -27,6 +28,10 @@ constexpr double TAKEOFF_TIMEOUT_MS = 0;
 constexpr int REPAINT_SETTLE_MS = 33;
 // How long a still stays over a window that landed, while it paints again.
 constexpr int LINGER_MS = 400;
+// How long a live picture stays over its landed window: about a frame.
+constexpr int LAND_HANDOFF_MS = 20;
+// How long the scene stays once everything has landed.
+constexpr int COVER_LINGER_MS = 0;
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
@@ -200,7 +205,7 @@ bool WindowMotion::ensureCover() {
 	    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1)
 	);
 	this->cover = CreateWindowExW(
-	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
 	    COVER_CLASS,
 	    L"",
 	    WS_POPUP,
@@ -366,16 +371,83 @@ int depthOf(HWND hwnd) {
 // Called with the mutex held. DWM draws thumbnails in the order they were
 // registered, which was the order the windows set off in: one sliding over
 // another that sits above it. They are registered again, the deepest first.
-void WindowMotion::restack() {
-	std::ranges::stable_sort(this->entries, [](const Entry& a, const Entry& b) { return a.depth > b.depth; });
-	for (auto& entry: this->entries) {
-		HTHUMBNAIL thumbnail = nullptr;
-		auto* source = entry.snapshot != nullptr ? entry.snapshot : entry.hwnd;
-		if (FAILED(DwmRegisterThumbnail(this->cover, source, &thumbnail))) continue;
-		DwmUnregisterThumbnail(entry.thumbnail);
-		entry.thumbnail = thumbnail;
-		this->layout(entry, entry.progress);
+void WindowMotion::placeCoverUnderPanels() {
+	HWND lowest = nullptr;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (hwnd == this->cover || !IsWindowVisible(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
+		if (isOwnProcessWindow(hwnd)) lowest = hwnd;
 	}
+	// Straight under the lowest panel: put at the very top first, a cover
+	// already on screen hid the bar and the panels for a frame.
+	constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+	SetWindowPos(this->cover, lowest != nullptr ? lowest : HWND_TOPMOST, 0, 0, 0, 0, flags);
+}
+
+// Called with the mutex held. The cover draws the whole scene while windows
+// move: the wallpaper and every visible window, bottom to top as they are
+// stacked, the moving ones sliding and the rest where they are. The real
+// windows meanwhile sit in their new tiles under it, on screen, so they paint
+// at their new size (moved off screen, apps stopped painting: grey Chromium,
+// an empty File Explorer). New thumbnails go up before the old ones go, so
+// no frame is left without one.
+void WindowMotion::restack() {
+	QList<HWND> order;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT))
+		order.prepend(hwnd);
+	auto screen = this->coverRect.adjusted(0, -1, 0, 0);
+	QHash<HWND, HTHUMBNAIL> scene;
+	QList<HTHUMBNAIL> old;
+	for (auto& entry: this->entries) old.append(entry.thumbnail);
+	for (auto* thumbnail: std::as_const(this->scene)) old.append(thumbnail);
+
+	for (auto* hwnd: order) {
+		auto entry = std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+		if (entry != this->entries.end()) {
+			HTHUMBNAIL thumbnail = nullptr;
+			auto* source = entry->snapshot != nullptr ? entry->snapshot : entry->hwnd;
+			if (FAILED(DwmRegisterThumbnail(this->cover, source, &thumbnail))) continue;
+			entry->thumbnail = thumbnail;
+			this->layout(*entry, entry->progress);
+			continue;
+		}
+		if (hwnd == this->cover || !IsWindowVisible(hwnd) || IsIconic(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0 && isOwnProcessWindow(hwnd)) continue;
+		DWORD cloaked = 0;
+		if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0)
+			continue;
+		wchar_t cls[64] {};
+		GetClassNameW(hwnd, cls, 64);
+		if (wcsncmp(cls, L"QuickshellMotion", 16) == 0 || wcscmp(cls, L"QuickshellWindowPop") == 0) continue;
+		RECT raw {};
+		if (!GetWindowRect(hwnd, &raw)) continue;
+		// The visible frame, without the invisible resize borders: drawn into
+		// the raw rect, the picture was stretched past its tile.
+		RECT bounds {};
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
+		auto rect = QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1));
+		if (rect.isEmpty() || !rect.intersects(screen)) continue;
+		HTHUMBNAIL thumbnail = nullptr;
+		if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
+		auto dest = rect.translated(-this->coverRect.topLeft());
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
+		              | DWM_TNP_SOURCECLIENTAREAONLY;
+		props.rcSource = {
+		    bounds.left - raw.left,
+		    bounds.top - raw.top,
+		    bounds.right - raw.left,
+		    bounds.bottom - raw.top
+		};
+		props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+		props.opacity = 255;
+		props.fVisible = TRUE;
+		props.fSourceClientAreaOnly = FALSE;
+		DwmUpdateThumbnailProperties(thumbnail, &props);
+		scene.insert(hwnd, thumbnail);
+	}
+	for (auto* thumbnail: old) DwmUnregisterThumbnail(thumbnail);
+	this->scene = scene;
 }
 
 bool WindowMotion::begin(
@@ -394,8 +466,27 @@ bool WindowMotion::begin(
 
 	HWND snapshot = !pop && still ? snapshotOf(from) : nullptr;
 	auto snapshotSize = from.size();
+	// With the scene on screen it isn't built again: registered anew from
+	// the bottom, the new wallpaper went over every old window thumbnail and
+	// the whole layout vanished for a frame. A window already in the scene
+	// starts moving with its own thumbnail, in its place in the stack.
+	auto onScreen = IsWindowVisible(this->cover) != FALSE;
 	HTHUMBNAIL thumbnail = nullptr;
-	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
+	if (onScreen && snapshot == nullptr) {
+		auto lock = std::lock_guard(this->mutex);
+		thumbnail = this->scene.take(hwnd);
+		// Landed a moment ago, its picture still over it: that one moves on,
+		// or a second picture of it was made and the first stayed behind.
+		if (thumbnail == nullptr) {
+			auto pending = std::ranges::find_if(this->handoff, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+			if (pending != this->handoff.end()) {
+				thumbnail = pending->thumbnail;
+				this->handoff.erase(pending);
+			}
+		}
+	}
+	if (thumbnail == nullptr
+	    && FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
 	{
 		if (snapshot != nullptr) DestroyWindow(snapshot);
 		if (this->entries.isEmpty()) this->closeCover();
@@ -421,13 +512,21 @@ bool WindowMotion::begin(
 		    .depth = depthOf(hwnd),
 		});
 		this->layout(this->entries.last(), 0);
-		if (this->entries.size() > 1) this->restack();
+		if (!onScreen) this->restack();
 	}
 
-	// The thumbnail is in the window's place before the window leaves it, in
-	// the same compositor frame.
-	this->placeCover(hwnd);
-	if (!IsWindowVisible(this->cover)) ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+	// The scene is up, over every app window and under the shell's panels,
+	// before the window moves to its new tile. In the topmost band: placed
+	// only over the plain windows, the moving ones rose over it as tiling
+	// placed them, and slid behind a frozen scene.
+	if (!IsWindowVisible(this->cover)) {
+		this->placeCoverUnderPanels();
+		ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+	}
+	// The scene reaches the screen before any window moves under it: DWM can
+	// show the wallpaper a frame before the windows' thumbnails, and a window
+	// that had already left its place was gone for that frame.
+	DwmFlush();
 	moveTo(hwnd, parked, false);
 
 	if (!this->worker.joinable()) {
@@ -545,13 +644,6 @@ void WindowMotion::onFrameDone() {
 		auto lock = std::lock_guard(this->mutex);
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (!this->entries[i].done) continue;
-			// A still stays up over its window while that paints (see lingering).
-			if (this->entries[i].snapshot == nullptr) {
-				DWM_THUMBNAIL_PROPERTIES props {};
-				props.dwFlags = DWM_TNP_VISIBLE;
-				props.fVisible = FALSE;
-				DwmUpdateThumbnailProperties(this->entries[i].thumbnail, &props);
-			}
 			landing.append(this->entries.takeAt(i));
 		}
 		empty = this->entries.isEmpty();
@@ -559,12 +651,65 @@ void WindowMotion::onFrameDone() {
 	for (const auto& entry: landing) {
 		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
 	}
+	// The windows are in place before their pictures go, a frame later:
+	// hiding the picture first left a frame with neither (the window
+	// vanished for a frame). The picture ends at 1:1 over its window.
+	QList<Entry> live;
 	for (const auto& entry: landing) {
 		// An app that stopped painting while away comes back blank for a few
 		// frames: its still stays over it, in place, until it has painted.
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
-		else release(entry);
+		else live.append(entry);
 		emit this->landed(entry.hwnd, entry.to);
+	}
+	if (!live.isEmpty()) {
+		this->landingLive += static_cast<int>(live.size());
+		{
+			auto lock = std::lock_guard(this->mutex);
+			this->handoff.append(live);
+		}
+		QTimer::singleShot(LAND_HANDOFF_MS, this, [this, live]() {
+			QList<Entry> done;
+			{
+				// Others still moving: the cover stays, so its picture stays too,
+				// at rest in its tile with the rest of the scene. A window that
+				// set off again meanwhile took its picture along already.
+				auto lock = std::lock_guard(this->mutex);
+				for (const auto& entry: live) {
+					auto pending = std::ranges::find_if(this->handoff, [&entry](const Entry& e) {
+						return e.hwnd == entry.hwnd && e.thumbnail == entry.thumbnail;
+					});
+					if (pending == this->handoff.end()) continue;
+					this->handoff.erase(pending);
+					if (!this->entries.isEmpty() && entry.snapshot == nullptr && !this->scene.contains(entry.hwnd)) {
+						this->scene.insert(entry.hwnd, entry.thumbnail);
+					} else {
+						done.append(entry);
+					}
+				}
+			}
+			this->landingLive -= static_cast<int>(live.size());
+			auto lock = std::unique_lock(this->mutex);
+			auto none = this->entries.isEmpty();
+			lock.unlock();
+			// The cover goes before the moved windows' pictures: dropped first,
+			// the wallpaper showed in their place for a frame, all at once.
+			if (none && this->lingering.isEmpty() && this->landingLive == 0) {
+				// The scene stays a little after everything landed, pictures at
+				// 1:1 over their windows: closed at once, a window that had moved
+				// under it hadn't painted there yet and the wallpaper showed in
+				// its place for a frame.
+				QTimer::singleShot(COVER_LINGER_MS, this, [this, done]() {
+					auto lock = std::unique_lock(this->mutex);
+					auto still = this->entries.isEmpty();
+					lock.unlock();
+					if (still && this->lingering.isEmpty() && this->landingLive == 0) this->closeCover();
+					for (const auto& entry: done) release(entry);
+				});
+				return;
+			}
+			for (const auto& entry: done) release(entry);
+		});
 	}
 	if (!this->lingering.isEmpty()) {
 		QTimer::singleShot(LINGER_MS, this, [this]() {
@@ -573,10 +718,10 @@ void WindowMotion::onFrameDone() {
 			auto lock = std::unique_lock(this->mutex);
 			auto none = this->entries.isEmpty();
 			lock.unlock();
-			if (none) this->closeCover();
+			if (none && this->landingLive == 0) this->closeCover();
 		});
 	}
-	if (empty && this->lingering.isEmpty()) this->closeCover();
+	if (empty && this->lingering.isEmpty() && this->landingLive == 0) this->closeCover();
 }
 
 void WindowMotion::release(const Entry& entry) {
@@ -594,6 +739,8 @@ void WindowMotion::closeCover() {
 		for (const auto& entry: this->lingering) release(entry);
 		this->lingering.clear();
 	}
+	for (auto* thumbnail: std::as_const(this->scene)) DwmUnregisterThumbnail(thumbnail);
+	this->scene.clear();
 	if (this->cover != nullptr) {
 		DestroyWindow(this->cover);
 		this->cover = nullptr;

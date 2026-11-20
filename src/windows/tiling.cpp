@@ -486,7 +486,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
 		auto parked = chromium && this->barMoving
 		                ? (m.target.isNull() ? parkedFrame(tile) : m.target)
-		                : QRect(parkedFrame(tile, chromium).topLeft(), tile.size());
+		                : tile;
 		if (*found != tile) {
 			*found = tile;
 			motion->retarget(m.window->hwnd(), tile, parked);
@@ -523,7 +523,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		// itself into the new work area and jumps back.
 		auto still = chromium && this->barMoving;
 		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size())
-		                    : QRect(parkedFrame(tile, chromium).topLeft(), tile.size());
+		                    : tile;
 		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);

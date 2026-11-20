@@ -7,6 +7,7 @@
 #include <thread>
 
 #include <dwmapi.h>
+#include <qhash.h>
 #include <qlist.h>
 #include <qobject.h>
 #include <qrect.h>
@@ -89,6 +90,7 @@ private:
 	void onFrameDone();
 	void layout(Entry& entry, double progress);
 	void restack();
+	void placeCoverUnderPanels();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
 	static void release(const Entry& entry);
 
@@ -97,6 +99,12 @@ private:
 	QList<Entry> entries;
 	// Stills that stay over their landed window until it has painted again.
 	QList<Entry> lingering;
+	// Thumbnails of the windows that stay put, drawn with the moving ones.
+	QHash<HWND, HTHUMBNAIL> scene;
+	// Live pictures still over their landed windows.
+	int landingLive = 0;
+	// Those pictures, until they join the scene or go.
+	QList<Entry> handoff;
 	mutable std::mutex mutex;
 	std::thread worker;
 	std::atomic<bool> stop = false;
