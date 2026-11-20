@@ -40,6 +40,21 @@ constexpr int LAND_HANDOFF_MS = 20;
 // How long the scene stays once everything has landed.
 constexpr int COVER_LINGER_MS = 0;
 
+void cropThumbnail(DWM_THUMBNAIL_PROPERTIES& props) {
+	auto& source = props.rcSource;
+	auto& destination = props.rcDestination;
+	auto width = std::min(source.right - source.left, destination.right - destination.left);
+	auto height = std::min(source.bottom - source.top, destination.bottom - destination.top);
+	if (width <= 0 || height <= 0) {
+		props.fVisible = FALSE;
+		return;
+	}
+	source.right = source.left + width;
+	source.bottom = source.top + height;
+	destination.right = destination.left + width;
+	destination.bottom = destination.top + height;
+}
+
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
 	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
@@ -321,9 +336,9 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		entry.current = entry.to;
 		opacity = 255.0 * eased;
 	}
+	auto crop = entry.callerPlaces && !entry.pop;
+	auto dest = shown.translated(-this->coverRect.topLeft());
 	if (entry.snapshot != nullptr) {
-		// The whole still, stretched to where the window is on its way.
-		auto dest = shown.translated(-this->coverRect.topLeft());
 		auto part = entry.snapshotSize;
 		DWM_THUMBNAIL_PROPERTIES props {};
 		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
@@ -332,6 +347,7 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 		props.fVisible = TRUE;
+		if (crop) cropThumbnail(props);
 		DwmUpdateThumbnailProperties(entry.thumbnail, &props);
 		return;
 	}
@@ -344,25 +360,21 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	{
 		return;
 	}
-	auto dest = shown.translated(-this->coverRect.topLeft());
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 	              | DWM_TNP_SOURCECLIENTAREAONLY;
-	auto frame = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
-	// The whole window, stretched to where it is on its way, as Hyprland
-	// stretches its buffer: it has its new size already, so it lands at 1:1.
-	auto part = frame;
 	props.rcSource = {
 	    bounds.left - raw.left,
 	    bounds.top - raw.top,
-	    bounds.left - raw.left + part.width(),
-	    bounds.top - raw.top + part.height()
+	    bounds.right - raw.left,
+	    bounds.bottom - raw.top
 	};
 	props.rcDestination =
 	    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
+	if (crop) cropThumbnail(props);
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
 
 	if (entry.holdThumbnail != nullptr) {
@@ -371,9 +383,11 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		hold.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
 		auto off = entry.holdOffset;
 		hold.rcSource = {off.x(), off.y(), off.x() + entry.snapshotSize.width(), off.y() + entry.snapshotSize.height()};
-		hold.rcDestination = props.rcDestination;
+		hold.rcDestination =
+		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		hold.opacity = 255;
 		hold.fVisible = since < HOLD_MS ? TRUE : FALSE;
+		if (crop) cropThumbnail(hold);
 		DwmUpdateThumbnailProperties(entry.holdThumbnail, &hold);
 	}
 }
@@ -447,6 +461,7 @@ bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail, const QR
 	props.opacity = alpha;
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
+	if (tile.isValid()) cropThumbnail(props);
 	if (FAILED(DwmUpdateThumbnailProperties(thumbnail, &props))) return false;
 	if (tile == frame) this->sceneTiles.remove(hwnd);
 	return true;
