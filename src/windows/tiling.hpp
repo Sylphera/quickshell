@@ -221,6 +221,8 @@ private:
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
+		// Just let go by a Super+drag: slides into its tile from there.
+		bool dropped = false;
 		// Popping in: it waits off screen until the pop lands.
 		bool popping = false;
 		// Where a floating window was before it went fullscreen (raw rect).

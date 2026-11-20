@@ -502,7 +502,9 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		}
 	}
 	m.fresh = false;
-	if (this->canAnimate(m, layout, tile)) {
+	auto animate = this->canAnimate(m, layout, tile);
+	m.dropped = false;
+	if (animate) {
 		// Where it grows, the app takes its new size right away and its live
 		// thumbnail shows it while it travels. Chromium only paints while some of
 		// it is on screen, so it waits with a column showing. While the bar
@@ -540,6 +542,10 @@ bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
 	// Special too: closing or moving a window there slides the others, as on a
 	// normal desktop.
+	// A window dropped by a Super+drag slides from where it was let go into
+	// its tile, as in Hyprland. Left out, it stayed where it was dropped: the
+	// scene drawn for the other window's slide had it there.
+	if (m.dropped) return this->mAnimateMoves && !m.offscreen && IsWindowVisible(m.window->hwnd()) && !IsIconic(m.window->hwnd());
 	if (!this->mAnimateMoves || m.target.isNull() || tile == m.target) return false;
 	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
 
@@ -2262,15 +2268,18 @@ void TilingManager::onMoveSizeStarted(TrackedWindow* window) {
 
 	this->dragging = window;
 	this->unverified.remove(window);
+	qCWarning(logTiling).noquote() << "[drag] started" << window->addressHex();
 }
 
 void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
+	qCWarning(logTiling).noquote() << "[drag] ended" << window->addressHex() << "dragging" << (this->dragging ? this->dragging->addressHex() : QString("none"));
 	if (window != this->dragging) return;
 	this->dragging = nullptr;
 
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 	auto& m = iter->second;
+	m.dropped = true;
 
 	auto* hwnd = window->hwnd();
 	if (m.layout == nullptr || m.target.isNull() || IsIconic(hwnd) || IsZoomed(hwnd)) {
@@ -2296,6 +2305,7 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 		return;
 	}
 
+	qCWarning(logTiling).noquote() << "[drag] frame" << frame << "target" << target << "moved" << moved << "resized" << resized;
 	if (!resized || moved == 4) {
 		this->drop(m, cursorPos());
 		return;
@@ -2331,6 +2341,7 @@ void TilingManager::drop(Managed& m, const QPoint& cursor) {
 			if (this->stateOf(o) != State::Tiled) continue;
 
 			if (layout->tree->box(id).contains(cursor)) {
+				qCWarning(logTiling).noquote() << "[drag] swap with" << other->addressHex();
 				this->swapWindows(m, o);
 				return;
 			}
@@ -2345,6 +2356,9 @@ void TilingManager::drop(Managed& m, const QPoint& cursor) {
 		return;
 	}
 
+	// Dropped on its own tile (or on nothing): back to its tile, at once.
+	// Only marking the layout left it where it was dropped now and then.
+	qCWarning(logTiling).noquote() << "[drag] back to its tile" << m.window->addressHex();
 	this->markLayout(from);
 }
 
