@@ -1480,7 +1480,8 @@ void TilingManager::apply(Layout* layout) {
 		}
 	}
 
-	QSet<HWND> placed;
+	QHash<HWND, QRect> placed;
+	QList<TrackedWindow*> pop;
 	for (auto id: ids) {
 		auto* window = this->windowOf(id);
 		if (window == nullptr || window == this->dragging) continue;
@@ -1502,18 +1503,27 @@ void TilingManager::apply(Layout* layout) {
 		}
 		if (m.popping) continue;
 		if (placeOpeningBurst) {
-			this->moving.remove(window);
+			if (m.target.isNull() && this->canPop(m, layout, tile)) pop.append(window);
+			if (this->moving.contains(window)) this->moving[window] = tile;
 			m.fresh = false;
 			m.dropped = false;
 			this->place(m, tile);
-			placed.insert(window->hwnd());
+			placed.insert(window->hwnd(), tile);
 		} else if (m.fullscreen) {
 			this->place(m, tile);
 		} else {
 			this->placeMoving(m, layout, tile);
 		}
 	}
-	if (!placed.isEmpty()) WindowMotion::instance()->finishForLayoutChange(placed);
+	if (placed.isEmpty()) return;
+	auto* motion = WindowMotion::instance();
+	for (auto* window: pop) {
+		auto tile = placed.value(window->hwnd());
+		if (motion->begin(window->hwnd(), tile, tile, tile, true, false, true)) {
+			this->moving.insert(window, tile);
+		}
+	}
+	motion->alignLayout(placed);
 }
 
 QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const {

@@ -414,15 +414,16 @@ void WindowMotion::updateHoles() {
 	SetWindowRgn(this->cover, region, FALSE); // the window owns the region now
 }
 
-bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail) {
+bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail, const QRect& tile) {
 	RECT raw {};
 	if (!GetWindowRect(hwnd, &raw)) return false;
 	// The visible frame, without the invisible resize borders: drawn into
 	// the raw rect, the picture was stretched past its tile.
 	RECT bounds {};
 	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
-	auto rect = QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1));
-	if (rect.isEmpty() || !rect.intersects(this->coverRect.adjusted(0, -1, 0, 0))) return false;
+	auto frame = QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1));
+	const auto& rect = tile.isValid() ? tile : frame;
+	if (frame.isEmpty() || !rect.intersects(this->coverRect.adjusted(0, -1, 0, 0))) return false;
 	auto dest = rect.translated(-this->coverRect.topLeft());
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
@@ -446,7 +447,8 @@ bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail) {
 	props.opacity = alpha;
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
-	DwmUpdateThumbnailProperties(thumbnail, &props);
+	if (FAILED(DwmUpdateThumbnailProperties(thumbnail, &props))) return false;
+	if (tile == frame) this->sceneTiles.remove(hwnd);
 	return true;
 }
 
@@ -596,6 +598,7 @@ bool WindowMotion::begin(
 
 	{
 		auto lock = std::lock_guard(this->mutex);
+		this->sceneTiles.remove(hwnd);
 		this->entries.append(Entry {
 		    .hwnd = hwnd,
 		    .thumbnail = thumbnail,
@@ -652,6 +655,7 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		    std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
 		if (entry == this->entries.end()) return;
 		if (entry->to == to && !entry->done) return;
+		this->sceneTiles.remove(hwnd);
 		entry->parked = parked;
 		entry->retargeted = true;
 		if (entry->pop && !entry->done) {
@@ -679,25 +683,57 @@ void WindowMotion::cancel(HWND hwnd) {
 			release(this->entries[i]);
 			this->entries.removeAt(i);
 		}
+		this->sceneTiles.remove(hwnd);
 		empty = this->entries.isEmpty();
 	}
 	if (empty) this->closeCover();
 }
 
-void WindowMotion::finishForLayoutChange(const QSet<HWND>& placed) {
+void WindowMotion::alignLayout(const QHash<HWND, QRect>& tiles) {
 	if (this->cover == nullptr) return;
 
-	QList<Entry> pending;
+	QList<HWND> settled;
 	{
 		auto lock = std::lock_guard(this->mutex);
-		pending = this->entries;
+		for (auto it = tiles.cbegin(); it != tiles.cend(); ++it) {
+			auto hwnd = it.key();
+			const auto& tile = it.value();
+			this->sceneTiles.insert(hwnd, tile);
+			auto entry = std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+			if (entry != this->entries.end() && entry->pop) {
+				entry->from = tile;
+				entry->to = tile;
+				entry->parked = tile;
+				this->layout(*entry, entry->progress);
+				continue;
+			}
+
+			if (entry != this->entries.end()) {
+				if (entry->snapshot == nullptr) {
+					this->scene.insert(hwnd, entry->thumbnail);
+					releaseHold(*entry);
+				} else {
+					release(*entry);
+				}
+				this->entries.erase(entry);
+				settled.append(hwnd);
+			}
+
+			auto pending = std::ranges::find_if(this->handoff, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+			if (pending != this->handoff.end()) {
+				this->placeSceneThumbnail(hwnd, pending->thumbnail, tile);
+				continue;
+			}
+
+			auto thumbnail = this->scene.value(hwnd);
+			if (thumbnail == nullptr) {
+				if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
+				this->scene.insert(hwnd, thumbnail);
+			}
+			this->placeSceneThumbnail(hwnd, thumbnail, tile);
+		}
 	}
-	for (const auto& entry: pending) {
-		if (placed.contains(entry.hwnd) || !IsWindow(entry.hwnd)) continue;
-		if (!entry.callerPlaces) moveTo(entry.hwnd, entry.to, false);
-		emit this->landed(entry.hwnd, entry.to);
-	}
-	this->closeCover();
+	for (auto hwnd: settled) emit this->landed(hwnd, tiles.value(hwnd));
 }
 
 void WindowMotion::run() {
@@ -760,7 +796,14 @@ void WindowMotion::run() {
 			// the bar sliding with Super+J stayed behind, or went.
 			auto lock = std::lock_guard(this->mutex);
 			for (auto it = this->scene.constBegin(); it != this->scene.constEnd(); ++it) {
-				if (isOwnProcessWindow(it.key())) this->placeSceneThumbnail(it.key(), it.value());
+				auto tile = this->sceneTiles.value(it.key());
+				if (tile.isValid() || isOwnProcessWindow(it.key())) {
+					this->placeSceneThumbnail(it.key(), it.value(), tile);
+				}
+			}
+			for (const auto& entry: this->handoff) {
+				auto tile = this->sceneTiles.value(entry.hwnd);
+				if (tile.isValid()) this->placeSceneThumbnail(entry.hwnd, entry.thumbnail, tile);
 			}
 		}
 		if (finished && !this->donePending.exchange(true)) {
@@ -892,6 +935,7 @@ void WindowMotion::closeCover() {
 		this->lingering.clear();
 		for (const auto& entry: this->handoff) release(entry);
 		this->handoff.clear();
+		this->sceneTiles.clear();
 	}
 	for (auto* thumbnail: std::as_const(this->scene)) DwmUnregisterThumbnail(thumbnail);
 	this->scene.clear();
