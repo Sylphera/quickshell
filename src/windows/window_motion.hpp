@@ -79,6 +79,12 @@ private:
 		// thumbnails are stacked as the windows were.
 		int depth = 0;
 		double progress = 0;
+		// How it looked when it set off, shown over its live picture for its
+		// first frames: resized under the cover, the app presented an empty
+		// frame before it repainted, and a translucent one went see-through.
+		HWND hold = nullptr;
+		HTHUMBNAIL holdThumbnail = nullptr;
+		std::chrono::steady_clock::time_point holdStart;
 		// Given a new target on its way: resized while nearly all off screen.
 		bool retargeted = false;
 	};
@@ -91,8 +97,10 @@ private:
 	void layout(Entry& entry, double progress);
 	void restack();
 	void placeCoverUnderPanels();
+	void updateHoles();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
 	static void release(const Entry& entry);
+	static void releaseHold(const Entry& entry);
 
 	HWND cover = nullptr;
 	QRect coverRect;

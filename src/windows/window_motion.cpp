@@ -16,6 +16,8 @@ namespace {
 
 // end-4: windowsMove, speed 3 (300 ms), emphasizedDecel.
 constexpr double MOVE_MS = 300;
+// How long a resized window shows how it looked before its live picture.
+constexpr double HOLD_MS = 50;
 constexpr double CURVE_X1 = 0.05;
 constexpr double CURVE_Y1 = 0.7;
 constexpr double CURVE_X2 = 0.1;
@@ -357,6 +359,17 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+
+	if (entry.holdThumbnail != nullptr) {
+		auto since = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.holdStart).count();
+		DWM_THUMBNAIL_PROPERTIES hold {};
+		hold.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		hold.rcSource = {0, 0, entry.snapshotSize.width(), entry.snapshotSize.height()};
+		hold.rcDestination = props.rcDestination;
+		hold.opacity = 255;
+		hold.fVisible = since < HOLD_MS ? TRUE : FALSE;
+		DwmUpdateThumbnailProperties(entry.holdThumbnail, &hold);
+	}
 }
 
 namespace {
@@ -371,6 +384,30 @@ int depthOf(HWND hwnd) {
 // Called with the mutex held. DWM draws thumbnails in the order they were
 // registered, which was the order the windows set off in: one sliding over
 // another that sits above it. They are registered again, the deepest first.
+// Called with the mutex held. A window wholly under the cover was taken by
+// Windows for hidden and stopped painting, then showed blank for a frame as
+// the cover went. The cover leaves one pixel of each window uncovered.
+void WindowMotion::updateHoles() {
+	if (this->cover == nullptr) return;
+	auto* region = CreateRectRgn(0, 0, this->coverRect.width(), this->coverRect.height());
+	auto hole = [this, region](const QRect& frame) {
+		if (frame.width() < 24 || frame.height() < 8) return;
+		auto x = frame.left() + 12 - this->coverRect.left();
+		auto y = frame.bottom() - 1 - this->coverRect.top();
+		auto* dot = CreateRectRgn(x, y, x + 1, y + 1);
+		CombineRgn(region, region, dot, RGN_DIFF);
+		DeleteObject(dot);
+	};
+	for (const auto& entry: this->entries) hole(entry.to);
+	for (auto it = this->scene.constBegin(); it != this->scene.constEnd(); ++it) {
+		RECT bounds {};
+		if (SUCCEEDED(DwmGetWindowAttribute(it.key(), DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) {
+			hole(QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1)));
+		}
+	}
+	SetWindowRgn(this->cover, region, FALSE); // the window owns the region now
+}
+
 void WindowMotion::placeCoverUnderPanels() {
 	HWND lowest = nullptr;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
@@ -471,6 +508,8 @@ bool WindowMotion::begin(
 	// the whole layout vanished for a frame. A window already in the scene
 	// starts moving with its own thumbnail, in its place in the stack.
 	auto onScreen = IsWindowVisible(this->cover) != FALSE;
+	// Only a window that changes size gets the empty frame.
+	HWND hold = !pop && snapshot == nullptr && from.size() != to.size() ? snapshotOf(from) : nullptr;
 	HTHUMBNAIL thumbnail = nullptr;
 	if (onScreen && snapshot == nullptr) {
 		auto lock = std::lock_guard(this->mutex);
@@ -481,6 +520,7 @@ bool WindowMotion::begin(
 			auto pending = std::ranges::find_if(this->handoff, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
 			if (pending != this->handoff.end()) {
 				thumbnail = pending->thumbnail;
+				releaseHold(*pending);
 				this->handoff.erase(pending);
 			}
 		}
@@ -510,9 +550,18 @@ bool WindowMotion::begin(
 		    // which a busy app (Chromium repainting after a landing) takes long to.
 		    .waiting = snapshot == nullptr,
 		    .depth = depthOf(hwnd),
+		    .hold = hold,
+		    .holdStart = std::chrono::steady_clock::now(),
 		});
 		this->layout(this->entries.last(), 0);
 		if (!onScreen) this->restack();
+		this->updateHoles();
+		// Registered last, so over its live picture.
+		auto& added = this->entries.last();
+		if (added.hold != nullptr && FAILED(DwmRegisterThumbnail(this->cover, added.hold, &added.holdThumbnail))) {
+			added.holdThumbnail = nullptr;
+		}
+		this->layout(added, 0);
 	}
 
 	// The scene is up, over every app window and under the shell's panels,
@@ -727,6 +776,12 @@ void WindowMotion::onFrameDone() {
 void WindowMotion::release(const Entry& entry) {
 	DwmUnregisterThumbnail(entry.thumbnail);
 	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
+	releaseHold(entry);
+}
+
+void WindowMotion::releaseHold(const Entry& entry) {
+	if (entry.holdThumbnail != nullptr) DwmUnregisterThumbnail(entry.holdThumbnail);
+	if (entry.hold != nullptr) DestroyWindow(entry.hold);
 }
 
 void WindowMotion::closeCover() {
