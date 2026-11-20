@@ -135,6 +135,7 @@ target_link_libraries(quickshell-windows PRIVATE
 	dwmapi
 	gdi32
 	advapi32
+	bcrypt
 	powrprof
 	winmm
 	dxva2

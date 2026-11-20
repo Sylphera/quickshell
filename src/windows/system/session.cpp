@@ -7,6 +7,21 @@
 #include <winbase.h>
 #include <winreg.h>
 
+#include <thread>
+
+#include <bcrypt.h>
+
+#include <userconsentverifierinterop.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Security.Credentials.UI.h>
+
+#include <qbytearray.h>
+#include <qcoreapplication.h>
+#include <qtimer.h>
+#include <qdir.h>
+#include <qfile.h>
+#include <qfileinfo.h>
+#include <qstandardpaths.h>
 #include <qhash.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -40,7 +55,190 @@ bool enablePrivilege(LPCWSTR name) {
 	return ok && GetLastError() == ERROR_SUCCESS;
 }
 
+constexpr ULONGLONG LOCK_PBKDF2_ITERATIONS = 210000;
+constexpr int LOCK_SALT_BYTES = 16;
+constexpr int LOCK_HASH_BYTES = 32;
+
+QString lockPasswordPath() {
+	return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
+	     + QStringLiteral("/illogical-impulse/lock-password");
+}
+
+QByteArray pbkdf2(const QString& password, const QByteArray& salt, ULONGLONG iterations) {
+	BCRYPT_ALG_HANDLE algorithm = nullptr;
+	if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0) {
+		return {};
+	}
+	auto secret = password.toUtf8();
+	QByteArray hash(LOCK_HASH_BYTES, Qt::Uninitialized);
+	auto status = BCryptDeriveKeyPBKDF2(
+	    algorithm,
+	    reinterpret_cast<PUCHAR>(secret.data()), // NOLINT
+	    static_cast<ULONG>(secret.size()),
+	    reinterpret_cast<PUCHAR>(const_cast<char*>(salt.constData())), // NOLINT
+	    static_cast<ULONG>(salt.size()),
+	    iterations,
+	    reinterpret_cast<PUCHAR>(hash.data()), // NOLINT
+	    static_cast<ULONG>(hash.size()),
+	    0
+	);
+	SecureZeroMemory(secret.data(), static_cast<SIZE_T>(secret.size()));
+	BCryptCloseAlgorithmProvider(algorithm, 0);
+	return status == 0 ? hash : QByteArray();
+}
+
+// Windows Hello's prompt can open behind the lock screen, which sits in the
+// topmost band, and only come up after a click. Its window is found as it
+// shows and put over everything, with the keyboard.
+HWND credentialPrompt() {
+	HWND found = nullptr;
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    if (!IsWindowVisible(hwnd)) return TRUE;
+		    DWORD pid = 0;
+		    GetWindowThreadProcessId(hwnd, &pid);
+		    auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		    if (process == nullptr) return TRUE;
+		    wchar_t path[MAX_PATH] {};
+		    DWORD length = MAX_PATH;
+		    auto named = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+		    CloseHandle(process);
+		    if (!named) return TRUE;
+		    auto name = QString::fromWCharArray(path, static_cast<int>(length)).toLower();
+		    if (!name.endsWith(QStringLiteral("credentialuibroker.exe"))) return TRUE;
+		    *reinterpret_cast<HWND*>(param) = hwnd; // NOLINT
+		    return FALSE;
+	    },
+	    reinterpret_cast<LPARAM>(&found)
+	);
+	return found;
+}
+
+void raiseCredentialPrompt(int tries) {
+	if (auto* prompt = credentialPrompt()) {
+		SetWindowPos(prompt, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		SetForegroundWindow(prompt);
+		return;
+	}
+	if (tries <= 0) return;
+	QTimer::singleShot(100, QCoreApplication::instance(), [tries]() { raiseCredentialPrompt(tries - 1); });
+}
+
+bool sameBytes(const QByteArray& a, const QByteArray& b) {
+	if (a.size() != b.size() || a.isEmpty()) return false;
+	unsigned char diff = 0;
+	for (qsizetype i = 0; i < a.size(); i++) diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+	return diff == 0;
+}
+
 } // namespace
+
+bool Session::setLockPassword(const QString& password) {
+	if (password.isEmpty()) return false;
+	QByteArray salt(LOCK_SALT_BYTES, Qt::Uninitialized);
+	if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(salt.data()), LOCK_SALT_BYTES, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) { // NOLINT
+		return false;
+	}
+	auto hash = pbkdf2(password, salt, LOCK_PBKDF2_ITERATIONS);
+	if (hash.isEmpty()) return false;
+	auto path = lockPasswordPath();
+	QDir().mkpath(QFileInfo(path).absolutePath());
+	QFile file(path);
+	if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+	file.write(QByteArrayLiteral("pbkdf2-sha256$") + QByteArray::number(LOCK_PBKDF2_ITERATIONS) + '$' + salt.toHex()
+	           + '$' + hash.toHex());
+	return file.flush();
+}
+
+bool Session::hasLockPassword() { return QFile::exists(lockPasswordPath()); }
+
+void Session::clearLockPassword() { QFile::remove(lockPasswordPath()); }
+
+void Session::verifyLockPassword(const QString& password) {
+	QFile file(lockPasswordPath());
+	if (!file.open(QIODevice::ReadOnly)) {
+		emit this->userVerified(false, 101);
+		return;
+	}
+	auto parts = file.readAll().trimmed().split('$');
+	std::thread([this, password, parts]() {
+		auto verified = false;
+		if (parts.size() == 4 && parts[0] == "pbkdf2-sha256") {
+			auto iterations = parts[1].toULongLong();
+			auto expected = QByteArray::fromHex(parts[3]);
+			verified = iterations > 0 && sameBytes(pbkdf2(password, QByteArray::fromHex(parts[2]), iterations), expected);
+		}
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [this, verified]() { emit this->userVerified(verified, verified ? 0 : 100); },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
+
+void Session::verifyPassword(const QString& password) {
+	auto secret = password.toStdWString();
+	std::thread([this, secret]() mutable {
+		wchar_t user[256] {};
+		DWORD length = 256;
+		auto verified = false;
+		if (GetUserNameW(user, &length)) {
+			HANDLE token = nullptr;
+			verified = LogonUserW(
+			               user,
+			               L".",
+			               secret.c_str(),
+			               LOGON32_LOGON_INTERACTIVE,
+			               LOGON32_PROVIDER_DEFAULT,
+			               &token
+			           )
+			        != FALSE;
+			if (token != nullptr) CloseHandle(token);
+			if (!verified) qCInfo(logSession) << "Password check failed:" << GetLastError();
+		}
+		SecureZeroMemory(secret.data(), secret.size() * sizeof(wchar_t));
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [this, verified]() { emit this->userVerified(verified, verified ? 0 : 100); },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
+
+void Session::verifyUser(const QString& message) {
+	auto* window = GetForegroundWindow();
+	AllowSetForegroundWindow(ASFW_ANY);
+	QTimer::singleShot(150, QCoreApplication::instance(), []() { raiseCredentialPrompt(30); });
+	auto text = message.toStdWString();
+	std::thread([this, window, text]() {
+		using namespace winrt::Windows::Security::Credentials::UI;
+		auto verified = false;
+		auto result = -1;
+		try {
+			winrt::init_apartment(winrt::apartment_type::multi_threaded);
+			auto interop = winrt::get_activation_factory<UserConsentVerifier, IUserConsentVerifierInterop>();
+			winrt::Windows::Foundation::IAsyncOperation<UserConsentVerificationResult> operation {nullptr};
+			winrt::hstring prompt(text);
+			winrt::check_hresult(interop->RequestVerificationForWindowAsync(
+			    window,
+			    static_cast<HSTRING>(winrt::get_abi(prompt)),
+			    winrt::guid_of<decltype(operation)>(),
+			    winrt::put_abi(operation)
+			));
+			auto answer = operation.get();
+			result = static_cast<int>(answer);
+			verified = answer == UserConsentVerificationResult::Verified;
+		} catch (const winrt::hresult_error& e) {
+			qCWarning(logSession) << "Windows Hello verification failed:" << Qt::hex
+			                      << static_cast<quint32>(e.code().value);
+		}
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    [this, verified, result]() { emit this->userVerified(verified, result); },
+		    Qt::QueuedConnection
+		);
+	}).detach();
+}
 
 void Session::lock() {
 	if (!LockWorkStation()) {
