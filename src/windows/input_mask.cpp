@@ -263,6 +263,18 @@ void InputMaskTracker::remove(QWindow* window) {
 	this->updateHookState();
 }
 
+bool InputMaskTracker::acceptsPoint(QWindow* window, QPoint screenPosition) const {
+	for (const auto& entry: this->entries) {
+		if (entry.window != window) continue;
+
+		RECT rect {};
+		POINT point {.x = screenPosition.x(), .y = screenPosition.y()};
+		return GetWindowRect(hwndOf(window), &rect) && PtInRect(&rect, point)
+		    && entry.region.contains(localPoint(point, rect, window->devicePixelRatio()));
+	}
+	return true;
+}
+
 void InputMaskTracker::refresh() {
 	this->publish();
 

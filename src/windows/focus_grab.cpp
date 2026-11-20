@@ -88,7 +88,7 @@ private:
 		for (const auto& grab: grabs) {
 			if (grab.isNull() || !grab->isActive()) continue;
 			if (!notBefore(time, grab->activatedAt())) continue;
-			if (!grab->containsWindow(root)) grab->clear();
+			if (!grab->containsWindow(root, position)) grab->clear();
 		}
 	}
 
@@ -185,14 +185,17 @@ QList<QQuickWindow*> FocusGrab::visibleWindows() const {
 	return windows;
 }
 
-bool FocusGrab::containsWindow(HWND hwnd) const {
+bool FocusGrab::containsWindow(HWND hwnd, std::optional<QPoint> clickPosition) const {
 	if (hwnd == nullptr) return false;
 
-	QList<HWND> listed;
-	for (auto* window: this->visibleWindows()) listed.append(hwndOf(window));
+	const auto windows = this->visibleWindows();
 
 	for (auto* current = hwnd; current != nullptr; current = GetWindow(current, GW_OWNER)) {
-		if (listed.contains(current)) return true;
+		for (auto* window: windows) {
+			if (hwndOf(window) != current) continue;
+			if (current != hwnd || !clickPosition) return true;
+			return InputMaskTracker::instance()->acceptsPoint(window, *clickPosition);
+		}
 	}
 
 	return false;

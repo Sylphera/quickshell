@@ -1,9 +1,12 @@
 #pragma once
 
+#include <optional>
+
 #include <qt_windows.h>
 
 #include <qlist.h>
 #include <qobject.h>
+#include <qpoint.h>
 #include <qqmlintegration.h>
 #include <qqmlparserstatus.h>
 #include <qquickwindow.h>
@@ -35,7 +38,7 @@ public:
 	[[nodiscard]] QObjectList windows() const { return this->windowObjects; }
 	void setWindows(QObjectList windows);
 
-	[[nodiscard]] bool containsWindow(HWND hwnd) const;
+	[[nodiscard]] bool containsWindow(HWND hwnd, std::optional<QPoint> clickPosition = {}) const;
 	[[nodiscard]] DWORD activatedAt() const { return this->mActivatedAt; }
 	void clear();
 

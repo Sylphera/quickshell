@@ -29,6 +29,7 @@ public:
 
 	void setMask(QWindow* window, const QRegion& region);
 	void remove(QWindow* window);
+	[[nodiscard]] bool acceptsPoint(QWindow* window, QPoint screenPosition) const;
 
 	void refresh();
 
