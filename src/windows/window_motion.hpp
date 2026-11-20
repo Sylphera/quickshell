@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -111,8 +112,13 @@ private:
 	bool placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail, const QRect& tile = {});
 	void updateHoles();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
-	static void release(const Entry& entry);
-	static void releaseHold(const Entry& entry);
+	HRESULT updateThumbnail(HTHUMBNAIL thumbnail, HWND source, DWM_THUMBNAIL_PROPERTIES props, bool preserveEdges);
+	void unregisterThumbnail(HTHUMBNAIL thumbnail);
+	void release(const Entry& entry);
+	void releaseHold(const Entry& entry);
+
+	QHash<HTHUMBNAIL, std::array<HTHUMBNAIL, 3>> thumbnailEdges;
+	std::mutex thumbnailMutex;
 
 	HWND cover = nullptr;
 	QRect coverRect;

@@ -55,6 +55,44 @@ void cropThumbnail(DWM_THUMBNAIL_PROPERTIES& props) {
 	destination.bottom = destination.top + height;
 }
 
+struct ThumbnailSlices {
+	std::array<DWM_THUMBNAIL_PROPERTIES, 4> parts {};
+	size_t count = 0;
+};
+
+ThumbnailSlices splitThumbnail(DWM_THUMBNAIL_PROPERTIES props, LONG edge) {
+	const auto source = props.rcSource;
+	cropThumbnail(props);
+
+	ThumbnailSlices slices;
+	if (!props.fVisible) {
+		slices.parts[slices.count++] = props;
+		return slices;
+	}
+
+	auto width = props.rcSource.right - props.rcSource.left;
+	auto height = props.rcSource.bottom - props.rcSource.top;
+	auto right = props.rcSource.right < source.right ? std::min(edge, width / 2) : 0L;
+	auto bottom = props.rcSource.bottom < source.bottom ? std::min(edge, height / 2) : 0L;
+	const auto destination = props.rcDestination;
+	auto rows = bottom == 0 ? 1 : 2;
+	auto columns = right == 0 ? 1 : 2;
+	for (auto y = 0; y < rows; ++y) {
+		for (auto x = 0; x < columns; ++x) {
+			auto partWidth = x == 0 ? width - right : right;
+			auto partHeight = y == 0 ? height - bottom : bottom;
+			auto sourceX = x == 0 ? source.left : source.right - right;
+			auto sourceY = y == 0 ? source.top : source.bottom - bottom;
+			auto destX = x == 0 ? destination.left : destination.right - right;
+			auto destY = y == 0 ? destination.top : destination.bottom - bottom;
+			props.rcSource = {sourceX, sourceY, sourceX + partWidth, sourceY + partHeight};
+			props.rcDestination = {destX, destY, destX + partWidth, destY + partHeight};
+			slices.parts[slices.count++] = props;
+		}
+	}
+	return slices;
+}
+
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
 	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
@@ -347,8 +385,7 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 		props.fVisible = TRUE;
-		if (crop) cropThumbnail(props);
-		DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+		this->updateThumbnail(entry.thumbnail, entry.snapshot, props, crop);
 		return;
 	}
 	RECT raw {};
@@ -374,8 +411,7 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
-	if (crop) cropThumbnail(props);
-	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+	this->updateThumbnail(entry.thumbnail, entry.hwnd, props, crop);
 
 	if (entry.holdThumbnail != nullptr) {
 		auto since = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.holdStart).count();
@@ -387,8 +423,7 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
 		hold.opacity = 255;
 		hold.fVisible = since < HOLD_MS ? TRUE : FALSE;
-		if (crop) cropThumbnail(hold);
-		DwmUpdateThumbnailProperties(entry.holdThumbnail, &hold);
+		this->updateThumbnail(entry.holdThumbnail, entry.hold, hold, crop);
 	}
 }
 
@@ -461,8 +496,7 @@ bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail, const QR
 	props.opacity = alpha;
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
-	if (tile.isValid()) cropThumbnail(props);
-	if (FAILED(DwmUpdateThumbnailProperties(thumbnail, &props))) return false;
+	if (FAILED(this->updateThumbnail(thumbnail, hwnd, props, tile.isValid()))) return false;
 	if (tile == frame) this->sceneTiles.remove(hwnd);
 	return true;
 }
@@ -518,12 +552,12 @@ void WindowMotion::restack() {
 		HTHUMBNAIL thumbnail = nullptr;
 		if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
 		if (!this->placeSceneThumbnail(hwnd, thumbnail)) {
-			DwmUnregisterThumbnail(thumbnail);
+			this->unregisterThumbnail(thumbnail);
 			continue;
 		}
 		scene.insert(hwnd, thumbnail);
 	}
-	for (auto* thumbnail: old) DwmUnregisterThumbnail(thumbnail);
+	for (auto* thumbnail: old) this->unregisterThumbnail(thumbnail);
 	this->scene = scene;
 }
 
@@ -923,15 +957,59 @@ void WindowMotion::onFrameDone() {
 	if (empty && this->lingering.isEmpty() && this->landingLive == 0) this->closeCover();
 }
 
+HRESULT WindowMotion::updateThumbnail(
+    HTHUMBNAIL thumbnail, HWND source, DWM_THUMBNAIL_PROPERTIES props, bool preserveEdges
+) {
+	auto lock = std::lock_guard(this->thumbnailMutex);
+	ThumbnailSlices slices;
+	if (preserveEdges) {
+		auto edge = std::max(16L, static_cast<LONG>(MulDiv(12, GetDpiForWindow(source), 96)));
+		slices = splitThumbnail(props, edge);
+	} else {
+		slices.parts[slices.count++] = props;
+	}
+
+	if (slices.count > 1) {
+		auto& edges = this->thumbnailEdges[thumbnail];
+		for (size_t i = 0; i + 1 < slices.count; ++i) {
+			if (edges[i] == nullptr && FAILED(DwmRegisterThumbnail(this->cover, source, &edges[i]))) {
+				cropThumbnail(props);
+				slices.parts[0] = props;
+				slices.count = 1;
+				break;
+			}
+		}
+	}
+
+	const auto edges = this->thumbnailEdges.value(thumbnail);
+	for (size_t i = 0; i < edges.size(); ++i) {
+		if (edges[i] == nullptr) continue;
+		DWM_THUMBNAIL_PROPERTIES hidden {};
+		hidden.dwFlags = DWM_TNP_VISIBLE;
+		auto active = i + 1 < slices.count;
+		DwmUpdateThumbnailProperties(edges[i], active ? &slices.parts[i + 1] : &hidden);
+	}
+	return DwmUpdateThumbnailProperties(thumbnail, &slices.parts[0]);
+}
+
+void WindowMotion::unregisterThumbnail(HTHUMBNAIL thumbnail) {
+	if (thumbnail == nullptr) return;
+	auto lock = std::lock_guard(this->thumbnailMutex);
+	for (auto* edge: this->thumbnailEdges.take(thumbnail)) {
+		if (edge != nullptr) DwmUnregisterThumbnail(edge);
+	}
+	DwmUnregisterThumbnail(thumbnail);
+}
+
 void WindowMotion::release(const Entry& entry) {
-	DwmUnregisterThumbnail(entry.thumbnail);
+	this->unregisterThumbnail(entry.thumbnail);
 	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
-	releaseHold(entry);
+	this->releaseHold(entry);
 }
 
 void WindowMotion::releaseHold(const Entry& entry) {
-	if (entry.holdThumbnail != nullptr) DwmUnregisterThumbnail(entry.holdThumbnail);
-	if (entry.hold != nullptr) WindowMotion::instance()->dropShot(entry.hold);
+	this->unregisterThumbnail(entry.holdThumbnail);
+	if (entry.hold != nullptr) this->dropShot(entry.hold);
 }
 
 void WindowMotion::closeCover() {
@@ -952,7 +1030,7 @@ void WindowMotion::closeCover() {
 		this->handoff.clear();
 		this->sceneTiles.clear();
 	}
-	for (auto* thumbnail: std::as_const(this->scene)) DwmUnregisterThumbnail(thumbnail);
+	for (auto* thumbnail: std::as_const(this->scene)) this->unregisterThumbnail(thumbnail);
 	this->scene.clear();
 	if (this->cover != nullptr) {
 		DestroyWindow(this->cover);
