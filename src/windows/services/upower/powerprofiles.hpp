@@ -21,6 +21,7 @@ public:
 		PowerSaver = 0,
 		Balanced = 1,
 		Performance = 2,
+		Unknown = 255,
 	};
 	Q_ENUM(Enum);
 
@@ -68,6 +69,7 @@ class PowerProfilesQml: public QObject {
 	QML_SINGLETON;
 	// clang-format off
 	Q_PROPERTY(qs::service::upower::PowerProfile::Enum profile READ default WRITE setProfile NOTIFY profileChanged BINDABLE bindableProfile);
+	Q_PROPERTY(qs::service::upower::PowerProfile::Enum activePlanProfile READ default NOTIFY activePlanProfileChanged BINDABLE bindableActivePlanProfile);
 	Q_PROPERTY(bool hasPerformanceProfile READ default NOTIFY hasPerformanceProfileChanged BINDABLE bindableHasPerformanceProfile);
 	Q_PROPERTY(qs::service::upower::PerformanceDegradationReason::Enum degradationReason READ default NOTIFY degradationReasonChanged BINDABLE bindableDegradationReason);
 	Q_PROPERTY(QList<qs::service::upower::PowerProfileHold> holds READ default NOTIFY holdsChanged BINDABLE bindableHolds);
@@ -79,8 +81,13 @@ public:
 	Q_DISABLE_COPY_MOVE(PowerProfilesQml);
 
 	void setProfile(PowerProfile::Enum profile);
+	Q_INVOKABLE bool cyclePowerPlan();
 
 	[[nodiscard]] QBindable<PowerProfile::Enum> bindableProfile() const { return &this->bProfile; }
+
+	[[nodiscard]] QBindable<PowerProfile::Enum> bindableActivePlanProfile() const {
+		return &this->bActivePlanProfile;
+	}
 
 	[[nodiscard]] QBindable<bool> bindableHasPerformanceProfile() const {
 		return &this->bHasPerformanceProfile;
@@ -96,19 +103,24 @@ public:
 
 signals:
 	void profileChanged();
+	void activePlanProfileChanged();
 	void hasPerformanceProfileChanged();
 	void degradationReasonChanged();
 	void holdsChanged();
 
 private:
+	static ULONG CALLBACK activePlanChanged(void* context, ULONG type, void* setting);
+	bool refreshActivePlan();
+
 	// clang-format off
 	Q_OBJECT_BINDABLE_PROPERTY(PowerProfilesQml, PowerProfile::Enum, bProfile, &PowerProfilesQml::profileChanged);
+	Q_OBJECT_BINDABLE_PROPERTY_WITH_ARGS(PowerProfilesQml, PowerProfile::Enum, bActivePlanProfile, PowerProfile::Unknown, &PowerProfilesQml::activePlanProfileChanged);
 	Q_OBJECT_BINDABLE_PROPERTY(PowerProfilesQml, bool, bHasPerformanceProfile, &PowerProfilesQml::hasPerformanceProfileChanged);
 	Q_OBJECT_BINDABLE_PROPERTY(PowerProfilesQml, PerformanceDegradationReason::Enum, bDegradationReason, &PowerProfilesQml::degradationReasonChanged);
 	Q_OBJECT_BINDABLE_PROPERTY(PowerProfilesQml, QList<PowerProfileHold>, bHolds, &PowerProfilesQml::holdsChanged);
 	// clang-format on
 
-	HPOWERNOTIFY notificationHandle = nullptr;
+	HPOWERNOTIFY activePlanHandle = nullptr;
 	void* effectiveModeHandle = nullptr;
 };
 

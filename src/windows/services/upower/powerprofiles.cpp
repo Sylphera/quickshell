@@ -8,7 +8,7 @@
 #include <qstring.h>
 #include <qt_windows.h>
 
-#include <powersetting.h>
+#include <powrprof.h>
 
 #include "../../../core/logcat.hpp"
 
@@ -53,6 +53,13 @@ PowerProfile::Enum profileFromOverlayGuid(const GUID& guid) {
 	return PowerProfile::Balanced;
 }
 
+PowerProfile::Enum profileFromPlanGuid(const GUID& guid) {
+	if (IsEqualGUID(guid, GUID_MAX_POWER_SAVINGS)) return PowerProfile::PowerSaver;
+	if (IsEqualGUID(guid, GUID_TYPICAL_POWER_SAVINGS)) return PowerProfile::Balanced;
+	if (IsEqualGUID(guid, GUID_MIN_POWER_SAVINGS)) return PowerProfile::Performance;
+	return PowerProfile::Unknown;
+}
+
 GUID overlayGuidFromProfile(PowerProfile::Enum profile) {
 	switch (profile) {
 	case PowerProfile::PowerSaver: return GUID_OVERLAY_BEST_EFFICIENCY;
@@ -73,6 +80,7 @@ QString PowerProfile::toString(PowerProfile::Enum profile) {
 	case PowerProfile::PowerSaver: return QStringLiteral("PowerSaver");
 	case PowerProfile::Balanced: return QStringLiteral("Balanced");
 	case PowerProfile::Performance: return QStringLiteral("Performance");
+	case PowerProfile::Unknown: return QStringLiteral("Unknown");
 	default: return QStringLiteral("Invalid");
 	}
 }
@@ -109,12 +117,62 @@ PowerProfilesQml::PowerProfilesQml(QObject* parent): QObject(parent) {
 		                            << status;
 		this->effectiveModeHandle = nullptr;
 	}
+
+	DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS subscriber {&PowerProfilesQml::activePlanChanged, this};
+	status = PowerSettingRegisterNotification(
+	    &GUID_ACTIVE_POWERSCHEME,
+	    DEVICE_NOTIFY_CALLBACK,
+	    &subscriber,
+	    &this->activePlanHandle
+	);
+	if (status != ERROR_SUCCESS) {
+		qCWarning(logPowerProfiles) << "Active power plan notifications failed:" << status;
+		this->activePlanHandle = nullptr;
+	}
+	this->refreshActivePlan();
 }
 
 PowerProfilesQml::~PowerProfilesQml() {
+	if (this->activePlanHandle != nullptr) {
+		PowerSettingUnregisterNotification(this->activePlanHandle);
+	}
 	if (this->effectiveModeHandle != nullptr) {
 		PowerUnregisterFromEffectivePowerModeNotifications(this->effectiveModeHandle);
 	}
+}
+
+ULONG CALLBACK PowerProfilesQml::activePlanChanged(void* context, ULONG /*type*/, void* /*setting*/) {
+	auto* self = static_cast<PowerProfilesQml*>(context);
+	QMetaObject::invokeMethod(self, [self]() { self->refreshActivePlan(); }, Qt::QueuedConnection);
+	return ERROR_SUCCESS;
+}
+
+bool PowerProfilesQml::refreshActivePlan() {
+	GUID* scheme = nullptr;
+	const auto status = PowerGetActiveScheme(nullptr, &scheme);
+	if (status != ERROR_SUCCESS) {
+		qCWarning(logPowerProfiles) << "PowerGetActiveScheme failed:" << status;
+		return false;
+	}
+
+	const auto profile = profileFromPlanGuid(*scheme);
+	LocalFree(scheme);
+	this->bActivePlanProfile = profile;
+	return true;
+}
+
+bool PowerProfilesQml::cyclePowerPlan() {
+	if (!this->refreshActivePlan()) return false;
+
+	const bool wasPerformance = this->bActivePlanProfile == PowerProfile::Performance;
+	const auto& nextScheme = wasPerformance ? GUID_TYPICAL_POWER_SAVINGS : GUID_MIN_POWER_SAVINGS;
+	const auto status = PowerSetActiveScheme(nullptr, &nextScheme);
+	if (status != ERROR_SUCCESS) {
+		qCWarning(logPowerProfiles) << "PowerSetActiveScheme failed:" << status;
+		return false;
+	}
+
+	return this->refreshActivePlan() && this->bActivePlanProfile == profileFromPlanGuid(nextScheme);
 }
 
 void PowerProfilesQml::refresh() {
