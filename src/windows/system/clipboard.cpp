@@ -320,14 +320,12 @@ ClipboardCapture readClipboard(qint64 id, const QString& dir) {
 	ClipboardCapture capture;
 	capture.entry.id = id;
 
-	if (IsClipboardFormatAvailable(excludeFormat) || IsClipboardFormatAvailable(ignoreFormat)) {
-		return capture;
-	}
-
 	if (!openClipboard(nullptr, READ_ATTEMPTS)) return capture;
 	capture.sequence = GetClipboardSequenceNumber();
 
-	if (optedOutOfHistory(historyFormat)) {
+	if (IsClipboardFormatAvailable(excludeFormat) || IsClipboardFormatAvailable(ignoreFormat)
+	    || optedOutOfHistory(historyFormat))
+	{
 		CloseClipboard();
 		return capture;
 	}
@@ -415,9 +413,15 @@ Clipboard::Clipboard(QObject* parent): QObject(parent) {
 	window->addHandler(WM_CLIPBOARDUPDATE, [self = QPointer(this)](WPARAM /*w*/, LPARAM /*l*/) {
 		if (self) self->onClipboardUpdate();
 	});
+	this->tracking = true;
+	this->refresh();
 }
 
 Clipboard::~Clipboard() { QDir(this->mCacheDir).removeRecursively(); }
+
+void Clipboard::refresh() {
+	if (this->tracking) this->onClipboardUpdate();
+}
 
 QString Clipboard::cacheDir() {
 	QDir().mkpath(this->mCacheDir);

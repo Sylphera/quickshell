@@ -46,6 +46,7 @@ public:
 	Q_DISABLE_COPY_MOVE(Clipboard);
 
 	[[nodiscard]] QBindable<QStringList> bindableEntries() const { return &this->bEntries; }
+	Q_INVOKABLE void refresh();
 
 	Q_INVOKABLE void copy(qint64 id);
 	Q_INVOKABLE void deleteEntry(qint64 id);
@@ -80,6 +81,7 @@ private:
 	qint64 nextId = 1;
 	qint64 suppressNextCaptureFor = -1;
 	bool capturing = false;
+	bool tracking = false;
 	bool captureAgain = false;
 	quint32 capturedSequence = 0;
 	quint32 writtenSequence = 0;
