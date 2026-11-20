@@ -1,9 +1,7 @@
 #include "window_motion.hpp"
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <functional>
-#include <thread>
 
 #include <qcoreapplication.h>
 #include <qpointer.h>
@@ -15,33 +13,37 @@ namespace qs::windows {
 
 namespace {
 
-// end-4's emphasizedDecel.
+// end-4: windowsMove, speed 3 (300 ms), emphasizedDecel.
+constexpr double MOVE_MS = 300;
 constexpr double CURVE_X1 = 0.05;
 constexpr double CURVE_Y1 = 0.7;
 constexpr double CURVE_X2 = 0.1;
 constexpr double CURVE_Y2 = 1.0;
+constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
+// An app that takes longer than this to leave slides anyway.
+constexpr double TAKEOFF_TIMEOUT_MS = 250;
+// Two compositor frames for an app to repaint at its new size before sliding.
+constexpr int REPAINT_SETTLE_MS = 33;
+// How long a still stays over a window that landed, while it paints again.
+constexpr int LINGER_MS = 400;
+// How long a live picture stays over its landed window: a few frames.
+constexpr int LIVE_HANDOFF_MS = 50;
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
 	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
 }
 
-double ease(double x) {
-	auto lo = 0.0;
-	auto hi = 1.0;
-	for (auto i = 0; i < 40; i++) {
-		auto mid = (lo + hi) / 2;
-		if (bezierAt(CURVE_X1, CURVE_X2, mid) < x) lo = mid;
-		else hi = mid;
-	}
-	return bezierAt(CURVE_Y1, CURVE_Y2, (lo + hi) / 2);
+// Chromium and Electron stop painting a window that is off screen, and drop
+// its picture a moment later: a thumbnail of it goes blank mid-slide. Like the
+// desktop slide, they travel as a still taken before they leave.
+bool paintsOnlyOnScreen(HWND hwnd) {
+	wchar_t cls[64] {};
+	GetClassNameW(hwnd, cls, 64);
+	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
 }
 
-// How long a window that was asked to close may take before it comes back.
-constexpr int CLOSE_GIVE_BACK_MS = 1500;
-
-// A still of what is on screen in `frame`, in a window of its own off screen.
 HWND snapshotOf(const QRect& frame) {
 	auto width = frame.width();
 	auto height = frame.height();
@@ -103,6 +105,505 @@ HWND snapshotOf(const QRect& frame) {
 }
 
 } // namespace
+
+bool WindowMotion::travelsAsStill(HWND hwnd) { return paintsOnlyOnScreen(hwnd); }
+
+namespace {
+
+double ease(double x) {
+	auto lo = 0.0;
+	auto hi = 1.0;
+	for (auto i = 0; i < 40; i++) {
+		auto mid = (lo + hi) / 2;
+		if (bezierAt(CURVE_X1, CURVE_X2, mid) < x) lo = mid;
+		else hi = mid;
+	}
+	return bezierAt(CURVE_Y1, CURVE_Y2, (lo + hi) / 2);
+}
+
+// How long a window that was asked to close may take before it comes back.
+constexpr int CLOSE_GIVE_BACK_MS = 1500;
+
+QRect lerp(const QRect& a, const QRect& b, double t) {
+	auto mix = [t](int x, int y) { return static_cast<int>(std::lround(x + (y - x) * t)); };
+	return QRect(
+	    QPoint(mix(a.left(), b.left()), mix(a.top(), b.top())),
+	    QSize(std::max(1, mix(a.width(), b.width())), std::max(1, mix(a.height(), b.height())))
+	);
+}
+
+// Whether `window` is above `reference` in the z-order.
+bool isAbove(HWND window, HWND reference) {
+	for (auto* hwnd = GetWindow(reference, GW_HWNDPREV); hwnd != nullptr;
+	     hwnd = GetWindow(hwnd, GW_HWNDPREV))
+	{
+		if (hwnd == window) return true;
+	}
+	return false;
+}
+
+QPointer<WindowMotion> MOTION; // NOLINT
+
+} // namespace
+
+WindowMotion* WindowMotion::instance() {
+	if (MOTION.isNull()) MOTION = new WindowMotion(QCoreApplication::instance());
+	return MOTION.data();
+}
+
+WindowMotion::WindowMotion(QObject* parent): QObject(parent) {}
+
+WindowMotion::~WindowMotion() {
+	// Never leave a window waiting off screen.
+	this->stop.store(true);
+	if (this->worker.joinable()) this->worker.join();
+	for (const auto& entry: this->entries) {
+		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
+	}
+	this->closeCover();
+}
+
+bool WindowMotion::moving(HWND hwnd) const {
+	auto lock = std::lock_guard(this->mutex);
+	return std::ranges::any_of(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+}
+
+bool WindowMotion::ensureCover() {
+	if (this->cover != nullptr) return true;
+
+	static auto registered = false; // NOLINT
+	auto* instance = GetModuleHandleW(nullptr);
+	if (!registered) {
+		WNDCLASSEXW cls {};
+		cls.cbSize = sizeof(cls);
+		cls.lpfnWndProc = &DefWindowProcW;
+		cls.hInstance = instance;
+		cls.hbrBackground = CreateSolidBrush(COVER_KEY);
+		cls.lpszClassName = COVER_CLASS;
+		registered = RegisterClassExW(&cls) != 0;
+	}
+
+	// One pixel short of the screens at the top: a window covering a monitor
+	// exactly is taken by Explorer for a fullscreen app, and the shell's
+	// panels step down behind everything for as long as it is there.
+	this->coverRect = QRect(
+	    GetSystemMetrics(SM_XVIRTUALSCREEN),
+	    GetSystemMetrics(SM_YVIRTUALSCREEN) + 1,
+	    std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN)),
+	    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1)
+	);
+	this->cover = CreateWindowExW(
+	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+	    COVER_CLASS,
+	    L"",
+	    WS_POPUP,
+	    this->coverRect.x(),
+	    this->coverRect.y(),
+	    this->coverRect.width(),
+	    this->coverRect.height(),
+	    nullptr,
+	    nullptr,
+	    instance,
+	    nullptr
+	);
+	if (this->cover == nullptr) return false;
+	SetLayeredWindowAttributes(this->cover, COVER_KEY, 255, LWA_COLORKEY);
+	BOOL noTransitions = TRUE;
+	DwmSetWindowAttribute(
+	    this->cover,
+	    DWMWA_TRANSITIONS_FORCEDISABLED,
+	    &noTransitions,
+	    sizeof(noTransitions)
+	);
+	return true;
+}
+
+// Just above the highest moving window: windows over it (floating ones, the
+// shell's panels) stay over its thumbnail.
+void WindowMotion::placeCover(HWND above) {
+	if (this->cover == nullptr || !IsWindowVisible(this->cover) || isAbove(above, this->cover)) {
+		auto* previous = GetWindow(above, GW_HWNDPREV);
+		if (previous == this->cover) return;
+		SetWindowPos(
+		    this->cover,
+		    previous != nullptr ? previous : HWND_TOP,
+		    0,
+		    0,
+		    0,
+		    0,
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+		);
+	}
+}
+
+void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
+	RECT raw {};
+	RECT bounds {};
+	if (!GetWindowRect(hwnd, &raw)) return;
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		bounds = raw;
+	auto left = bounds.left - raw.left;
+	auto top = bounds.top - raw.top;
+	auto right = raw.right - bounds.right;
+	auto bottom = raw.bottom - bounds.bottom;
+	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
+	// A hung app would hold the shell up; it moves when it wakes instead.
+	if (!wait || IsHungAppWindow(hwnd)) flags |= SWP_ASYNCWINDOWPOS;
+	SetWindowPos(
+	    hwnd,
+	    nullptr,
+	    frame.left() - left,
+	    frame.top() - top,
+	    frame.width() + left + right,
+	    frame.height() + top + bottom,
+	    flags
+	);
+}
+
+namespace {
+
+// How much of a picture of `source` to show in `frame` without stretching it,
+// as Winland does: one scale for both sides, just enough to cover the frame,
+// with the picture held at its top left and cut off on the right and bottom.
+QSize coveringPart(const QSize& source, const QSize& frame) {
+	if (source.isEmpty() || frame.isEmpty()) return source;
+	auto scale = std::max(
+	    static_cast<double>(frame.width()) / source.width(),
+	    static_cast<double>(frame.height()) / source.height()
+	);
+	return {
+	    std::min(source.width(), static_cast<int>(std::lround(frame.width() / scale))),
+	    std::min(source.height(), static_cast<int>(std::lround(frame.height() / scale)))
+	};
+}
+
+} // namespace
+
+// Called with the mutex held. The source follows the window's own frame, so it
+// shows the window at whatever size it has reached.
+void WindowMotion::layout(Entry& entry, double progress) {
+	entry.progress = progress;
+	auto eased = ease(progress);
+	entry.current = lerp(entry.from, entry.to, eased);
+	// windowsIn: popin 80% and fadeIn, both on the same curve.
+	auto opacity = 255.0;
+	auto shown = entry.current;
+	if (entry.pop) {
+		auto scale = 0.8 + 0.2 * eased;
+		auto size = QSizeF(entry.to.size()) * scale;
+		auto center = QRectF(entry.to).center();
+		shown = QRectF(
+		            center.x() - size.width() / 2,
+		            center.y() - size.height() / 2,
+		            size.width(),
+		            size.height()
+		)
+		            .toRect();
+		entry.current = entry.to;
+		opacity = 255.0 * eased;
+	}
+	if (entry.snapshot != nullptr) {
+		// The whole still, stretched to where the window is on its way.
+		auto dest = shown.translated(-this->coverRect.topLeft());
+		auto part = entry.snapshotSize;
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		props.rcSource = {0, 0, part.width(), part.height()};
+		props.rcDestination =
+		    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+		props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
+		props.fVisible = TRUE;
+		DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+		return;
+	}
+	RECT raw {};
+	RECT bounds {};
+	if (!GetWindowRect(entry.hwnd, &raw)
+	    || FAILED(
+	        DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
+	    ))
+	{
+		return;
+	}
+	auto dest = shown.translated(-this->coverRect.topLeft());
+	DWM_THUMBNAIL_PROPERTIES props {};
+	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
+	              | DWM_TNP_SOURCECLIENTAREAONLY;
+	auto frame = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
+	// The whole window, stretched to where it is on its way, as Hyprland
+	// stretches its buffer: it has its new size already, so it lands at 1:1.
+	auto part = frame;
+	props.rcSource = {
+	    bounds.left - raw.left,
+	    bounds.top - raw.top,
+	    bounds.left - raw.left + part.width(),
+	    bounds.top - raw.top + part.height()
+	};
+	props.rcDestination =
+	    {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
+	props.fVisible = TRUE;
+	props.fSourceClientAreaOnly = FALSE;
+	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+}
+
+namespace {
+int depthOf(HWND hwnd) {
+	auto depth = 0;
+	for (auto* above = GetWindow(hwnd, GW_HWNDPREV); above != nullptr; above = GetWindow(above, GW_HWNDPREV))
+		depth++;
+	return depth;
+}
+} // namespace
+
+// Called with the mutex held. DWM draws thumbnails in the order they were
+// registered, which was the order the windows set off in: one sliding over
+// another that sits above it. They are registered again, the deepest first.
+void WindowMotion::restack() {
+	std::ranges::stable_sort(this->entries, [](const Entry& a, const Entry& b) { return a.depth > b.depth; });
+	for (auto& entry: this->entries) {
+		HTHUMBNAIL thumbnail = nullptr;
+		auto* source = entry.snapshot != nullptr ? entry.snapshot : entry.hwnd;
+		if (FAILED(DwmRegisterThumbnail(this->cover, source, &thumbnail))) continue;
+		DwmUnregisterThumbnail(entry.thumbnail);
+		entry.thumbnail = thumbnail;
+		this->layout(entry, entry.progress);
+	}
+}
+
+bool WindowMotion::begin(
+    HWND hwnd,
+    const QRect& from,
+    const QRect& to,
+    const QRect& parked,
+    bool pop,
+    bool still
+) {
+	if (this->moving(hwnd)) {
+		this->retarget(hwnd, to, parked);
+		return true;
+	}
+	if (!this->ensureCover()) return false;
+
+	HWND snapshot = !pop && still ? snapshotOf(from) : nullptr;
+	auto snapshotSize = from.size();
+	HTHUMBNAIL thumbnail = nullptr;
+	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
+	{
+		if (snapshot != nullptr) DestroyWindow(snapshot);
+		if (this->entries.isEmpty()) this->closeCover();
+		return false;
+	}
+
+	{
+		auto lock = std::lock_guard(this->mutex);
+		this->entries.append(Entry {
+		    .hwnd = hwnd,
+		    .thumbnail = thumbnail,
+		    .snapshot = snapshot,
+		    .snapshotSize = snapshotSize,
+		    .from = from,
+		    .to = to,
+		    .current = from,
+		    .parked = parked,
+		    .pop = pop,
+		    .start = std::chrono::steady_clock::now(),
+		    // A still covers the window already: no need to wait for it to leave,
+		    // which a busy app (Chromium repainting after a landing) takes long to.
+		    .waiting = snapshot == nullptr,
+		    .depth = depthOf(hwnd),
+		});
+		this->layout(this->entries.last(), 0);
+		if (this->entries.size() > 1) this->restack();
+	}
+
+	// The thumbnail is in the window's place before the window leaves it, in
+	// the same compositor frame.
+	this->placeCover(hwnd);
+	if (!IsWindowVisible(this->cover)) ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+	moveTo(hwnd, parked, false);
+
+	if (!this->worker.joinable()) {
+		this->stop.store(false);
+		this->worker = std::thread(&WindowMotion::run, this);
+	}
+	return true;
+}
+
+void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
+	{
+		auto lock = std::lock_guard(this->mutex);
+		auto entry =
+		    std::ranges::find_if(this->entries, [hwnd](const Entry& e) { return e.hwnd == hwnd; });
+		if (entry == this->entries.end()) return;
+		if (entry->to == to && !entry->done) return;
+		entry->parked = parked;
+		if (entry->pop && !entry->done) {
+			// Still popping in: keep growing, toward the new tile.
+			entry->from = to;
+			entry->to = to;
+		} else {
+			entry->pop = false;
+			entry->from = entry->current;
+			entry->to = to;
+			entry->start = std::chrono::steady_clock::now();
+		}
+		entry->done = false;
+	}
+	moveTo(hwnd, parked, false);
+}
+
+void WindowMotion::cancel(HWND hwnd) {
+	auto empty = false;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		for (auto i = this->entries.size() - 1; i >= 0; i--) {
+			if (this->entries[i].hwnd != hwnd) continue;
+			release(this->entries[i]);
+			this->entries.removeAt(i);
+		}
+		empty = this->entries.isEmpty();
+	}
+	if (empty) this->closeCover();
+}
+
+void WindowMotion::run() {
+	auto last = std::chrono::steady_clock::now();
+	auto period = compositorRefreshMs();
+	while (!this->stop.load()) {
+		do {
+			waitForCompositorFrame();
+		} while (!this->stop.load()
+		         && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - last)
+		                    .count()
+		                < period * 0.75);
+		last = std::chrono::steady_clock::now();
+
+		auto finished = false;
+		{
+			auto lock = std::lock_guard(this->mutex);
+			// Windows that move together set off together: each one starting
+			// once its own app had left put them out of step, one sliding over
+			// another that hadn't moved yet. They wait for the slowest (up to
+			// the timeout) and start in the same frame.
+			auto holding = false;
+			for (auto& entry: this->entries) {
+				if (entry.done || !entry.waiting) continue;
+				RECT raw {};
+				RECT bounds {};
+				auto left = GetWindowRect(entry.hwnd, &raw) && raw.left >= entry.parked.left() - 64;
+				// And has taken the size it waits at: before that, its picture
+				// is too small for the frame and leaves a gap.
+				if (left && !entry.pop
+				    && SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+				{
+					left = bounds.right - bounds.left >= entry.parked.width() - 2
+					    && bounds.bottom - bounds.top >= entry.parked.height() - 2;
+				}
+				auto waited = std::chrono::duration<double, std::milli>(last - entry.start).count();
+				if (!left && waited < TAKEOFF_TIMEOUT_MS) holding = true;
+			}
+			for (auto& entry: this->entries) {
+				if (entry.done) continue;
+				if (entry.waiting) {
+					if (holding) continue;
+					entry.waiting = false;
+					// Hold still a moment longer: the app repaints at its new size
+					// while in place, instead of during the curve's fast start.
+					entry.start = last + std::chrono::milliseconds(REPAINT_SETTLE_MS);
+				}
+				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
+				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
+				this->layout(entry, progress);
+				if (progress >= 1.0) {
+					entry.done = true;
+					finished = true;
+				}
+			}
+		}
+		if (finished && !this->donePending.exchange(true)) {
+			QMetaObject::invokeMethod(this, &WindowMotion::onFrameDone, Qt::QueuedConnection);
+		}
+	}
+}
+
+// Thumbnail visibility reaches the screen right away, a window move a frame
+// later at most: thumbnails go first, then the windows jump into place.
+void WindowMotion::onFrameDone() {
+	this->donePending.store(false);
+	QList<Entry> landing;
+	auto empty = false;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		for (auto i = this->entries.size() - 1; i >= 0; i--) {
+			if (!this->entries[i].done) continue;
+			landing.append(this->entries.takeAt(i));
+		}
+		empty = this->entries.isEmpty();
+	}
+	// The windows land first and their pictures go a few frames later:
+	// hiding the picture first left nothing on screen for a frame or two (a
+	// flicker). At the end the picture is at 1:1 over its window, so the two
+	// on top of each other don't show.
+	for (const auto& entry: landing) {
+		if (!IsWindow(entry.hwnd)) continue;
+		moveTo(entry.hwnd, entry.to, true);
+		// Chromium resized nearly all off screen sometimes came back grey,
+		// unpainted, after several targets in a row: ask it to paint now.
+		RedrawWindow(entry.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME | RDW_ERASENOW);
+	}
+	QList<Entry> live;
+	for (const auto& entry: landing) {
+		// An app that stopped painting while away comes back blank for a few
+		// frames: its still stays over it, in place, until it has painted.
+		if (entry.snapshot != nullptr) this->lingering.append(entry);
+		else live.append(entry);
+		emit this->landed(entry.hwnd, entry.to);
+	}
+	if (!live.isEmpty()) {
+		this->liveLanding += static_cast<int>(live.size());
+		QTimer::singleShot(LIVE_HANDOFF_MS, this, [this, live]() {
+			for (const auto& entry: live) release(entry);
+			this->liveLanding -= static_cast<int>(live.size());
+			auto lock = std::unique_lock(this->mutex);
+			auto none = this->entries.isEmpty();
+			lock.unlock();
+			if (none && this->lingering.isEmpty() && this->liveLanding == 0) this->closeCover();
+		});
+	}
+	if (!this->lingering.isEmpty()) {
+		QTimer::singleShot(LINGER_MS, this, [this]() {
+			for (const auto& entry: this->lingering) release(entry);
+			this->lingering.clear();
+			auto lock = std::unique_lock(this->mutex);
+			auto none = this->entries.isEmpty();
+			lock.unlock();
+			if (none && this->liveLanding == 0) this->closeCover();
+		});
+	}
+	if (empty && this->lingering.isEmpty() && this->liveLanding == 0) this->closeCover();
+}
+
+void WindowMotion::release(const Entry& entry) {
+	DwmUnregisterThumbnail(entry.thumbnail);
+	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
+}
+
+void WindowMotion::closeCover() {
+	this->stop.store(true);
+	if (this->worker.joinable()) this->worker.join();
+	{
+		auto lock = std::lock_guard(this->mutex);
+		for (const auto& entry: this->entries) release(entry);
+		this->entries.clear();
+		for (const auto& entry: this->lingering) release(entry);
+		this->lingering.clear();
+	}
+	if (this->cover != nullptr) {
+		DestroyWindow(this->cover);
+		this->cover = nullptr;
+	}
+}
 
 namespace {
 

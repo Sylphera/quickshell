@@ -239,16 +239,12 @@ void closeFocused(WindowTracker* tracker) {
 	// The window focused now: Windows doesn't always announce handing focus on.
 	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
-		// end-4's windowsOut, for the last window of a desktop only: no other
-		// window moves then, so a still of it can pop out cleanly.
-		if (aloneOnDesktop(tracker, window)) {
-			auto target = QPointer<TrackedWindow>(window);
-			auto close = [target]() {
-				if (target) target->close();
-			};
-			if (WindowPop::closeOut(window->hwnd(), close)) return;
-		}
-		window->close();
+		// end-4's windowsOut: a still of it pops out while it closes.
+		auto target = QPointer<TrackedWindow>(window);
+		auto close = [target]() {
+			if (target) target->close();
+		};
+		if (!WindowPop::closeOut(window->hwnd(), close)) window->close();
 	} else {
 		closeShellWindow(GetForegroundWindow());
 	}

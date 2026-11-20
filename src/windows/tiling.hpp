@@ -58,6 +58,8 @@ public:
 	void setEnabled(bool enabled);
 	[[nodiscard]] bool suppressWindowShadows() const { return this->mSuppressWindowShadows; }
 	void setSuppressWindowShadows(bool suppress);
+	[[nodiscard]] bool animateMoves() const { return this->mAnimateMoves; }
+	void setAnimateMoves(bool animate);
 	[[nodiscard]] qint32 gapsIn() const { return this->mGapsIn; }
 	void setGapsIn(qint32 gaps);
 	[[nodiscard]] qint32 gapsOut() const { return this->mGapsOut; }
@@ -142,6 +144,7 @@ public:
 signals:
 	void enabledChanged();
 	void suppressWindowShadowsChanged();
+	void animateMovesChanged();
 	void gapsInChanged();
 	void gapsOutChanged();
 	void preserveSplitChanged();
@@ -209,14 +212,15 @@ private:
 		bool offscreen = false;
 		QRect restore;
 		bool tinyCornersApplied = false;
+		// Appeared after the shell started, and not placed yet: pops in.
+		bool fresh = false;
+		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
 		bool tinyBorderSuppressed = false;
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
-		// Opened after the shell started and not placed yet.
-		bool fresh = false;
 		// Popping in: it waits off screen until the pop lands.
 		bool popping = false;
 		// Where a floating window was before it went fullscreen (raw rect).
@@ -296,6 +300,12 @@ private:
 
 	bool mEnabled = false;
 	bool mSuppressWindowShadows = false;
+	bool mAnimateMoves = true;
+	// Set while the bar is toggling: windows slide even while tiling is still
+	// checking where an app put its window, since they wait off screen anyway.
+	bool barMoving = false;
+	// Windows sliding to a new tile, with the tile they go to.
+	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
 	int mSpecialOffset = 0;
@@ -322,6 +332,10 @@ private:
 	QSet<Layout*> dirtyLayouts;
 	QSet<TrackedWindow*> unverified;
 	TrackedWindow* dragging = nullptr;
+	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
+	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
+	[[nodiscard]] bool canPop(const Managed& m, const Layout* layout, const QRect& tile) const;
+	void onMotionLanded(HWND hwnd, const QRect& frame);
 	EdgeDrag edgeDragState;
 	quint64 focusCounter = 0;
 
@@ -339,6 +353,7 @@ class Tiling: public QObject {
 	// clang-format off
 	Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged);
 	Q_PROPERTY(bool suppressWindowShadows READ suppressWindowShadows WRITE setSuppressWindowShadows NOTIFY suppressWindowShadowsChanged);
+	Q_PROPERTY(bool animateMoves READ animateMoves WRITE setAnimateMoves NOTIFY animateMovesChanged);
 	Q_PROPERTY(qint32 gapsIn READ gapsIn WRITE setGapsIn NOTIFY gapsInChanged);
 	Q_PROPERTY(qint32 gapsOut READ gapsOut WRITE setGapsOut NOTIFY gapsOutChanged);
 	Q_PROPERTY(bool preserveSplit READ preserveSplit WRITE setPreserveSplit NOTIFY preserveSplitChanged);
@@ -370,6 +385,8 @@ public:
 	void setEnabled(bool enabled);
 	[[nodiscard]] bool suppressWindowShadows() const;
 	void setSuppressWindowShadows(bool suppress);
+	[[nodiscard]] bool animateMoves() const;
+	void setAnimateMoves(bool animate);
 	[[nodiscard]] qint32 gapsIn() const;
 	void setGapsIn(qint32 gaps);
 	[[nodiscard]] qint32 gapsOut() const;
@@ -404,6 +421,7 @@ public:
 signals:
 	void enabledChanged();
 	void suppressWindowShadowsChanged();
+	void animateMovesChanged();
 	void gapsInChanged();
 	void gapsOutChanged();
 	void preserveSplitChanged();
