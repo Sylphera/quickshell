@@ -78,6 +78,8 @@ private:
 		// thumbnails are stacked as the windows were.
 		int depth = 0;
 		double progress = 0;
+		// Given a new target on its way: resized while nearly all off screen.
+		bool retargeted = false;
 	};
 
 	bool ensureCover();

@@ -22,7 +22,7 @@ constexpr double CURVE_Y2 = 1.0;
 constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
 // An app that takes longer than this to leave slides anyway.
-constexpr double TAKEOFF_TIMEOUT_MS = 250;
+constexpr double TAKEOFF_TIMEOUT_MS = 80;
 // Two compositor frames for an app to repaint at its new size before sliding.
 constexpr int REPAINT_SETTLE_MS = 33;
 // How long a still stays over a window that landed, while it paints again.
@@ -156,7 +156,16 @@ WindowMotion::~WindowMotion() {
 	this->stop.store(true);
 	if (this->worker.joinable()) this->worker.join();
 	for (const auto& entry: this->entries) {
-		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
+		if (!IsWindow(entry.hwnd)) continue;
+		moveTo(entry.hwnd, entry.to, true);
+		// Chromium resized for a second target while nearly all off screen took
+		// itself for hidden and came back grey. A frame change, without a
+		// resize (that showed an empty frame), makes it lay out and paint.
+		if (entry.retargeted && travelsAsStill(entry.hwnd)) {
+			SetWindowPos(entry.hwnd, nullptr, 0, 0, 0, 0,
+			    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+			RedrawWindow(entry.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+		}
 	}
 	this->closeCover();
 }
@@ -436,6 +445,7 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		if (entry == this->entries.end()) return;
 		if (entry->to == to && !entry->done) return;
 		entry->parked = parked;
+		entry->retargeted = true;
 		if (entry->pop && !entry->done) {
 			// Still popping in: keep growing, toward the new tile.
 			entry->from = to;

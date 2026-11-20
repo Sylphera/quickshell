@@ -479,9 +479,14 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	auto* motion = WindowMotion::instance();
 	auto found = this->moving.find(m.window);
 	if (found != this->moving.end()) {
-		// It keeps waiting where it is, at the size it had: only the thumbnail
-		// heads somewhere else.
-		auto parked = m.target.isNull() ? parkedFrame(tile) : m.target;
+		// A new target on its way: the app takes that tile's size too, as it
+		// did for the first one, or its live picture was stretched from the
+		// first target's shape into the second's (squashed, blown up) until
+		// it landed. While the bar toggles Chromium keeps waiting as it was.
+		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
+		auto parked = chromium && this->barMoving
+		                ? (m.target.isNull() ? parkedFrame(tile) : m.target)
+		                : QRect(parkedFrame(tile, chromium).topLeft(), tile.size());
 		if (*found != tile) {
 			*found = tile;
 			motion->retarget(m.window->hwnd(), tile, parked);
