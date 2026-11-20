@@ -5,12 +5,15 @@
 #include <functional>
 
 #include <qcoreapplication.h>
+#include <qloggingcategory.h>
 #include <qpointer.h>
 #include <qtimer.h>
 
 #include "desktop_slide.hpp"
 
 namespace qs::windows {
+
+Q_LOGGING_CATEGORY(logMotion, "quickshell.windows.motion", QtWarningMsg);
 
 namespace {
 
@@ -495,6 +498,7 @@ bool WindowMotion::begin(
     bool pop,
     bool still
 ) {
+	qCWarning(logMotion).noquote() << "[motion] begin" << hwnd << "from" << from << "to" << to << "pop" << pop << "still" << still << "moving" << this->moving(hwnd) << "cover" << (this->cover != nullptr && IsWindowVisible(this->cover));
 	if (this->moving(hwnd)) {
 		this->retarget(hwnd, to, parked);
 		return true;
@@ -555,7 +559,6 @@ bool WindowMotion::begin(
 		});
 		this->layout(this->entries.last(), 0);
 		if (!onScreen) this->restack();
-		this->updateHoles();
 		// Registered last, so over its live picture.
 		auto& added = this->entries.last();
 		if (added.hold != nullptr && FAILED(DwmRegisterThumbnail(this->cover, added.hold, &added.holdThumbnail))) {
@@ -664,6 +667,7 @@ void WindowMotion::run() {
 				if (entry.waiting) {
 					if (holding) continue;
 					entry.waiting = false;
+					qCWarning(logMotion).noquote() << "[motion] set off" << entry.hwnd;
 					// Hold still a moment longer: the app repaints at its new size
 					// while in place, instead of during the curve's fast start.
 					entry.start = last + std::chrono::milliseconds(REPAINT_SETTLE_MS);
@@ -687,6 +691,7 @@ void WindowMotion::run() {
 // later at most: thumbnails go first, then the windows jump into place.
 void WindowMotion::onFrameDone() {
 	this->donePending.store(false);
+	qCWarning(logMotion).noquote() << "[motion] frame done";
 	QList<Entry> landing;
 	auto empty = false;
 	{
@@ -709,6 +714,7 @@ void WindowMotion::onFrameDone() {
 		// frames: its still stays over it, in place, until it has painted.
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
 		else live.append(entry);
+		qCWarning(logMotion).noquote() << "[motion] landed" << entry.hwnd << entry.to << "still" << (entry.snapshot != nullptr);
 		emit this->landed(entry.hwnd, entry.to);
 	}
 	if (!live.isEmpty()) {
@@ -730,7 +736,10 @@ void WindowMotion::onFrameDone() {
 					});
 					if (pending == this->handoff.end()) continue;
 					this->handoff.erase(pending);
-					if (!this->entries.isEmpty() && entry.snapshot == nullptr && !this->scene.contains(entry.hwnd)) {
+					// Into the scene even when nothing else moves: released here, its
+					// picture went while the cover was still up for another window's
+					// landing, and the window vanished until the cover closed.
+					if (entry.snapshot == nullptr && !this->scene.contains(entry.hwnd)) {
 						this->scene.insert(entry.hwnd, entry.thumbnail);
 					} else {
 						done.append(entry);
@@ -787,12 +796,19 @@ void WindowMotion::releaseHold(const Entry& entry) {
 void WindowMotion::closeCover() {
 	this->stop.store(true);
 	if (this->worker.joinable()) this->worker.join();
+	qCWarning(logMotion).noquote() << "[motion] close cover, entries" << this->entries.size() << "scene" << this->scene.size() << "lingering" << this->lingering.size() << "handoff" << this->handoff.size();
+	// The cover leaves the screen before its thumbnails go: unregistered
+	// first, one by one, every window vanished for a frame while the cover
+	// still showed the wallpaper.
+	if (this->cover != nullptr) ShowWindow(this->cover, SW_HIDE);
 	{
 		auto lock = std::lock_guard(this->mutex);
 		for (const auto& entry: this->entries) release(entry);
 		this->entries.clear();
 		for (const auto& entry: this->lingering) release(entry);
 		this->lingering.clear();
+		for (const auto& entry: this->handoff) release(entry);
+		this->handoff.clear();
 	}
 	for (auto* thumbnail: std::as_const(this->scene)) DwmUnregisterThumbnail(thumbnail);
 	this->scene.clear();
@@ -801,6 +817,7 @@ void WindowMotion::closeCover() {
 		this->cover = nullptr;
 	}
 }
+
 
 namespace {
 
