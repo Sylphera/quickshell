@@ -15,6 +15,7 @@
 
 #include <iphlpapi.h>
 #include <netioapi.h>
+#include <psapi.h>
 
 #include "../../core/logcat.hpp"
 
@@ -22,6 +23,18 @@ namespace qs::windows::sys {
 
 namespace {
 QS_LOGGING_CATEGORY(logSystemStats, "quickshell.windows.systemstats", QtWarningMsg);
+
+struct PageFileUsage {
+	quint64 totalPages = 0;
+	quint64 usedPages = 0;
+};
+
+BOOL CALLBACK addPageFileUsage(void* context, ENUM_PAGE_FILE_INFORMATION* info, LPCWSTR) {
+	auto& usage = *static_cast<PageFileUsage*>(context);
+	usage.totalPages += info->TotalSize;
+	usage.usedPages += info->TotalInUse;
+	return TRUE;
+}
 
 QString readCpuName() {
 	wchar_t buffer[256] {};
@@ -187,14 +200,18 @@ void SystemStats::sample() {
 	if (GlobalMemoryStatusEx(&mem)) {
 		this->bMemoryTotalKb = mem.ullTotalPhys / 1024;
 		this->bMemoryAvailableKb = mem.ullAvailPhys / 1024;
+	}
 
-		auto swapTotal =
-		    mem.ullTotalPageFile > mem.ullTotalPhys ? mem.ullTotalPageFile - mem.ullTotalPhys : 0;
-		auto swapAvail =
-		    mem.ullAvailPageFile > mem.ullAvailPhys ? mem.ullAvailPageFile - mem.ullAvailPhys : 0;
-
-		this->bSwapTotalKb = swapTotal / 1024;
-		this->bSwapAvailableKb = std::min(swapAvail / 1024, swapTotal / 1024);
+	PageFileUsage pageFiles;
+	if (EnumPageFilesW(&addPageFileUsage, &pageFiles)) {
+		static const auto pageSize = [] {
+			SYSTEM_INFO info {};
+			GetSystemInfo(&info);
+			return info.dwPageSize;
+		}();
+		const auto freePages = pageFiles.totalPages - std::min(pageFiles.usedPages, pageFiles.totalPages);
+		this->bSwapTotalKb = pageFiles.totalPages * pageSize / 1024;
+		this->bSwapAvailableKb = freePages * pageSize / 1024;
 	}
 
 	this->bUptimeSeconds = static_cast<qint64>(GetTickCount64() / 1000);
