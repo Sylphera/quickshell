@@ -95,8 +95,6 @@ private:
 	QList<Entry> entries;
 	// Stills that stay over their landed window until it has painted again.
 	QList<Entry> lingering;
-	// Live pictures still over their landed windows.
-	int liveLanding = 0;
 	mutable std::mutex mutex;
 	std::thread worker;
 	std::atomic<bool> stop = false;

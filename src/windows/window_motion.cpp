@@ -27,8 +27,6 @@ constexpr double TAKEOFF_TIMEOUT_MS = 250;
 constexpr int REPAINT_SETTLE_MS = 33;
 // How long a still stays over a window that landed, while it paints again.
 constexpr int LINGER_MS = 400;
-// How long a live picture stays over its landed window: a few frames.
-constexpr int LIVE_HANDOFF_MS = 50;
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
@@ -537,39 +535,26 @@ void WindowMotion::onFrameDone() {
 		auto lock = std::lock_guard(this->mutex);
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (!this->entries[i].done) continue;
+			// A still stays up over its window while that paints (see lingering).
+			if (this->entries[i].snapshot == nullptr) {
+				DWM_THUMBNAIL_PROPERTIES props {};
+				props.dwFlags = DWM_TNP_VISIBLE;
+				props.fVisible = FALSE;
+				DwmUpdateThumbnailProperties(this->entries[i].thumbnail, &props);
+			}
 			landing.append(this->entries.takeAt(i));
 		}
 		empty = this->entries.isEmpty();
 	}
-	// The windows land first and their pictures go a few frames later:
-	// hiding the picture first left nothing on screen for a frame or two (a
-	// flicker). At the end the picture is at 1:1 over its window, so the two
-	// on top of each other don't show.
 	for (const auto& entry: landing) {
-		if (!IsWindow(entry.hwnd)) continue;
-		moveTo(entry.hwnd, entry.to, true);
-		// Chromium resized nearly all off screen sometimes came back grey,
-		// unpainted, after several targets in a row: ask it to paint now.
-		RedrawWindow(entry.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME | RDW_ERASENOW);
+		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
 	}
-	QList<Entry> live;
 	for (const auto& entry: landing) {
 		// An app that stopped painting while away comes back blank for a few
 		// frames: its still stays over it, in place, until it has painted.
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
-		else live.append(entry);
+		else release(entry);
 		emit this->landed(entry.hwnd, entry.to);
-	}
-	if (!live.isEmpty()) {
-		this->liveLanding += static_cast<int>(live.size());
-		QTimer::singleShot(LIVE_HANDOFF_MS, this, [this, live]() {
-			for (const auto& entry: live) release(entry);
-			this->liveLanding -= static_cast<int>(live.size());
-			auto lock = std::unique_lock(this->mutex);
-			auto none = this->entries.isEmpty();
-			lock.unlock();
-			if (none && this->lingering.isEmpty() && this->liveLanding == 0) this->closeCover();
-		});
 	}
 	if (!this->lingering.isEmpty()) {
 		QTimer::singleShot(LINGER_MS, this, [this]() {
@@ -578,10 +563,10 @@ void WindowMotion::onFrameDone() {
 			auto lock = std::unique_lock(this->mutex);
 			auto none = this->entries.isEmpty();
 			lock.unlock();
-			if (none && this->liveLanding == 0) this->closeCover();
+			if (none) this->closeCover();
 		});
 	}
-	if (empty && this->lingering.isEmpty() && this->liveLanding == 0) this->closeCover();
+	if (empty && this->lingering.isEmpty()) this->closeCover();
 }
 
 void WindowMotion::release(const Entry& entry) {
