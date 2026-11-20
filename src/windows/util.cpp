@@ -98,7 +98,12 @@ MonitorRects monitorRects(HMONITOR monitor) {
 		if (rects.work == found->second.work || static_cast<qint64>(GetTickCount64()) > found->second.until) {
 			gExpectedWork.erase(found);
 		} else {
+			// The work area the shell is about to have, its own bars already
+			// counted: taking their current space off again kept windows from
+			// growing into the bar's place as it hid (they moved 150 ms late,
+			// when its reservation went).
 			rects.work = found->second.work;
+			return rects;
 		}
 	}
 	for (const auto& [hwnd, own]: gOwnReservations) {

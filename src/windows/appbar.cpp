@@ -9,6 +9,7 @@
 #include <shellapi.h>
 
 #include <qcoreapplication.h>
+#include <qhash.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qrect.h>
@@ -19,6 +20,15 @@
 #include "util.hpp"
 
 namespace qs::windows {
+
+namespace {
+// What each appbar holds now: a delayed check for a space it has since given
+// up (the bar hidden with Super+J) set it again, and windows dropped back.
+QHash<HWND, QRect>& heldSpaces() {
+	static QHash<HWND, QRect> held; // NOLINT
+	return held;
+}
+} // namespace
 
 namespace {
 Q_LOGGING_CATEGORY(logAppBar, "quickshell.windows.appbar", QtWarningMsg);
@@ -191,6 +201,7 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 		SHAppBarMessage(ABM_SETPOS, &data);
 		this->mEdge = edge;
 		this->mReserved = toQRect(data.rc);
+		heldSpaces().insert(hwnd, this->mReserved);
 		qCDebug(logAppBar) << "Reserved" << this->mReserved << "on edge" << edge << "for" << hwnd;
 
 		// Explorer can recompute the work area right after, without a word to
@@ -198,6 +209,7 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 		for (auto delay: {1500, 5000}) {
 			QTimer::singleShot(delay, QCoreApplication::instance(), [hwnd, data]() mutable {
 				if (!IsWindow(hwnd)) return;
+				if (heldSpaces().value(hwnd) != toQRect(data.rc)) return;
 				MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
 				if (!GetMonitorInfoW(MonitorFromRect(&data.rc, MONITOR_DEFAULTTONEAREST), &info)) return;
 				RECT overlap {};
@@ -229,6 +241,7 @@ void WinAppBar::remove() {
 
 	auto data = appBarData(this->mHwnd);
 	SHAppBarMessage(ABM_REMOVE, &data);
+	heldSpaces().remove(this->mHwnd);
 	clearOwnReservation(this->mHwnd);
 	QTimer::singleShot(0, QCoreApplication::instance(), []() {
 		TilingManager::instance()->workAreaChanged();

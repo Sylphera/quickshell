@@ -84,6 +84,7 @@ private:
 		// frame before it repainted, and a translucent one went see-through.
 		HWND hold = nullptr;
 		HTHUMBNAIL holdThumbnail = nullptr;
+		QPoint holdOffset;
 		std::chrono::steady_clock::time_point holdStart;
 		// Given a new target on its way: resized while nearly all off screen.
 		bool retargeted = false;
@@ -97,6 +98,14 @@ private:
 	void layout(Entry& entry, double progress);
 	void restack();
 	void placeCoverUnderPanels();
+	HWND sharedShot();
+	void dropShot(HWND shot);
+	// The last capture of the screens, shared by the windows of a move.
+	HWND shot = nullptr;
+	QRect shotRect;
+	std::chrono::steady_clock::time_point shotAt;
+	QHash<HWND, int> shotRefs;
+	bool placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail);
 	void updateHoles();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
 	static void release(const Entry& entry);

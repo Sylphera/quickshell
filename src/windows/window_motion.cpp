@@ -21,6 +21,8 @@ namespace {
 constexpr double MOVE_MS = 300;
 // How long a resized window shows how it looked before its live picture.
 constexpr double HOLD_MS = 50;
+// A capture of the screens this recent serves another window of the move.
+constexpr double SHOT_REUSE_MS = 100;
 constexpr double CURVE_X1 = 0.05;
 constexpr double CURVE_Y1 = 0.7;
 constexpr double CURVE_X2 = 0.1;
@@ -367,7 +369,8 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		auto since = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.holdStart).count();
 		DWM_THUMBNAIL_PROPERTIES hold {};
 		hold.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
-		hold.rcSource = {0, 0, entry.snapshotSize.width(), entry.snapshotSize.height()};
+		auto off = entry.holdOffset;
+		hold.rcSource = {off.x(), off.y(), off.x() + entry.snapshotSize.width(), off.y() + entry.snapshotSize.height()};
 		hold.rcDestination = props.rcDestination;
 		hold.opacity = 255;
 		hold.fVisible = since < HOLD_MS ? TRUE : FALSE;
@@ -409,6 +412,42 @@ void WindowMotion::updateHoles() {
 		}
 	}
 	SetWindowRgn(this->cover, region, FALSE); // the window owns the region now
+}
+
+bool WindowMotion::placeSceneThumbnail(HWND hwnd, HTHUMBNAIL thumbnail) {
+	RECT raw {};
+	if (!GetWindowRect(hwnd, &raw)) return false;
+	// The visible frame, without the invisible resize borders: drawn into
+	// the raw rect, the picture was stretched past its tile.
+	RECT bounds {};
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
+	auto rect = QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1));
+	if (rect.isEmpty() || !rect.intersects(this->coverRect.adjusted(0, -1, 0, 0))) return false;
+	auto dest = rect.translated(-this->coverRect.topLeft());
+	DWM_THUMBNAIL_PROPERTIES props {};
+	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
+	              | DWM_TNP_SOURCECLIENTAREAONLY;
+	props.rcSource = {
+	    bounds.left - raw.left,
+	    bounds.top - raw.top,
+	    bounds.right - raw.left,
+	    bounds.bottom - raw.top
+	};
+	props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+	// A window faded as a whole (special's dim) keeps its opacity: a
+	// thumbnail ignores it, and the dim covered the screen in black.
+	BYTE alpha = 255;
+	DWORD layered = 0;
+	if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0
+	    && GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &layered) && (layered & LWA_ALPHA) == 0)
+	{
+		alpha = 255;
+	}
+	props.opacity = alpha;
+	props.fVisible = TRUE;
+	props.fSourceClientAreaOnly = FALSE;
+	DwmUpdateThumbnailProperties(thumbnail, &props);
+	return true;
 }
 
 void WindowMotion::placeCoverUnderPanels() {
@@ -459,35 +498,45 @@ void WindowMotion::restack() {
 		wchar_t cls[64] {};
 		GetClassNameW(hwnd, cls, 64);
 		if (wcsncmp(cls, L"QuickshellMotion", 16) == 0 || wcscmp(cls, L"QuickshellWindowPop") == 0) continue;
-		RECT raw {};
-		if (!GetWindowRect(hwnd, &raw)) continue;
-		// The visible frame, without the invisible resize borders: drawn into
-		// the raw rect, the picture was stretched past its tile.
-		RECT bounds {};
-		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
-		auto rect = QRect(QPoint(bounds.left, bounds.top), QPoint(bounds.right - 1, bounds.bottom - 1));
-		if (rect.isEmpty() || !rect.intersects(screen)) continue;
 		HTHUMBNAIL thumbnail = nullptr;
 		if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
-		auto dest = rect.translated(-this->coverRect.topLeft());
-		DWM_THUMBNAIL_PROPERTIES props {};
-		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
-		              | DWM_TNP_SOURCECLIENTAREAONLY;
-		props.rcSource = {
-		    bounds.left - raw.left,
-		    bounds.top - raw.top,
-		    bounds.right - raw.left,
-		    bounds.bottom - raw.top
-		};
-		props.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
-		props.opacity = 255;
-		props.fVisible = TRUE;
-		props.fSourceClientAreaOnly = FALSE;
-		DwmUpdateThumbnailProperties(thumbnail, &props);
+		if (!this->placeSceneThumbnail(hwnd, thumbnail)) {
+			DwmUnregisterThumbnail(thumbnail);
+			continue;
+		}
 		scene.insert(hwnd, thumbnail);
 	}
 	for (auto* thumbnail: old) DwmUnregisterThumbnail(thumbnail);
 	this->scene = scene;
+}
+
+HWND WindowMotion::sharedShot() {
+	auto now = std::chrono::steady_clock::now();
+	if (this->shot != nullptr && std::chrono::duration<double, std::milli>(now - this->shotAt).count() < SHOT_REUSE_MS) {
+		this->shotRefs[this->shot]++;
+		return this->shot;
+	}
+	this->shotRect = QRect(
+	    GetSystemMetrics(SM_XVIRTUALSCREEN),
+	    GetSystemMetrics(SM_YVIRTUALSCREEN),
+	    std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN)),
+	    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN))
+	);
+	auto* shot = snapshotOf(this->shotRect);
+	if (shot == nullptr) return nullptr;
+	if (this->shot != nullptr && this->shotRefs.value(this->shot) == 0) DestroyWindow(this->shot);
+	this->shot = shot;
+	this->shotAt = now;
+	this->shotRefs[shot] = 1;
+	return shot;
+}
+
+void WindowMotion::dropShot(HWND shot) {
+	auto refs = --this->shotRefs[shot];
+	if (refs > 0) return;
+	this->shotRefs.remove(shot);
+	if (shot == this->shot) this->shot = nullptr;
+	DestroyWindow(shot);
 }
 
 bool WindowMotion::begin(
@@ -513,7 +562,14 @@ bool WindowMotion::begin(
 	// starts moving with its own thumbnail, in its place in the stack.
 	auto onScreen = IsWindowVisible(this->cover) != FALSE;
 	// Only a window that changes size gets the empty frame.
-	HWND hold = !pop && snapshot == nullptr && from.size() != to.size() ? snapshotOf(from) : nullptr;
+	// One capture of the screens serves every window of a move: one each, the
+	// windows set off tens of ms apart, and a bar toggle lagged.
+	HWND hold = nullptr;
+	QPoint holdOffset;
+	if (!pop && snapshot == nullptr && from.size() != to.size()) {
+		hold = this->sharedShot();
+		holdOffset = from.topLeft() - this->shotRect.topLeft();
+	}
 	HTHUMBNAIL thumbnail = nullptr;
 	if (onScreen && snapshot == nullptr) {
 		auto lock = std::lock_guard(this->mutex);
@@ -555,6 +611,7 @@ bool WindowMotion::begin(
 		    .waiting = snapshot == nullptr,
 		    .depth = depthOf(hwnd),
 		    .hold = hold,
+		    .holdOffset = holdOffset,
 		    .holdStart = std::chrono::steady_clock::now(),
 		});
 		this->layout(this->entries.last(), 0);
@@ -681,6 +738,14 @@ void WindowMotion::run() {
 				}
 			}
 		}
+		{
+			// The shell's own windows in the scene follow where they are now:
+			// the bar sliding with Super+J stayed behind, or went.
+			auto lock = std::lock_guard(this->mutex);
+			for (auto it = this->scene.constBegin(); it != this->scene.constEnd(); ++it) {
+				if (isOwnProcessWindow(it.key())) this->placeSceneThumbnail(it.key(), it.value());
+			}
+		}
 		if (finished && !this->donePending.exchange(true)) {
 			QMetaObject::invokeMethod(this, &WindowMotion::onFrameDone, Qt::QueuedConnection);
 		}
@@ -741,6 +806,7 @@ void WindowMotion::onFrameDone() {
 					// landing, and the window vanished until the cover closed.
 					if (entry.snapshot == nullptr && !this->scene.contains(entry.hwnd)) {
 						this->scene.insert(entry.hwnd, entry.thumbnail);
+						releaseHold(entry);
 					} else {
 						done.append(entry);
 					}
@@ -790,7 +856,7 @@ void WindowMotion::release(const Entry& entry) {
 
 void WindowMotion::releaseHold(const Entry& entry) {
 	if (entry.holdThumbnail != nullptr) DwmUnregisterThumbnail(entry.holdThumbnail);
-	if (entry.hold != nullptr) DestroyWindow(entry.hold);
+	if (entry.hold != nullptr) WindowMotion::instance()->dropShot(entry.hold);
 }
 
 void WindowMotion::closeCover() {
