@@ -1416,6 +1416,20 @@ void WinPanelWindow::scheduleFocusGrab() {
 		auto* foreground = GetForegroundWindow();
 		if (foreground == this->hwnd() || isOwnProcessWindow(foreground)) return;
 
+		// Windows' own prompts must stay usable over an exclusive panel (the
+		// lock screen): Windows Hello asking for the PIN, and a UAC prompt.
+		// Anything else, Task Manager included, gets the focus taken back.
+		DWORD pid = 0;
+		GetWindowThreadProcessId(foreground, &pid);
+		if (auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+			wchar_t path[MAX_PATH] {};
+			DWORD length = MAX_PATH;
+			auto named = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+			CloseHandle(process);
+			auto name = named ? QString::fromWCharArray(path, static_cast<int>(length)).toLower() : QString();
+			if (name.endsWith(u"\\credentialuibroker.exe") || name.endsWith(u"\\consent.exe")) return;
+		}
+
 		this->grabKeyboardFocus();
 	});
 }
