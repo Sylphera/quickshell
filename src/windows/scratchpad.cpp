@@ -14,6 +14,7 @@
 #include <qtypes.h>
 
 #include "desktop_slide.hpp"
+#include "panel_window.hpp"
 #include "tiling.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
@@ -115,6 +116,18 @@ void placeAt(HWND hwnd, HWND insertAfter, const QRect& rect) {
 	);
 }
 
+// Hyprland draws the top layer (the bar, the dock) over special's windows:
+// they go into the topmost band just under the shell's lowest top panel.
+HWND lowestTopPanel() {
+	const auto panels = WinPanelWindow::aboveWindowHandles();
+	HWND lowest = nullptr;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
+		if (panels.contains(hwnd)) lowest = hwnd;
+	}
+	return lowest;
+}
+
 void raise(HWND hwnd) {
 	SetWindowPos(
 	    hwnd,
@@ -125,6 +138,17 @@ void raise(HWND hwnd) {
 	    0,
 	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
 	);
+	if (auto* panel = lowestTopPanel()) {
+		SetWindowPos(
+		    hwnd,
+		    panel,
+		    0,
+		    0,
+		    0,
+		    0,
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+		);
+	}
 }
 
 // The window left special without going through remove(): the tracker lost it
