@@ -22,7 +22,7 @@ constexpr double CURVE_Y2 = 1.0;
 constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
 // An app that takes longer than this to leave slides anyway.
-constexpr double TAKEOFF_TIMEOUT_MS = 80;
+constexpr double TAKEOFF_TIMEOUT_MS = 0;
 // Two compositor frames for an app to repaint at its new size before sliding.
 constexpr int REPAINT_SETTLE_MS = 33;
 // How long a still stays over a window that landed, while it paints again.
