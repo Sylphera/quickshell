@@ -545,7 +545,8 @@ bool WindowMotion::begin(
     const QRect& to,
     const QRect& parked,
     bool pop,
-    bool still
+    bool still,
+    bool callerPlaces
 ) {
 	qCWarning(logMotion).noquote() << "[motion] begin" << hwnd << "from" << from << "to" << to << "pop" << pop << "still" << still << "moving" << this->moving(hwnd) << "cover" << (this->cover != nullptr && IsWindowVisible(this->cover));
 	if (this->moving(hwnd)) {
@@ -605,6 +606,7 @@ bool WindowMotion::begin(
 		    .current = from,
 		    .parked = parked,
 		    .pop = pop,
+		    .callerPlaces = callerPlaces,
 		    .start = std::chrono::steady_clock::now(),
 		    // A still covers the window already: no need to wait for it to leave,
 		    // which a busy app (Chromium repainting after a landing) takes long to.
@@ -632,11 +634,8 @@ bool WindowMotion::begin(
 		this->placeCoverUnderPanels();
 		ShowWindow(this->cover, SW_SHOWNOACTIVATE);
 	}
-	// The scene reaches the screen before any window moves under it: DWM can
-	// show the wallpaper a frame before the windows' thumbnails, and a window
-	// that had already left its place was gone for that frame.
-	DwmFlush();
-	moveTo(hwnd, parked, false);
+	if (!onScreen || !callerPlaces) DwmFlush();
+	if (!callerPlaces) moveTo(hwnd, parked, false);
 
 	if (!this->worker.joinable()) {
 		this->stop.store(false);
@@ -646,6 +645,7 @@ bool WindowMotion::begin(
 }
 
 void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
+	auto callerPlaces = false;
 	{
 		auto lock = std::lock_guard(this->mutex);
 		auto entry =
@@ -665,8 +665,9 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 			entry->start = std::chrono::steady_clock::now();
 		}
 		entry->done = false;
+		callerPlaces = entry->callerPlaces;
 	}
-	moveTo(hwnd, parked, false);
+	if (!callerPlaces) moveTo(hwnd, parked, false);
 }
 
 void WindowMotion::cancel(HWND hwnd) {
@@ -681,6 +682,22 @@ void WindowMotion::cancel(HWND hwnd) {
 		empty = this->entries.isEmpty();
 	}
 	if (empty) this->closeCover();
+}
+
+void WindowMotion::finishForLayoutChange(const QSet<HWND>& placed) {
+	if (this->cover == nullptr) return;
+
+	QList<Entry> pending;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		pending = this->entries;
+	}
+	for (const auto& entry: pending) {
+		if (placed.contains(entry.hwnd) || !IsWindow(entry.hwnd)) continue;
+		if (!entry.callerPlaces) moveTo(entry.hwnd, entry.to, false);
+		emit this->landed(entry.hwnd, entry.to);
+	}
+	this->closeCover();
 }
 
 void WindowMotion::run() {
@@ -768,7 +785,7 @@ void WindowMotion::onFrameDone() {
 		empty = this->entries.isEmpty();
 	}
 	for (const auto& entry: landing) {
-		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
+		if (!entry.callerPlaces && IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
 	}
 	// The windows are in place before their pictures go, a frame later:
 	// hiding the picture first left a frame with neither (the window

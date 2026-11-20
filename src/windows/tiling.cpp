@@ -77,6 +77,7 @@ void setWindowShadowsSuppressed(bool suppress) {
 using tiling::Edge;
 
 constexpr int SYNC_DELAY_MS = 30;
+constexpr int OPEN_BURST_MS = 350;
 constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
 constexpr int HUNG_RETRY_MS = 500;
@@ -477,6 +478,7 @@ QRect waitingFrame(HWND hwnd, const QRect& tile) {
 // for it is the parked spot, so its checks don't pull it back on screen.
 void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& tile) {
 	auto* motion = WindowMotion::instance();
+	auto dwindle = layout->tree->kind() == tiling::Kind::Dwindle;
 	auto found = this->moving.find(m.window);
 	if (found != this->moving.end()) {
 		// A new target on its way: the app takes that tile's size too, as it
@@ -494,8 +496,8 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	// end-4's windowsIn: a window that just opened pops in at its tile.
 	if (m.target.isNull() && this->canPop(m, layout, tile)) {
 		m.fresh = false;
-		auto waiting = waitingFrame(m.window->hwnd(), tile);
-		if (motion->begin(m.window->hwnd(), tile, tile, waiting, true)) {
+		auto waiting = dwindle ? tile : waitingFrame(m.window->hwnd(), tile);
+		if (motion->begin(m.window->hwnd(), tile, tile, waiting, true, false, dwindle)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, waiting);
 			return;
@@ -519,7 +521,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		// flickered as the slide ended.
 		auto still = false;
 		auto parked = tile;
-		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
+		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still, dwindle)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);
 			return;
@@ -1459,8 +1461,27 @@ void TilingManager::apply(Layout* layout) {
 
 	auto* scroll = TilingManager::scrollingOf(layout);
 	auto in = toPhysical(this->mGapsIn, layout->screen->devicePixelRatio());
+	auto ids = layout->tree->ids();
+	auto placeOpeningBurst = false;
+	if (this->mAnimateMoves && !layout->special && layout->tree->kind() == tiling::Kind::Dwindle
+	    && this->desktops->indexOf(layout->desktop) == this->desktops->currentIndex()
+	    && this->desktops->shownIndex() == this->desktops->currentIndex())
+	{
+		auto openings = std::ranges::count_if(ids, [this](auto id) {
+			auto* window = this->windowOf(id);
+			if (window == nullptr || window == this->dragging) return false;
+			const auto& m = this->managed.at(window);
+			return m.fresh && m.target.isNull() && this->stateOf(m) == State::Tiled;
+		});
+		if (openings > 0) {
+			placeOpeningBurst = openings > 1
+			                 || (layout->lastOpening.isValid() && !layout->lastOpening.hasExpired(OPEN_BURST_MS));
+			layout->lastOpening.start();
+		}
+	}
 
-	for (auto id: layout->tree->ids()) {
+	QSet<HWND> placed;
+	for (auto id: ids) {
 		auto* window = this->windowOf(id);
 		if (window == nullptr || window == this->dragging) continue;
 
@@ -1480,12 +1501,19 @@ void TilingManager::apply(Layout* layout) {
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
 		if (m.popping) continue;
-		if (m.fullscreen) {
+		if (placeOpeningBurst) {
+			this->moving.remove(window);
+			m.fresh = false;
+			m.dropped = false;
 			this->place(m, tile);
-			continue;
+			placed.insert(window->hwnd());
+		} else if (m.fullscreen) {
+			this->place(m, tile);
+		} else {
+			this->placeMoving(m, layout, tile);
 		}
-		this->placeMoving(m, layout, tile);
 	}
+	if (!placed.isEmpty()) WindowMotion::instance()->finishForLayoutChange(placed);
 }
 
 QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const {

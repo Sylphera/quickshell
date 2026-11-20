@@ -11,6 +11,7 @@
 #include <qlist.h>
 #include <qobject.h>
 #include <qrect.h>
+#include <qset.h>
 #include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 
@@ -41,10 +42,12 @@ public:
 	    const QRect& to,
 	    const QRect& parked,
 	    bool pop = false,
-	    bool still = false
+	    bool still = false,
+	    bool callerPlaces = false
 	);
 	void retarget(HWND hwnd, const QRect& to, const QRect& parked);
 	void cancel(HWND hwnd);
+	void finishForLayoutChange(const QSet<HWND>& placed);
 	[[nodiscard]] bool moving(HWND hwnd) const;
 	// Apps that stop painting off screen (Chromium) travel as a still taken
 	// before they leave, at the size they had; the rest take their new size
@@ -71,6 +74,7 @@ private:
 		QRect current;
 		QRect parked;
 		bool pop = false;
+		bool callerPlaces = false;
 		std::chrono::steady_clock::time_point start;
 		// Until the window has actually left, the thumbnail holds still over it.
 		bool waiting = true;

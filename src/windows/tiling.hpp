@@ -7,6 +7,7 @@
 
 #include <qt_windows.h>
 
+#include <qelapsedtimer.h>
 #include <qlist.h>
 #include <qmargins.h>
 #include <qhash.h>
@@ -173,6 +174,7 @@ private:
 		std::unique_ptr<tiling::LayoutEngine> tree;
 		TrackedWindow* lastFocused = nullptr;
 		bool special = false;
+		QElapsedTimer lastOpening;
 	};
 
 	enum class State : quint8 {
@@ -442,3 +444,9 @@ signals:
 };
 
 } // namespace qs::windows
+
+// ############################################################
+// #
+// #                  FORKED FROM DAEESE                      #
+// #
+// ############################################################
