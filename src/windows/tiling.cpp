@@ -483,10 +483,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		// did for the first one, or its live picture was stretched from the
 		// first target's shape into the second's (squashed, blown up) until
 		// it landed. While the bar toggles Chromium keeps waiting as it was.
-		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
-		auto parked = chromium && this->barMoving
-		                ? (m.target.isNull() ? parkedFrame(tile) : m.target)
-		                : tile;
+		auto parked = tile;
 		if (*found != tile) {
 			*found = tile;
 			motion->retarget(m.window->hwnd(), tile, parked);
@@ -513,17 +510,13 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		// work area and jumps back, so then it travels as a still, fully off
 		// screen, at the size it had.
 		auto from = this->managedFrame(m);
-		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
-		// As in Hyprland, the app takes its new size right away and its live
-		// picture is stretched from the old tile to the new one: the slide
-		// starts once it has that size (see WindowMotion::run) and lands at
-		// 1:1, already painted. Chromium waits with a column showing, so it
-		// paints. While the bar toggles Chromium waits fully off screen at
-		// the size it had and travels as a still: partly on screen it fits
-		// itself into the new work area and jumps back.
-		auto still = chromium && this->barMoving;
-		auto parked = still ? QRect(parkedFrame(tile).topLeft(), from.size())
-		                    : tile;
+		// As in Hyprland, the app takes its new size right away, in its new
+		// tile under the cover, and its live picture is stretched from the old
+		// tile to the new one, landing at 1:1. Chromium too while the bar
+		// toggles: sent off screen as a still then, it came back unpainted and
+		// flickered as the slide ended.
+		auto still = false;
+		auto parked = tile;
 		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
 			this->moving.insert(m.window, tile);
 			this->place(m, parked);
