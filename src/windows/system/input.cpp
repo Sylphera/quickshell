@@ -116,4 +116,11 @@ QVariantMap Input::cursorPosition() {
 	return {};
 }
 
+bool Input::isCursorVisible() {
+	CURSORINFO cursor {};
+	cursor.cbSize = sizeof(cursor);
+	return GetCursorInfo(&cursor) && (cursor.flags & CURSOR_SHOWING) != 0
+	    && cursor.hCursor != nullptr;
+}
+
 } // namespace qs::windows::sys
