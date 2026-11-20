@@ -18,6 +18,7 @@
 #include <qrect.h>
 #include <qregion.h>
 #include <qscreen.h>
+#include <qset.h>
 #include <qstring.h>
 #include <qtclasshelpermacros.h>
 #include <qtmetamacros.h>
@@ -102,7 +103,7 @@ public:
 	// A window the shell made fullscreen (Super+F) is on the desktop on screen:
 	// top panels (the bar, the dock) step behind windows, even while a desktop
 	// slide is on, as for an app that went fullscreen itself.
-	static void setShellFullscreen(bool active);
+	static void setShellFullscreen(const QSet<HMONITOR>& monitors);
 
 	explicit WinPanelWindow(QObject* parent = nullptr);
 	~WinPanelWindow() override;

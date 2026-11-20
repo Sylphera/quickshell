@@ -63,6 +63,7 @@ public:
 	[[nodiscard]] bool minimized() const { return this->bMinimized.value(); }
 	[[nodiscard]] bool maximized() const { return this->bMaximized.value(); }
 	[[nodiscard]] bool fullscreen() const { return this->bFullscreen.value(); }
+	[[nodiscard]] bool borderlessFullscreen() const;
 	[[nodiscard]] bool activated() const { return this->bActivated.value(); }
 	[[nodiscard]] qint32 desktop() const { return this->bDesktop.value(); }
 	[[nodiscard]] bool isUwpFrame() const { return this->uwpFrame; }

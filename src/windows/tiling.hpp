@@ -127,6 +127,7 @@ public:
 	// tiled window's tile becomes the whole monitor, a floating one is moved to
 	// cover it and back. False if it can't (minimized, maximized, elevated).
 	bool toggleFullscreen(TrackedWindow* window);
+	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	void updateShellFullscreen();
 	void restoreLeftFullscreen(TrackedWindow* window);
 
@@ -248,6 +249,7 @@ private:
 	void takeOut(Managed& m);
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
+	void leaveFullscreen(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	bool popIn(Managed& m, const QRect& tile);

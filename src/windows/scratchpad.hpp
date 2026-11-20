@@ -73,6 +73,7 @@ private:
 	void hideDim();
 	void stepDim();
 	void relayout();
+	[[nodiscard]] HWND focusCandidate() const;
 	void onWindowAdded(TrackedWindow* window);
 	void onWindowRemoved(TrackedWindow* window);
 	void onActiveWindowChanged();

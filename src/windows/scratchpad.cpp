@@ -419,9 +419,11 @@ void Scratchpad::waitForTakeoff(int generation, int tries) {
 	}
 	this->preparing = false;
 	for (const auto& entry: this->entries) raise(entry.hwnd);
+	auto* focus = this->focusCandidate();
+	if (focus != nullptr) raise(focus);
 	this->showDim();
 	this->slide(true);
-	if (!this->entries.isEmpty()) forceForegroundWindow(this->entries.last().hwnd);
+	if (focus != nullptr) forceForegroundWindow(focus);
 }
 
 int Scratchpad::slideDistance() const {
@@ -756,13 +758,28 @@ void Scratchpad::relayout() {
 		if (tiling != nullptr) tiling->markWindow(entry.window);
 	}
 
-	if (tiling != nullptr || !this->mShown) return;
+	if (tiling != nullptr) {
+		if (this->mShown && !this->preparing) {
+			if (auto* fullscreen = tiling->specialFullscreenWindow()) raise(fullscreen->hwnd());
+		}
+		return;
+	}
+	if (!this->mShown) return;
 	auto work = monitorRects(this->mMonitor).work;
 	auto size = QSize(work.width() * 4 / 5, work.height() * 17 / 20);
 	auto rect = QRect(work.center() - QPoint(size.width() / 2, size.height() / 2), size);
 	for (auto& entry: this->entries) {
-		if (IsWindow(entry.hwnd)) placeAt(entry.hwnd, HWND_TOPMOST, rect);
+		if (!IsWindow(entry.hwnd)) continue;
+		placeAt(entry.hwnd, HWND_TOPMOST, rect);
+		raise(entry.hwnd);
 	}
+}
+
+HWND Scratchpad::focusCandidate() const {
+	if (auto* tiling = TilingManager::active()) {
+		if (auto* fullscreen = tiling->specialFullscreenWindow()) return fullscreen->hwnd();
+	}
+	return this->entries.isEmpty() ? nullptr : this->entries.last().hwnd;
 }
 
 void Scratchpad::showDim() {
@@ -898,7 +915,7 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 		if (!this->mShown || this->entries.isEmpty()) return;
 		auto* active = WindowTracker::instance()->activeWindow();
 		if (active != nullptr && this->contains(active)) return;
-		forceForegroundWindow(this->entries.last().hwnd);
+		if (auto* focus = this->focusCandidate()) forceForegroundWindow(focus);
 	});
 }
 

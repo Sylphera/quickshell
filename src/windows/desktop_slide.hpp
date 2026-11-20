@@ -56,6 +56,7 @@ private:
 		HWND window = nullptr;
 		QRect visible;
 		QRect source;
+		bool fullscreen = false;
 	};
 
 	bool start(qsizetype from, qsizetype to);
@@ -66,7 +67,7 @@ private:
 	HTHUMBNAIL liveThumbnail(HWND window);
 	void clearLiveOverlay();
 	void releaseThumb(const Thumb& thumb);
-	void carryPanels();
+	bool carryPanels();
 	void liftFullscreen(qsizetype desktop = -1);
 	void prepareBackdrop();
 	void releaseBackdrop();

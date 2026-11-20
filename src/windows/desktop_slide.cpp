@@ -404,7 +404,13 @@ void DesktopSlide::retarget(qsizetype to) {
 	// Register live destinations before starting the next segment. The worker
 	// leaves their thumbnails hidden until a strip position is assigned.
 	this->addLiveDesktop(to);
-	if (this->panelsCarried) this->liftFullscreen(to);
+	if (this->panelsCarried) {
+		this->liftFullscreen(to);
+	} else if (this->worker.joinable() && this->carryPanels()) {
+		DwmFlush();
+		WinPanelWindow::setCoverOverPanels(true);
+		this->placeUnderPanels();
+	}
 	{
 		auto lock = std::lock_guard(this->mutex);
 
@@ -530,24 +536,18 @@ void DesktopSlide::clearLiveOverlay() {
 	this->liveThumbnailOrder.clear();
 }
 
-namespace {
-bool shellFullscreen(HWND hwnd) { return GetPropW(hwnd, L"qs.fullscreen") != nullptr; }
-} // namespace
-
 // Hyprland draws the top layer over windows but under a fullscreen one, and
-// the layer stays put while workspaces slide. When a window made fullscreen
-// takes part in a slide, the bar and the other top panels ride in the cover as
+// the layer stays put while workspaces slide. When a fullscreen window takes
+// part in a slide, the bar and the other top panels ride in the cover as
 // fixed copies between the windows and that one.
-void DesktopSlide::carryPanels() {
-	this->panelsCarried = false;
-	bool any = false;
+bool DesktopSlide::carryPanels() {
 	{
 		auto lock = std::lock_guard(this->mutex);
-		for (const auto& thumb: this->thumbs) {
-			if (thumb.window != nullptr && shellFullscreen(thumb.window)) any = true;
-		}
+		auto containsFullscreen = std::ranges::any_of(this->thumbs, [](const Thumb& thumb) {
+			return thumb.desktop >= 0 && thumb.fullscreen;
+		});
+		if (!containsFullscreen) return false;
 	}
-	if (!any) return;
 
 	QList<Thumb> added;
 	for (auto* hwnd: WinPanelWindow::aboveWindowHandles()) {
@@ -568,7 +568,7 @@ void DesktopSlide::carryPanels() {
 		}
 		added.append({.thumbnail = thumbnail, .rect = rect, .desktop = -1, .window = nullptr, .visible = rect});
 	}
-	if (added.isEmpty()) return;
+	if (added.isEmpty()) return false;
 	{
 		auto lock = std::lock_guard(this->mutex);
 		this->thumbs.append(added);
@@ -576,6 +576,7 @@ void DesktopSlide::carryPanels() {
 	this->panelsCarried = true;
 	this->liftFullscreen();
 	qCDebug(logSlide) << "Carrying" << added.size() << "panels under a fullscreen window";
+	return true;
 }
 
 // DWM draws thumbnails in the order they were registered: a fullscreen
@@ -586,7 +587,7 @@ void DesktopSlide::liftFullscreen(qsizetype desktop) {
 	for (auto& thumb: this->thumbs) {
 		if (thumb.window == nullptr || thumb.desktop < 0) continue;
 		if (desktop >= 0 && thumb.desktop != desktop) continue;
-		if (!shellFullscreen(thumb.window)) continue;
+		if (!thumb.fullscreen) continue;
 		DwmUnregisterThumbnail(thumb.thumbnail);
 		this->liveThumbnails.remove(thumb.window);
 		this->liveThumbnailOrder.removeAll(thumb.window);
@@ -704,9 +705,17 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 			complete = false;
 			continue;
 		}
-		added.append(
-		    {.thumbnail = thumbnail, .rect = clipped, .desktop = desktop, .window = hwnd, .source = source}
-		);
+		auto* tracked = tracker->windowFor(hwnd);
+		auto fullscreen = GetPropW(hwnd, L"qs.fullscreen") != nullptr
+		               || (tracked != nullptr && tracked->borderlessFullscreen());
+		added.append({
+		    .thumbnail = thumbnail,
+		    .rect = clipped,
+		    .desktop = desktop,
+		    .window = hwnd,
+		    .source = source,
+		    .fullscreen = fullscreen,
+		});
 	}
 	auto lock = std::lock_guard(this->mutex);
 	this->thumbs.append(added);

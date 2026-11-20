@@ -555,6 +555,10 @@ void TrackedWindow::setMaximized(bool maximized) {
 	PostMessageW(this->mHwnd, WM_SYSCOMMAND, maximized ? SC_MAXIMIZE : SC_RESTORE, 0);
 }
 
+bool TrackedWindow::borderlessFullscreen() const {
+	return this->fullscreen() && (GetWindowLongPtrW(this->mHwnd, GWL_STYLE) & WS_CAPTION) == 0;
+}
+
 void TrackedWindow::setFullscreen(bool fullscreen) {
 	this->fullscreenOn(fullscreen ? this->bScreen.value() : nullptr);
 }

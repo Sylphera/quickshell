@@ -389,9 +389,9 @@ void Dispatcher::dispatchLua(const LuaCall& call) {
 		this->pin(this->resolveWindow(windowArg));
 	} else if (fn == "hl.dsp.window.fullscreen") {
 		auto mode = t.value("mode");
-		this->fullscreen(this->resolveWindow(windowArg), mode == "maximize" || mode == "1" ? 1 : 0);
+		this->fullscreen(windowArg, mode == "maximized" || mode == "maximize" || mode == "1" ? 1 : 0);
 	} else if (fn == "hl.dsp.window.maximize") {
-		this->fullscreen(this->resolveWindow(windowArg), 1);
+		this->fullscreen(windowArg, 1);
 	} else if (fn == "hl.dsp.global") {
 		emit this->ipc->dispatchGlobal(call.scalar);
 	} else if (fn == "hl.dsp.exec" || fn == "hl.dsp.exec_cmd") {
@@ -455,7 +455,7 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 	} else if (name == "focuswindow") {
 		if (auto* window = this->resolveWindow(args)) window->activate();
 	} else if (name == "fullscreen" || name == "fullscreenstate") {
-		this->fullscreen(tracker->activeWindow(), args.trimmed() == "1" ? 1 : 0);
+		this->fullscreen({}, args.trimmed() == "1" ? 1 : 0);
 	} else if (name == "pin") {
 		this->pin(this->resolveWindow(args));
 	} else if (name == "movefocus") {
@@ -670,25 +670,21 @@ void Dispatcher::moveToWorkspace(TrackedWindow* window, const QString& arg, bool
 	moveWindowTo(window, index, follow);
 }
 
-void Dispatcher::fullscreen(TrackedWindow* window, int mode) {
-	if (window == nullptr) return;
+void Dispatcher::fullscreen(const QString& selector, int mode) {
+	auto target = selector.trimmed();
+	if (target.isEmpty() || target == "activewindow") this->ipc->tracker()->syncActive();
 
-	if (mode != 1) {
-		// Inside tiling, without touching the window's styles: stripping its
-		// frame broke it for good when the shell restarted mid-fullscreen.
-		auto* tiling = TilingManager::active();
-		if (tiling != nullptr && tiling->toggleFullscreen(window)) return;
-		window->setMaximized(!window->maximized());
-		return;
+	auto* window = this->resolveWindow(target);
+	if (window == nullptr || window->minimized()) return;
+
+	auto special = Scratchpad::holds(window);
+	if (special && !Scratchpad::instance()->shown()) return;
+
+	if (auto* tiling = TilingManager::active()) {
+		if (mode == 1 ? tiling->toggleFullWidth(window) : tiling->toggleFullscreen(window)) return;
 	}
 
-	auto* tiling = TilingManager::active();
-	if (tiling != nullptr) {
-		auto* focused = window == this->ipc->tracker()->activeWindow() ? tiling->focusedWindow() : window;
-		if (focused != nullptr && tiling->toggleFullWidth(focused)) return;
-	}
-
-	window->setMaximized(!window->maximized());
+	if (!special || mode == 1) window->setMaximized(!window->maximized());
 }
 
 void Dispatcher::pin(TrackedWindow* window) {

@@ -38,7 +38,7 @@ private:
 
 	void focusWorkspace(const QString& arg);
 	void moveToWorkspace(qs::windows::TrackedWindow* window, const QString& arg, bool follow);
-	void fullscreen(qs::windows::TrackedWindow* window, int mode);
+	void fullscreen(const QString& selector, int mode);
 	void pin(qs::windows::TrackedWindow* window);
 	void moveFocus(const QString& direction);
 	void moveWindow(const QString& direction);

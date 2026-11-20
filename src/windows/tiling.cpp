@@ -24,6 +24,7 @@
 #include <qrect.h>
 #include <qregularexpression.h>
 #include <qscreen.h>
+#include <qset.h>
 #include <qstring.h>
 #include <qstringlist.h>
 #include <qtimer.h>
@@ -831,6 +832,7 @@ void TilingManager::stop() {
 	}
 
 	this->managed.clear();
+	WinPanelWindow::setShellFullscreen({});
 	this->layouts.clear();
 	this->dirtyWindows.clear();
 	this->dirtyLayouts.clear();
@@ -895,6 +897,7 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	if (iter == this->managed.end()) return;
 	this->restoreTinyCorners(iter->second);
 
+	auto wasFullscreen = iter->second.fullscreen || window->fullscreen();
 	auto* from = iter->second.layout;
 	auto refocus = from != nullptr && from->lastFocused == window
 	            && TilingManager::scrollingOf(from) != nullptr;
@@ -912,6 +915,7 @@ void TilingManager::unmanage(TrackedWindow* window) {
 		if (layout->lastFocused == window) layout->lastFocused = nullptr;
 	}
 
+	if (wasFullscreen) this->updateShellFullscreen();
 	if (refocus) this->refocus(from);
 }
 
@@ -1137,6 +1141,13 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	if (current != nullptr && this->layoutAlive(current) && IsEqualGUID(current->desktop, desktop)) {
 		want = current;
 
+		if (special && state == State::Tiled && current->screen != screenForMonitor(Scratchpad::instance()->monitor())) {
+			if (auto* destination = this->layoutFor(window, true); destination != nullptr && destination != current) {
+				this->moveToLayout(m, destination, nullptr);
+				return;
+			}
+		}
+
 		if (!special && state == State::Tiled && !m.verifying && !m.offscreen
 		    && window->screen() != current->screen)
 		{
@@ -1287,7 +1298,10 @@ void TilingManager::apply(Layout* layout) {
 		auto tile = this->tileRect(layout, window);
 		// Fullscreen covers the monitor, and the shell's bar and dock step
 		// behind it (updateShellFullscreen).
-		if (m.fullscreen) tile = fullscreenFrame(window->hwnd(), rects.monitor);
+		if (m.fullscreen) {
+			tile = fullscreenFrame(window->hwnd(), rects.monitor);
+			if (layout->special) tile.translate(0, this->mSpecialOffset);
+		}
 		if (m.popping) continue;
 		auto fresh = std::exchange(m.fresh, false);
 		if (fresh && m.target.isNull() && !m.fullscreen && this->popIn(m, tile)) continue;
@@ -1711,13 +1725,17 @@ QHash<HWND, QRect> TilingManager::specialFrames() const {
 	QHash<HWND, QRect> frames;
 	for (const auto& [key, layout]: this->layouts) {
 		if (!layout->special) continue;
+		auto monitor = physicalMonitor(layout->screen);
 		for (auto id: layout->tree->ids()) {
 			if (layout->tree->isHidden(id)) continue;
 			auto* window = this->windowOf(id);
 			if (window == nullptr) continue;
 			auto found = this->managed.find(window);
 			if (found == this->managed.end() || this->stateOf(found->second) != State::Tiled) continue;
-			frames.insert(window->hwnd(), this->tileRect(layout.get(), window).translated(0, -this->mSpecialOffset));
+			auto frame = found->second.fullscreen
+			               ? fullscreenFrame(window->hwnd(), monitor)
+			               : this->tileRect(layout.get(), window).translated(0, -this->mSpecialOffset);
+			frames.insert(window->hwnd(), frame);
 		}
 	}
 	return frames;
@@ -2704,7 +2722,11 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 
 	if (!m.fullscreen) {
 		if (m.elevated || window->minimized()) return false;
-		auto rects = monitorRects(monitorForScreen(window->screen()));
+		auto special = Scratchpad::holds(window);
+		auto* scratchpad = Scratchpad::instance();
+		if (special && !scratchpad->shown()) return false;
+		auto* monitor = special ? scratchpad->monitor() : monitorForScreen(window->screen());
+		auto rects = monitorRects(monitor);
 		if (!rects.valid) return false;
 		// A maximized window (osu!, say) goes fullscreen from its normal size and
 		// is maximized again when it leaves.
@@ -2713,40 +2735,74 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		RECT raw {};
 		if (!GetWindowRect(hwnd, &raw)) return false;
 		auto before = QRect(QPoint(raw.left, raw.top), QPoint(raw.right - 1, raw.bottom - 1));
+		for (auto& [other, existing]: this->managed) {
+			if (!existing.fullscreen || Scratchpad::holds(other) != special) continue;
+			if (special || (other->desktop() == window->desktop() && other->screen() == window->screen())) {
+				this->leaveFullscreen(existing);
+			}
+		}
 		auto tiled = m.layout != nullptr && (wasMaximized || this->stateOf(m) == State::Tiled);
 		// A floating window (a game with a fixed size, say) goes back where it
 		// was afterwards; a tiled one goes back to its tile.
 		m.fullscreenRestore = tiled ? QRect() : before;
 		m.fullscreenWasMaximized = wasMaximized;
 		markFullscreen(hwnd, before, wasMaximized);
-		setFrame(hwnd, fullscreenFrame(hwnd, rects.monitor));
+		auto frame = fullscreenFrame(hwnd, rects.monitor);
+		if (special) frame.translate(0, this->mSpecialOffset);
+		setFrame(hwnd, frame);
+
+		m.fullscreen = true;
+		setFullscreenLook(hwnd, true);
+		this->markLayout(m.layout);
+		window->activate();
 	} else {
-		if (!m.fullscreenRestore.isNull()) setRawRect(hwnd, m.fullscreenRestore);
-		if (m.fullscreenWasMaximized) ShowWindowAsync(hwnd, SW_MAXIMIZE);
-		m.fullscreenRestore = QRect();
-		m.fullscreenWasMaximized = false;
-		unmarkFullscreen(hwnd);
+		this->leaveFullscreen(m);
 	}
 
-	m.fullscreen = !m.fullscreen;
 	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
 	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen");
-	setFullscreenLook(hwnd, m.fullscreen);
-	if (m.layout != nullptr) this->markLayout(m.layout);
-	if (m.fullscreen) window->activate();
 	this->updateShellFullscreen();
 	return true;
+}
+
+void TilingManager::leaveFullscreen(Managed& m) {
+	auto* hwnd = m.window->hwnd();
+	if (!m.fullscreenRestore.isNull()) setRawRect(hwnd, m.fullscreenRestore);
+	if (m.fullscreenWasMaximized) ShowWindowAsync(hwnd, SW_MAXIMIZE);
+	m.fullscreenRestore = QRect();
+	m.fullscreenWasMaximized = false;
+	m.fullscreen = false;
+	unmarkFullscreen(hwnd);
+	setFullscreenLook(hwnd, false);
+	this->markLayout(m.layout);
+}
+
+TrackedWindow* TilingManager::specialFullscreenWindow() const {
+	for (const auto& [window, m]: this->managed) {
+		if (m.fullscreen && Scratchpad::holds(window) && !window->minimized()) return window;
+	}
+	return nullptr;
 }
 
 // The bar and the dock step behind a fullscreen window on the desktop on
 // screen, as Hyprland's top layer does, from the start of a slide to it.
 void TilingManager::updateShellFullscreen() {
 	auto shown = this->desktops != nullptr ? this->desktops->shownIndex() : -1;
-	auto any = false;
-	for (auto& [window, m]: this->managed) {
-		if (m.fullscreen && window->desktop() == shown && !window->minimized()) any = true;
+	auto* scratchpad = Scratchpad::instance();
+	auto* specialMonitor = scratchpad->shown() ? scratchpad->monitor() : nullptr;
+	QSet<HMONITOR> fullscreenMonitors;
+	for (const auto& [window, m]: this->managed) {
+		if (window->minimized()) continue;
+		if (!m.fullscreen && !window->borderlessFullscreen()) continue;
+
+		if (Scratchpad::holds(window)) {
+			if (specialMonitor != nullptr) fullscreenMonitors.insert(specialMonitor);
+		} else if (window->desktop() == shown) {
+			auto* monitor = monitorForScreen(window->screen());
+			if (monitor != nullptr && monitor != specialMonitor) fullscreenMonitors.insert(monitor);
+		}
 	}
-	WinPanelWindow::setShellFullscreen(any);
+	WinPanelWindow::setShellFullscreen(fullscreenMonitors);
 }
 
 bool TilingManager::toggleSplit(TrackedWindow* window) {
