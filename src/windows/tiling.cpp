@@ -457,6 +457,16 @@ void TilingManager::setAnimateMoves(bool animate) {
 }
 
 namespace {
+QRect maximizedFrame(HWND hwnd, const QRect& work) {
+	QRect raw;
+	QRect frame;
+	if (!readFrame(hwnd, raw, frame)) return work;
+	const auto dpi = GetDpiForWindow(hwnd);
+	const auto border = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+	return work.adjusted(-border + frame.left() - raw.left(), 0, border + frame.right() - raw.right(),
+	                     border + frame.bottom() - raw.bottom());
+}
+
 QRect parkedFrame(const QRect& tile, bool peek = false) {
 	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + (peek ? -1 : 100);
 	return QRect(QPoint(x, tile.top()), tile.size());
@@ -586,7 +596,10 @@ void TilingManager::onMotionLanded(HWND hwnd, const QRect& /*frame*/) {
 		auto tile = iter.value();
 		this->moving.erase(iter);
 		auto found = this->managed.find(window);
-		if (found != this->managed.end()) this->place(found->second, tile);
+		if (found != this->managed.end()) {
+			this->place(found->second, tile);
+			if (found->second.maximizePending) this->finishMaximize(found->second);
+		}
 		return;
 	}
 }
@@ -1166,7 +1179,7 @@ TilingManager::State TilingManager::stateOf(const Managed& m) const {
 	if (m.override != Override::Tile && (m.autoFloat || this->floatsByRule(m))) return State::Out;
 
 	if (window->minimized()) return State::Hidden;
-	if (window->maximized()) return State::Suspended;
+	if (window->maximized() && !m.maximizedTile) return State::Suspended;
 
 	auto framed = (GetWindowLongPtrW(window->hwnd(), GWL_STYLE) & (WS_CAPTION | WS_THICKFRAME))
 	           == (WS_CAPTION | WS_THICKFRAME);
@@ -1340,6 +1353,14 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	auto& m = iter->second;
 
 	if (window == this->dragging) return;
+
+	if (m.layout != nullptr && !m.maximizePending && !Scratchpad::holds(window)) {
+		const auto maximized = window->maximized() && !window->minimized();
+		if (maximized != m.maximizedTile) {
+			m.maximizedTile = maximized;
+			m.fullscreenToggled = false;
+		}
+	}
 
 	auto state = this->stateOf(m);
 	if (state != State::Tiled) {
@@ -1602,12 +1623,13 @@ void TilingManager::apply(Layout* layout) {
 		this->markOffscreen(m, parked, restore);
 
 		auto tile = this->tileRect(layout, window);
+		if (m.maximizedTile && !layout->special) tile = maximizedFrame(window->hwnd(), rects.work);
 		if (m.fullscreen) {
 			tile = fullscreenFrame(window->hwnd(), rects.monitor);
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
 		if (m.popping) continue;
-		const auto scenePlacement = presenting && !m.fullscreen && !parked;
+		const auto scenePlacement = presenting && !m.fullscreen && !m.maximizedTile && !parked;
 		if (scenePlacement && (animateRearrangement || m.contractionHeld) && this->holdContraction(m, tile))
 			continue;
 		if (m.contractionHeld) {
@@ -1619,7 +1641,13 @@ void TilingManager::apply(Layout* layout) {
 			continue;
 		}
 		this->placeMoving(m, layout, tile);
+		if (m.maximizePending && !this->moving.contains(window)) this->finishMaximize(m);
 	}
+}
+
+void TilingManager::finishMaximize(Managed& m) {
+	m.maximizePending = false;
+	if (m.maximizedTile && !m.window->maximized()) m.window->setMaximized(true);
 }
 
 bool TilingManager::holdContraction(Managed& m, const QRect& tile) {
@@ -1709,7 +1737,7 @@ bool TilingManager::dwindlePlan(
 		if (window == nullptr) continue;
 		const auto& m = this->managed.at(window);
 		if (this->stateOf(m) == State::Hidden) continue;
-		if (this->stateOf(m) != State::Tiled || m.fullscreen || m.popping || m.elevated
+		if (this->stateOf(m) != State::Tiled || m.fullscreen || m.maximizedTile || m.popping || m.elevated
 		    || this->moving.contains(window))
 			return false;
 		auto tile = this->tileRect(layout, window);
@@ -2036,6 +2064,11 @@ bool TilingManager::needsNativeFrameRefresh(Managed& m) {
 void TilingManager::place(Managed& m, const QRect& tile) {
 	if (m.contractionHeld) return;
 	claimEarlyPark(m.window->hwnd());
+	if (m.maximizedTile && m.window->maximized()) {
+		m.target = tile;
+		m.verifying = false;
+		return;
+	}
 	auto frame = this->managedFrame(m);
 	this->updateTinyCorners(m, frame);
 	const auto refreshNativeFrame = this->needsNativeFrameRefresh(m);
@@ -3111,6 +3144,30 @@ bool TilingManager::toggleFit(TrackedWindow* window) {
 
 	this->fitToggled = !this->fitToggled;
 	this->markAll();
+	return true;
+}
+
+bool TilingManager::toggleMaximize(TrackedWindow* window) {
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end()) return false;
+	auto& m = iter->second;
+	if (m.layout == nullptr || m.layout->special || m.fullscreen || m.elevated || window->minimized()
+	    || this->stateOf(m) != State::Tiled)
+		return false;
+
+	DwindleScene::dismissAll();
+	auto* hwnd = window->hwnd();
+	if (!m.maximizedTile) {
+		m.maximizedTile = true;
+		m.maximizePending = true;
+	} else {
+		m.maximizedTile = false;
+		m.maximizePending = false;
+		if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+	}
+	m.fullscreenToggled = true;
+	this->markLayout(m.layout);
+	window->activate();
 	return true;
 }
 

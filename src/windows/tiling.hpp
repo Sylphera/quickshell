@@ -121,6 +121,7 @@ public:
 	bool centerColumn(TrackedWindow* window);
 	bool toggleFit(TrackedWindow* window);
 	bool toggleFullWidth(TrackedWindow* window);
+	bool toggleMaximize(TrackedWindow* window);
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	void updateShellFullscreen();
@@ -209,6 +210,8 @@ private:
 		bool tinyCornersApplied = false;
 		bool fresh = false;
 		bool staged = false;
+		bool maximizedTile = false;
+		bool maximizePending = false;
 		bool contractionHeld = false;
 		bool stageUntilHandoff = false;
 		qint64 managedAt = 0;
@@ -255,6 +258,7 @@ private:
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
 	void coverNewWindow(HWND hwnd);
 	void stage(Managed& m, const QRect& tile, bool untilHandoff = false);
+	void finishMaximize(Managed& m);
 	bool holdContraction(Managed& m, const QRect& tile);
 	bool stageOccluding(HWND hwnd);
 	void releaseStaged(const QList<HWND>& windows, bool timer = false);
