@@ -69,61 +69,6 @@ std::atomic<int> gEarlyParkCount = 0;                           // NOLINT
 constexpr qint64 EARLY_PARK_MS = 1000;
 constexpr qint64 EARLY_PARK_SAFETY_MS = 5000;
 
-constexpr const wchar_t* PARK_PROP = L"qs.parked";
-using ParkSetEnabled = void (*)(BOOL, DWORD);
-std::atomic<ParkSetEnabled> gParkHookSet = nullptr; // NOLINT
-
-void startParkHook() {
-	static std::once_flag once;
-	std::call_once(once, []() {
-		std::thread([]() {
-			wchar_t path[MAX_PATH] {};
-			GetModuleFileNameW(nullptr, path, MAX_PATH);
-			auto* slash = wcsrchr(path, L'\\');
-			if (slash == nullptr) return;
-			wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"qs-window-park.dll");
-			WIN32_FILE_ATTRIBUTE_DATA info {};
-			if (!GetFileAttributesExW(path, GetFileExInfoStandard, &info)) return;
-			wchar_t copy[MAX_PATH] {};
-			if (GetTempPathW(MAX_PATH, copy) == 0) return;
-			wchar_t name[64] {};
-			swprintf_s(name, L"qs-window-park-%08lx%08lx.dll", info.ftLastWriteTime.dwHighDateTime, info.ftLastWriteTime.dwLowDateTime);
-			wcscat_s(copy, name);
-			CopyFileW(path, copy, TRUE);
-			auto* module = LoadLibraryW(copy);
-			if (module == nullptr) return;
-			auto* proc = reinterpret_cast<HOOKPROC>(GetProcAddress(module, "qsParkCallWndProc")); // NOLINT
-			auto set = reinterpret_cast<ParkSetEnabled>(GetProcAddress(module, "qsParkSetEnabled")); // NOLINT
-			if (proc == nullptr || set == nullptr) return;
-			if (SetWindowsHookExW(WH_CALLWNDPROC, proc, module, 0) == nullptr) return;
-			set(gParkNew.load() ? TRUE : FALSE, GetCurrentProcessId());
-			gParkHookSet.store(set);
-			MSG msg {};
-			while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
-		}).detach();
-	});
-}
-
-bool parkedByHook(HWND hwnd) { return GetPropW(hwnd, PARK_PROP) != nullptr; }
-
-RECT hookWanted(HWND hwnd) {
-	RECT rect {};
-	GetWindowRect(hwnd, &rect);
-	auto width = rect.right - rect.left;
-	auto height = rect.bottom - rect.top;
-	rect.left = static_cast<LONG>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, L"qs.px"))); // NOLINT
-	rect.top = static_cast<LONG>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, L"qs.py")));  // NOLINT
-	rect.right = rect.left + width;
-	rect.bottom = rect.top + height;
-	return rect;
-}
-
-void unmarkHook(HWND hwnd) {
-	RemovePropW(hwnd, PARK_PROP);
-	RemovePropW(hwnd, L"qs.px");
-	RemovePropW(hwnd, L"qs.py");
-}
-
 bool coversEarly(HWND hwnd) {
 	DWORD pid = 0;
 	GetWindowThreadProcessId(hwnd, &pid);
@@ -140,11 +85,8 @@ bool parksEarly(HWND hwnd) { return gParkNew.load() && coversEarly(hwnd); }
 int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100; }
 
 void parkEarly(HWND hwnd, bool again = false) {
-	auto byHook = parkedByHook(hwnd);
-	if (byHook && again) return;
 	RECT rect {};
 	if (!GetWindowRect(hwnd, &rect)) return;
-	if (byHook) rect = hookWanted(hwnd);
 	{
 		auto lock = std::lock_guard(gParkMutex);
 		auto found = gEarlyParked.find(hwnd);
@@ -157,7 +99,6 @@ void parkEarly(HWND hwnd, bool again = false) {
 			gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
 		}
 	}
-	if (byHook) return;
 	auto y = parkedTop();
 	SetWindowPos(
 	    hwnd,
@@ -172,7 +113,6 @@ void parkEarly(HWND hwnd, bool again = false) {
 
 void putBack(HWND hwnd, const RECT& rect) {
 	if (!IsWindow(hwnd)) return;
-	unmarkHook(hwnd);
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
@@ -235,12 +175,12 @@ void CALLBACK queueEvent(
 
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && gEarlyParkCount.load() > 0) parkEarly(hwnd, true);
 	if (event == EVENT_OBJECT_CREATE) {
-		if (gParkHookSet.load() == nullptr && GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
+		if (GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
 		if (GetAncestor(hwnd, GA_ROOT) != hwnd || !coversEarly(hwnd)) return;
 	}
 
 	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd
-	    && (parkedByHook(hwnd) || (mayBecomeTracked(hwnd) && parksEarly(hwnd))))
+	    && mayBecomeTracked(hwnd) && parksEarly(hwnd))
 	{
 		parkEarly(hwnd);
 	}
@@ -739,14 +679,9 @@ void WindowTracker::startEventThread() {
 	std::thread(&eventThreadMain).detach();
 }
 
-void setParkNewWindows(bool park) {
-	if (gParkNew.exchange(park) != park || gParkHookSet.load() == nullptr) {
-		if (auto set = gParkHookSet.load()) set(park ? TRUE : FALSE, GetCurrentProcessId());
-	}
-}
+void setParkNewWindows(bool park) { gParkNew.store(park); }
 
 void claimEarlyPark(HWND hwnd) {
-	if (parkedByHook(hwnd)) unmarkHook(hwnd);
 	if (gEarlyParkCount.load() == 0) return;
 	auto lock = std::lock_guard(gParkMutex);
 	gEarlyParked.erase(hwnd);
@@ -754,25 +689,18 @@ void claimEarlyPark(HWND hwnd) {
 }
 
 bool isEarlyParked(HWND hwnd) {
-	if (parkedByHook(hwnd)) return true;
 	if (gEarlyParkCount.load() == 0) return false;
 	auto lock = std::lock_guard(gParkMutex);
 	return gEarlyParked.contains(hwnd);
 }
 
 void releaseEarlyPark(HWND hwnd) {
-	if (gEarlyParkCount.load() == 0 && !parkedByHook(hwnd)) return;
+	if (gEarlyParkCount.load() == 0) return;
 	RECT rect {};
 	{
 		auto lock = std::lock_guard(gParkMutex);
 		auto found = gEarlyParked.find(hwnd);
-		if (found == gEarlyParked.end()) {
-			if (parkedByHook(hwnd)) {
-				rect = hookWanted(hwnd);
-				putBack(hwnd, rect);
-			}
-			return;
-		}
+		if (found == gEarlyParked.end()) return;
 		rect = found->second.first;
 		gEarlyParked.erase(found);
 		gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
