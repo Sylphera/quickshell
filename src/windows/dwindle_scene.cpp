@@ -27,7 +27,7 @@ using Microsoft::WRL::ComPtr;
 
 Q_LOGGING_CATEGORY(logDwindleScene, "quickshell.windows.dwindle.scene", QtWarningMsg);
 
-constexpr double Duration = 0.16;
+constexpr double Duration = 0.3;
 constexpr auto SettleMs = 55;
 constexpr double JoinGrace = 0.12;
 constexpr double CoverHold = 0.7;
@@ -454,18 +454,19 @@ bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 bool Scene::animate(float from, float to, qint64 time, auto setter) {
 	if (from == to) return SUCCEEDED(setter(to));
 	ComPtr<IDCompositionAnimation> animation;
-	const auto distance = static_cast<double>(to) - from;
 	LARGE_INTEGER begin {};
 	begin.QuadPart = time;
-	return SUCCEEDED(this->device->CreateAnimation(animation.GetAddressOf()))
-	    && SUCCEEDED(animation->SetAbsoluteBeginTime(begin))
-	    && SUCCEEDED(animation->AddCubic(
-	        0, from, static_cast<float>(3 * distance / Duration),
-	        static_cast<float>(-3 * distance / (Duration * Duration)),
-	        static_cast<float>(distance / (Duration * Duration * Duration))
-	    ))
-	    && SUCCEEDED(animation->End(Duration, to))
-	    && SUCCEEDED(setter(animation.Get()));
+	if (FAILED(this->device->CreateAnimation(animation.GetAddressOf()))
+	    || FAILED(animation->SetAbsoluteBeginTime(begin)))
+		return false;
+	for (const auto& segment: dwindle::curveSegments(from, to, Duration)) {
+		if (FAILED(animation->AddCubic(
+		        segment.begin, static_cast<float>(segment.value), static_cast<float>(segment.linear),
+		        static_cast<float>(segment.quadratic), static_cast<float>(segment.cubic)
+		    )))
+			return false;
+	}
+	return SUCCEEDED(animation->End(Duration, to)) && SUCCEEDED(setter(animation.Get()));
 }
 
 bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& before) {

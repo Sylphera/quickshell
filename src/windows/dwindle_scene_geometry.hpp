@@ -10,9 +10,92 @@
 
 namespace qs::windows::dwindle {
 
+constexpr double CurveX1 = 0.05;
+constexpr double CurveY1 = 0.7;
+constexpr double CurveX2 = 0.1;
+constexpr double CurveY2 = 1.0;
+constexpr int CurveSegments = 16;
+
+inline double bezierAt(double a, double b, double u) {
+	const auto v = 1.0 - u;
+	return 3 * v * v * u * a + 3 * v * u * u * b + u * u * u;
+}
+
+inline double bezierSlopeAt(double a, double b, double u) {
+	const auto v = 1.0 - u;
+	return 3 * v * v * a + 6 * v * u * (b - a) + 3 * u * u * (1 - b);
+}
+
+inline double curveParameter(double t) {
+	auto low = 0.0;
+	auto high = 1.0;
+	for (auto step = 0; step < 48; ++step) {
+		const auto middle = (low + high) / 2;
+		if (bezierAt(CurveX1, CurveX2, middle) < t) low = middle;
+		else high = middle;
+	}
+	return (low + high) / 2;
+}
+
+inline double ease(double t) {
+	if (t <= 0) return 0;
+	if (t >= 1) return 1;
+	return bezierAt(CurveY1, CurveY2, curveParameter(t));
+}
+
+inline double easeSlope(double t) {
+	const auto u = curveParameter(std::clamp(t, 0.0, 1.0));
+	const auto dx = bezierSlopeAt(CurveX1, CurveX2, u);
+	if (dx <= 1e-9) return 0;
+	return bezierSlopeAt(CurveY1, CurveY2, u) / dx;
+}
+
+struct CurveSegment {
+	double begin;
+	double value;
+	double linear;
+	double quadratic;
+	double cubic;
+};
+
+inline QList<CurveSegment> curveSegments(double from, double to, double duration) {
+	QList<CurveSegment> segments;
+	segments.reserve(CurveSegments);
+	const auto distance = to - from;
+	for (auto i = 0; i < CurveSegments; ++i) {
+		const auto a = static_cast<double>(i) / CurveSegments;
+		const auto b = static_cast<double>(i + 1) / CurveSegments;
+		const auto t0 = duration * a * a;
+		const auto t1 = duration * b * b;
+		const auto span = t1 - t0;
+		const auto y0 = from + distance * ease(t0 / duration);
+		const auto y1 = from + distance * ease(t1 / duration);
+		const auto m0 = distance * easeSlope(t0 / duration) / duration;
+		const auto m1 = distance * easeSlope(t1 / duration) / duration;
+		const auto rise = (y1 - y0) / span;
+		segments.append({
+		    t0,
+		    y0,
+		    m0,
+		    (3 * rise - 2 * m0 - m1) / span,
+		    (m0 + m1 - 2 * rise) / (span * span),
+		});
+	}
+	return segments;
+}
+
+inline double curveValue(const QList<CurveSegment>& segments, double time) {
+	const auto* active = &segments.first();
+	for (const auto& segment: segments) {
+		if (segment.begin > time) break;
+		active = &segment;
+	}
+	const auto s = time - active->begin;
+	return active->value + s * (active->linear + s * (active->quadratic + s * active->cubic));
+}
+
 inline QRectF interpolate(const QRectF& from, const QRectF& to, double t) {
-	const auto f = 1.0 - t;
-	const auto weight = 1.0 - f * f * f;
+	const auto weight = ease(t);
 	return {
 	    std::lerp(from.x(), to.x(), weight),
 	    std::lerp(from.y(), to.y(), weight),

@@ -73,6 +73,7 @@ private slots:
 	void dwindleBurstKeepsTilesApart();
 	void dwindleSwapUsesImmediatePlacement();
 	void dwindleStackedStartupWindowEntersAsNew();
+	void dwindleCurveFollowsEmphasizedDecel();
 	void newColumnsGoRightOfTheFocusedOne();
 	void gapsKeepWindowSizesWhileScrolling();
 	void parksColumnsOffTheScreen();
@@ -163,6 +164,35 @@ void TestTilingLayout::dwindleSwapUsesImmediatePlacement() {
 	const QList<QRect> targets {{110, 0, 100, 100}, {0, 0, 100, 100}};
 	QList<std::optional<QRectF>> origins {QRectF(0, 0, 100, 100), QRectF(110, 0, 100, 100)};
 	QVERIFY(!qs::windows::dwindle::planOrigins(targets, origins));
+}
+
+void TestTilingLayout::dwindleCurveFollowsEmphasizedDecel() {
+	using qs::windows::dwindle::curveSegments;
+	using qs::windows::dwindle::curveValue;
+	using qs::windows::dwindle::ease;
+
+	QCOMPARE(ease(0.0), 0.0);
+	QCOMPARE(ease(1.0), 1.0);
+	QVERIFY(std::abs(ease(0.5) - 0.95025) < 0.0005);
+	auto previous = 0.0;
+	for (auto i = 1; i <= 1000; ++i) {
+		const auto value = ease(i / 1000.0);
+		QVERIFY(value >= previous);
+		QVERIFY(value <= 1.0);
+		previous = value;
+	}
+
+	constexpr auto duration = 0.3;
+	for (const auto& [from, to]: {std::pair(0.0, 1920.0), std::pair(964.0, 0.0), std::pair(40.0, 560.0)}) {
+		const auto segments = curveSegments(from, to, duration);
+		auto worst = 0.0;
+		for (auto i = 0; i <= 3000; ++i) {
+			const auto time = duration * i / 3000.0;
+			const auto expected = from + (to - from) * ease(time / duration);
+			worst = std::max(worst, std::abs(curveValue(segments, time) - expected));
+		}
+		QVERIFY2(worst < 0.5, qPrintable(QString::number(worst)));
+	}
 }
 
 void TestTilingLayout::dwindleStackedStartupWindowEntersAsNew() {
