@@ -300,6 +300,7 @@ LRESULT onKey(const HookSnapshot& snapshot, const KBDLLHOOKSTRUCT* info, bool up
 		post(HookPressed, trigger.id, snapshot.serial);
 
 		if ((mods & (ModSuper | ModAlt)) != 0) injectMask();
+		if ((mods & ModSuper) != 0) gSuperChord.store(true);
 		return 1;
 	}
 
