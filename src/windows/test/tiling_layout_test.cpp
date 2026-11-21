@@ -1,3 +1,4 @@
+#include <random>
 #include <tuple>
 
 #include <qlist.h>
@@ -7,6 +8,7 @@
 #include <qtest.h>
 #include <qtestcase.h>
 
+#include "dwindle_scene_geometry.hpp"
 #include "tiling_layout.hpp"
 #include "tiling_target.hpp"
 #include "window_event_order.hpp"
@@ -68,6 +70,8 @@ class TestTilingLayout: public QObject {
 	Q_OBJECT;
 
 private slots:
+	void dwindleBurstKeepsTilesApart();
+	void dwindleSwapUsesImmediatePlacement();
 	void newColumnsGoRightOfTheFocusedOne();
 	void gapsKeepWindowSizesWhileScrolling();
 	void parksColumnsOffTheScreen();
@@ -104,6 +108,61 @@ private slots:
 	void dwindleSplitCommandsPreserveTreeStructure();
 	void subpixelDwindleSplitMatchesHyprland();
 };
+
+void TestTilingLayout::dwindleBurstKeepsTilesApart() {
+	using qs::windows::dwindle::interpolate;
+	using qs::windows::dwindle::Motion;
+	using qs::windows::dwindle::planOrigins;
+
+	std::mt19937 random(31794);
+	for (auto sequence = 0; sequence < 20; ++sequence) {
+		DwindleLayout layout;
+		QHash<Id, Motion> previous;
+		auto next = Id(1);
+		for (auto step = 0; step < 50; ++step) {
+			const auto ids = layout.ids();
+			if (ids.isEmpty() || (ids.size() < 12 && random() % 5 < 3)) {
+				const auto target = ids.isEmpty() ? Id(0) : ids.at(random() % ids.size());
+				layout.insert(next++, target, nullptr);
+			} else {
+				layout.remove(ids.at(random() % ids.size()));
+			}
+			layout.compute(QRect(0, 0, 1920, 1040));
+			auto visible = QList<Id>();
+			auto targets = QList<QRect>();
+			auto origins = QList<std::optional<QRectF>>();
+			for (auto id: layout.ids()) {
+				const auto target = layout.box(id).adjusted(4, 4, -4, -4);
+				if (target.isEmpty()) continue;
+				visible.append(id);
+				targets.append(target);
+				const auto old = previous.constFind(id);
+				if (old == previous.constEnd()) origins.append(std::nullopt);
+				else origins.append(interpolate(old->from, old->target, 0.21));
+			}
+			QVERIFY(planOrigins(targets, origins));
+			previous.clear();
+			for (qsizetype i = 0; i < visible.size(); ++i) {
+				previous.insert(visible[i], {*origins[i], targets[i]});
+				for (qsizetype j = 0; j < i; ++j) {
+					for (auto sample = 0; sample <= 16; ++sample) {
+						const auto t = sample / 16.0;
+						const auto a = interpolate(*origins[i], targets[i], t);
+						const auto b = interpolate(*origins[j], targets[j], t);
+						const auto intersection = a.intersected(b);
+						QVERIFY(intersection.width() <= 0.002 || intersection.height() <= 0.002);
+					}
+				}
+			}
+		}
+	}
+}
+
+void TestTilingLayout::dwindleSwapUsesImmediatePlacement() {
+	const QList<QRect> targets {{110, 0, 100, 100}, {0, 0, 100, 100}};
+	QList<std::optional<QRectF>> origins {QRectF(0, 0, 100, 100), QRectF(110, 0, 100, 100)};
+	QVERIFY(!qs::windows::dwindle::planOrigins(targets, origins));
+}
 
 void TestTilingLayout::newColumnsGoRightOfTheFocusedOne() {
 	ScrollingLayout layout;

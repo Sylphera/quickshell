@@ -4,6 +4,7 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <optional>
 
 #include <d3d11.h>
 #include <dcomp.h>
@@ -14,6 +15,7 @@
 #include <qloggingcategory.h>
 #include <qtimer.h>
 
+#include "dwindle_scene_geometry.hpp"
 #include "panel_window.hpp"
 
 namespace qs::windows {
@@ -89,23 +91,6 @@ qint64 frequency() {
 	return value;
 }
 
-QRectF interpolate(const QRectF& from, const QRectF& to, double t) {
-	const auto f = 1.0 - t;
-	const auto weight = 1.0 - f * f * f;
-	return {
-	    std::lerp(from.x(), to.x(), weight),
-	    std::lerp(from.y(), to.y(), weight),
-	    std::lerp(from.width(), to.width(), weight),
-	    std::lerp(from.height(), to.height(), weight),
-	};
-}
-
-QRectF inset(const QRect& tile) {
-	auto dx = std::min(12.0, tile.width() * 0.06);
-	auto dy = std::min(12.0, tile.height() * 0.06);
-	return QRectF(tile).adjusted(dx, dy, -dx, -dy);
-}
-
 LRESULT CALLBACK overlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
 	switch (message) {
 	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
@@ -156,7 +141,7 @@ struct Tile {
 
 	[[nodiscard]] QRectF at(qint64 now) const {
 		auto elapsed = static_cast<double>(now - this->start) / frequency();
-		return interpolate(this->from, this->target, std::clamp(elapsed / Duration, 0.0, 1.0));
+		return dwindle::interpolate(this->from, this->target, std::clamp(elapsed / Duration, 0.0, 1.0));
 	}
 };
 
@@ -202,7 +187,7 @@ private:
 	bool prepare();
 	bool makeTileColor(ID3D11DeviceContext* context);
 	bool addTile(Tile& tile, const DwindleTile& placement);
-	bool update(Tile& tile, const DwindleTile& placement, qint64 now);
+	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now);
 	bool addSource(Thumbnail& thumb, HWND window, const QRect& bounds = {});
 	bool setNativeSize(Thumbnail& thumb);
 	void refresh();
@@ -368,29 +353,26 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement) {
 	    && SUCCEEDED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr));
 }
 
-bool Scene::update(Tile& tile, const DwindleTile& placement, qint64 now) {
-	if (tile.target == placement.target) return true;
-
-	if (tile.target.isEmpty()) {
-		tile.from = placement.previous.isEmpty() ? inset(placement.target) : QRectF(placement.previous);
-	} else {
-		tile.from = tile.at(now);
-	}
-	tile.target = placement.target;
+bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64 now) {
+	tile.from = origin;
+	tile.target = target;
 	tile.start = now;
 	const auto from = tile.from.translated(-this->work.topLeft());
 	const auto to = tile.target.translated(-this->work.topLeft());
-	const auto round = std::min({8.0, from.width() / 2, from.height() / 2,
-	                             to.width() / 2.0, to.height() / 2.0});
-	const auto radius = static_cast<float>(round);
-	return SUCCEEDED(tile.clip->SetTopLeftRadiusX(radius))
-	    && SUCCEEDED(tile.clip->SetTopLeftRadiusY(radius))
-	    && SUCCEEDED(tile.clip->SetTopRightRadiusX(radius))
-	    && SUCCEEDED(tile.clip->SetTopRightRadiusY(radius))
-	    && SUCCEEDED(tile.clip->SetBottomLeftRadiusX(radius))
-	    && SUCCEEDED(tile.clip->SetBottomLeftRadiusY(radius))
-	    && SUCCEEDED(tile.clip->SetBottomRightRadiusX(radius))
-	    && SUCCEEDED(tile.clip->SetBottomRightRadiusY(radius))
+	const auto radius = [](const QRectF& box) {
+		return static_cast<float>(std::min({8.0, box.width() / 2, box.height() / 2}));
+	};
+	const auto corner = [this, fromRadius = radius(from), toRadius = radius(to), now](auto setter) {
+		return this->animate(fromRadius, toRadius, now, setter);
+	};
+	return corner([&tile](auto value) { return tile.clip->SetTopLeftRadiusX(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetTopLeftRadiusY(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetTopRightRadiusX(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetTopRightRadiusY(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetBottomLeftRadiusX(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetBottomLeftRadiusY(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetBottomRightRadiusX(value); })
+	    && corner([&tile](auto value) { return tile.clip->SetBottomRightRadiusY(value); })
 	    && this->animate(from.x(), to.x(), now, [&tile](auto value) {
 		    return tile.container->SetOffsetX(value);
 	    })
@@ -439,8 +421,20 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 	DCOMPOSITION_FRAME_STATISTICS stats {};
 	if (SUCCEEDED(this->device->GetFrameStatistics(&stats)))
 		start = std::max(start, stats.nextEstimatedFrameTime.QuadPart);
-	for (const auto& placement: plan) {
-		if (!this->update(*this->tiles.at(placement.window), placement, start)) {
+	QList<QRect> targets;
+	targets.reserve(plan.size());
+	QList<std::optional<QRectF>> origins(plan.size());
+	for (qsizetype i = 0; i < plan.size(); ++i) {
+		const auto& placement = plan[i];
+		const auto& tile = *this->tiles.at(placement.window);
+		targets.append(placement.target);
+		if (!tile.target.isEmpty()) origins[i] = tile.at(start);
+		else if (!placement.previous.isEmpty()) origins[i] = placement.previous;
+	}
+	if (!dwindle::planOrigins(targets, origins)) return false;
+	for (qsizetype i = 0; i < plan.size(); ++i) {
+		const auto& placement = plan[i];
+		if (!this->update(*this->tiles.at(placement.window), *origins[i], placement.target, start)) {
 			qCDebug(logDwindleScene) << "Could not schedule tile" << placement.window;
 			return false;
 		}
