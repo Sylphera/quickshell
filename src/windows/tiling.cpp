@@ -474,16 +474,6 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	}
 	m.fresh = false;
 	auto animate = this->canAnimate(m, layout, tile);
-	if (!animate && !m.target.isNull() && tile != m.target) {
-		auto frame = this->managedFrame(m);
-		qCWarning(logTiling).noquote() << "[noanim]" << m.window->addressHex() << m.window->appId() << "target" << m.target
-		                               << "tile" << tile << "frame" << frame << "verifying" << m.verifying << "offscreen"
-		                               << m.offscreen << "tiny" << m.tinyCornersApplied << "dragging"
-		                               << (m.window == this->dragging) << "visible" << (IsWindowVisible(m.window->hwnd()) != FALSE)
-		                               << "hung" << (IsHungAppWindow(m.window->hwnd()) != FALSE) << "desktop"
-		                               << m.window->desktop() << this->desktops->shownIndex() << this->desktops->currentIndex()
-		                               << "barMoving" << this->barMoving;
-	}
 	m.dropped = false;
 	if (animate) {
 		auto from = this->managedFrame(m);

@@ -289,7 +289,7 @@ private:
 
 	bool mEnabled = false;
 	bool mSuppressWindowShadows = false;
-	bool mAnimateMoves = true;
+	bool mAnimateMoves = false;
 	bool barMoving = false;
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;

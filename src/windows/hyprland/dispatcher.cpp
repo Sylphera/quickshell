@@ -229,11 +229,7 @@ bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
 void closeFocused(WindowTracker* tracker) {
 	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
-		auto target = QPointer<TrackedWindow>(window);
-		auto close = [target]() {
-			if (target) target->close();
-		};
-		if (!WindowPop::closeOut(window->hwnd(), close)) window->close();
+		window->close();
 	} else {
 		closeShellWindow(GetForegroundWindow());
 	}
