@@ -523,7 +523,8 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 	if (m.window->desktop() != this->desktops->currentIndex()) return false;
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
-	return rects.valid && rects.monitor.contains(m.target) && rects.monitor.contains(tile) ;
+	auto bounds = rects.monitor.adjusted(-4, -4, 4, 4);
+	return rects.valid && bounds.contains(m.target) && bounds.contains(tile);
 }
 
 void TilingManager::haltMotion(HWND hwnd) {
@@ -1422,10 +1423,6 @@ void TilingManager::apply(Layout* layout) {
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
 		if (m.popping) continue;
-		if (m.fullscreen) {
-			this->place(m, tile);
-			continue;
-		}
 		this->placeMoving(m, layout, tile);
 	}
 }
@@ -2811,7 +2808,7 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		markFullscreen(hwnd, before, wasMaximized);
 		auto frame = fullscreenFrame(hwnd, rects.monitor);
 		if (special) frame.translate(0, this->mSpecialOffset);
-		setFrame(hwnd, frame);
+		if (!tiled) setFrame(hwnd, frame);
 
 		m.fullscreen = true;
 		setFullscreenLook(hwnd, true);
