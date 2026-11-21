@@ -215,6 +215,7 @@ private:
 		bool popping = false;
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
+		bool fullscreenToggled = false;
 	};
 
 	bool start();

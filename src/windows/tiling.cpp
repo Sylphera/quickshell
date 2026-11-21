@@ -476,6 +476,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 	m.fresh = false;
 	auto animate = this->canAnimate(m, layout, tile);
 	m.dropped = false;
+	m.fullscreenToggled = false;
 	if (animate) {
 		auto from = this->managedFrame(m);
 		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
@@ -493,6 +494,7 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 }
 
 bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& tile) const {
+	return false;
 	if (!this->mAnimateMoves || !m.fresh || layout->special || m.window == this->dragging) return false;
 	if (QDateTime::currentMSecsSinceEpoch() - m.managedAt > 2000) return false;
 	auto* hwnd = m.window->hwnd();
@@ -504,9 +506,10 @@ bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& 
 }
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
+	if (!m.fullscreenToggled) return false;
 	if (m.dropped) return this->mAnimateMoves && !m.offscreen && IsWindowVisible(m.window->hwnd()) && !IsIconic(m.window->hwnd());
 	if (!this->mAnimateMoves || m.target.isNull() || tile == m.target) return false;
-	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
+	if ((m.verifying && !this->barMoving && !m.fullscreenToggled) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
@@ -518,7 +521,7 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 		    std::abs(frame.right() - m.target.right()),
 		    std::abs(frame.bottom() - m.target.bottom()),
 		});
-		if (off > 48) return false;
+		if (off > 48 && !m.fullscreenToggled) return false;
 	}
 
 	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
@@ -831,7 +834,7 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 	this->sync();
 	this->barMoving = false;
 
-	if (!this->mAnimateMoves || this->desktops->shownIndex() != this->desktops->currentIndex()) return;
+	return;
 	auto* motion = WindowMotion::instance();
 	for (auto& [window, m]: this->managed) {
 		if (!window->maximized() || window->minimized() || m.elevated) continue;
@@ -1190,7 +1193,7 @@ void TilingManager::schedule() {
 
 void TilingManager::sync() {
 	setParkNewWindows(
-	    this->mEnabled && this->mAnimateMoves && startup::settled()
+	    false && this->mEnabled && this->mAnimateMoves && startup::settled()
 	    && this->desktops->shownIndex() == this->desktops->currentIndex()
 	);
 	if (!this->mEnabled) return;
@@ -2820,6 +2823,7 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		if (!tiled) setFrame(hwnd, frame);
 
 		m.fullscreen = true;
+		m.fullscreenToggled = true;
 		setFullscreenLook(hwnd, true);
 		this->markLayout(m.layout);
 		window->activate();
@@ -2840,6 +2844,7 @@ void TilingManager::leaveFullscreen(Managed& m) {
 	m.fullscreenRestore = QRect();
 	m.fullscreenWasMaximized = false;
 	m.fullscreen = false;
+	m.fullscreenToggled = true;
 	unmarkFullscreen(hwnd);
 	setFullscreenLook(hwnd, false);
 	this->markLayout(m.layout);
