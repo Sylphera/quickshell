@@ -193,6 +193,7 @@ struct Thumbnail {
 	ComPtr<IDCompositionVisual> visual;
 	HTHUMBNAIL handle = nullptr;
 	QRect sourceCrop;
+	QPoint contentOffset;
 
 	~Thumbnail() {
 		if (this->handle != nullptr) DwmUnregisterThumbnail(this->handle);
@@ -204,8 +205,10 @@ struct Tile {
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
 	ComPtr<IDCompositionVisual> liveFrame;
+	ComPtr<IDCompositionVisual> livePixels;
 	ComPtr<IDCompositionRectangleClip> liveClip;
 	QSize liveSize;
+	QPoint liveOffset;
 	ComPtr<IDCompositionVisual> placeholder;
 	ComPtr<IDCompositionVisual> retained;
 	QSize retainedSize;
@@ -397,10 +400,15 @@ bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 	auto crop = QRect(0, 0, size.cx, size.cy);
 	RECT raw {};
 	const auto visible = frame(window);
-	if (!visible.isEmpty() && GetWindowRect(window, &raw)
-	    && size.cx == raw.right - raw.left && size.cy == raw.bottom - raw.top) {
+	thumb.contentOffset = {};
+	if (!visible.isEmpty() && GetWindowRect(window, &raw)) {
 		const auto inner = visible.translated(-raw.left, -raw.top);
-		if (crop.contains(inner)) crop = inner;
+		const auto rawSize = QSize(raw.right - raw.left, raw.bottom - raw.top);
+		if (crop.size() == rawSize && crop.contains(inner)) {
+			crop = inner;
+		} else if (crop.size() == visible.size() && QRect(QPoint(), rawSize).contains(inner)) {
+			thumb.contentOffset = -inner.topLeft();
+		}
 	}
 	if (crop == thumb.sourceCrop) return true;
 	DWM_THUMBNAIL_PROPERTIES props {};
@@ -439,12 +447,14 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 	if (!this->addSource(tile.source, placement.window)
 	    || FAILED(this->device->CreateVisual(tile.container.GetAddressOf()))
 	    || FAILED(this->device->CreateVisual(tile.liveFrame.GetAddressOf()))
+	    || FAILED(this->device->CreateVisual(tile.livePixels.GetAddressOf()))
 	    || FAILED(this->device->CreateRectangleClip(tile.liveClip.GetAddressOf()))
 	    || FAILED(tile.liveClip->SetLeft(0.0f))
 	    || FAILED(tile.liveClip->SetTop(0.0f))
 	    || !this->resizeLiveClip(tile)
 	    || FAILED(tile.liveFrame->SetClip(tile.liveClip.Get()))
-	    || FAILED(tile.liveFrame->AddVisual(tile.source.visual.Get(), FALSE, nullptr))
+	    || FAILED(tile.livePixels->AddVisual(tile.source.visual.Get(), FALSE, nullptr))
+	    || FAILED(tile.liveFrame->AddVisual(tile.livePixels.Get(), FALSE, nullptr))
 	    || FAILED(this->device->CreateRectangleClip(tile.clip.GetAddressOf()))
 	    || FAILED(tile.clip->SetLeft(0.0f))
 	    || FAILED(tile.clip->SetTop(0.0f))
@@ -469,7 +479,9 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 bool Scene::resizeLiveClip(Tile& tile) {
 	const auto size = tile.source.sourceCrop.size();
 	const auto radius = std::min({tile.radius, size.width() / 2.0f, size.height() / 2.0f});
-	if (FAILED(tile.liveClip->SetRight(static_cast<float>(size.width())))
+	if (FAILED(tile.livePixels->SetOffsetX(static_cast<float>(tile.source.contentOffset.x())))
+	    || FAILED(tile.livePixels->SetOffsetY(static_cast<float>(tile.source.contentOffset.y())))
+	    || FAILED(tile.liveClip->SetRight(static_cast<float>(size.width())))
 	    || FAILED(tile.liveClip->SetBottom(static_cast<float>(size.height())))
 	    || FAILED(tile.liveClip->SetTopLeftRadiusX(radius))
 	    || FAILED(tile.liveClip->SetTopLeftRadiusY(radius))
@@ -481,6 +493,7 @@ bool Scene::resizeLiveClip(Tile& tile) {
 	    || FAILED(tile.liveClip->SetBottomRightRadiusY(radius)))
 		return false;
 	tile.liveSize = size;
+	tile.liveOffset = tile.source.contentOffset;
 	return true;
 }
 
@@ -647,7 +660,10 @@ void Scene::refresh() {
 	const auto now = counter();
 	for (auto& [hwnd, tile]: this->tiles) {
 		if (!IsWindow(hwnd) || !this->setNativeSize(tile->source, hwnd)) continue;
-		if (tile->liveSize != tile->source.sourceCrop.size() && this->resizeLiveClip(*tile)) changed = true;
+		if ((tile->liveSize != tile->source.sourceCrop.size()
+		     || tile->liveOffset != tile->source.contentOffset)
+		    && this->resizeLiveClip(*tile))
+			changed = true;
 		if (tile->waitingForSize) {
 			const auto size = tile->source.sourceCrop.size();
 			if (std::abs(size.width() - tile->target.width()) > 4
