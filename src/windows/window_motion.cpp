@@ -4,6 +4,7 @@
 #include <functional>
 
 #include <qcoreapplication.h>
+#include <qloggingcategory.h>
 #include <qpointer.h>
 #include <qtimer.h>
 
@@ -13,6 +14,8 @@ namespace qs::windows {
 
 namespace {
 
+Q_LOGGING_CATEGORY(logMotion, "quickshell.windows.motion", QtWarningMsg);
+
 constexpr double MOVE_MS = 300;
 constexpr double CURVE_X1 = 0.05;
 constexpr double CURVE_Y1 = 0.7;
@@ -20,9 +23,12 @@ constexpr double CURVE_X2 = 0.1;
 constexpr double CURVE_Y2 = 1.0;
 constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
-constexpr double TAKEOFF_TIMEOUT_MS = 0;
+constexpr double TAKEOFF_TIMEOUT_MS = 60;
 constexpr int REPAINT_SETTLE_MS = 33;
+constexpr double FIRST_FRAME_MS = 300;
+constexpr double HOLD_MS = 50;
 constexpr int LINGER_MS = 400;
+constexpr int STILL_MS = 100;
 
 double bezierAt(double a, double b, double t) {
 	auto u = 1.0 - t;
@@ -35,7 +41,7 @@ bool paintsOnlyOnScreen(HWND hwnd) {
 	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
 }
 
-HWND snapshotOf(const QRect& frame) {
+HWND snapshotOf(const QRect& frame, HWND window = nullptr, const QRect& visible = QRect()) {
 	auto width = frame.width();
 	auto height = frame.height();
 	if (width <= 0 || height <= 0) return nullptr;
@@ -76,11 +82,53 @@ HWND snapshotOf(const QRect& frame) {
 	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
 	auto* dc = CreateCompatibleDC(screen);
 	auto* old = SelectObject(dc, bitmap);
-	BitBlt(dc, 0, 0, width, height, screen, frame.x(), frame.y(), SRCCOPY);
+	if (window != nullptr) {
+		if (!PrintWindow(window, dc, PW_RENDERFULLCONTENT)) {
+			SelectObject(dc, old);
+			DeleteDC(dc);
+			DeleteObject(bitmap);
+			ReleaseDC(nullptr, screen);
+			DestroyWindow(host);
+			return nullptr;
+		}
+	} else {
+		BitBlt(dc, 0, 0, width, height, screen, frame.x(), frame.y(), SRCCOPY);
+	}
 	GdiFlush();
 	auto* bits = static_cast<quint32*>(raw);
-	for (qsizetype i = 0; i < static_cast<qsizetype>(width) * height; i++)
-		bits[i] |= 0xff000000; // NOLINT
+	auto count = static_cast<qsizetype>(width) * height;
+	auto translucent = false;
+	if (window != nullptr) {
+		for (qsizetype i = 0; i < count && !translucent; i += 7) {
+			auto alpha = bits[i] >> 24; // NOLINT
+			translucent = alpha != 0 && alpha != 0xff;
+		}
+	}
+	if (!translucent) {
+		for (qsizetype i = 0; i < count; i++) bits[i] |= 0xff000000; // NOLINT
+	}
+	if (window != nullptr && !visible.isEmpty()) {
+		auto dpi = GetDpiForWindow(window);
+		auto radius = static_cast<int>(std::lround(8.0 * (dpi != 0 ? dpi : 96) / 96.0));
+		auto clearOutside = [&](int cx, int cy, int x0, int y0) {
+			for (auto y = y0; y < y0 + radius; y++) {
+				for (auto x = x0; x < x0 + radius; x++) {
+					if (x < 0 || y < 0 || x >= width || y >= height) continue;
+					auto dx = x + 0.5 - cx;
+					auto dy = y + 0.5 - cy;
+					if (dx * dx + dy * dy > static_cast<double>(radius) * radius) bits[(y * width) + x] = 0; // NOLINT
+				}
+			}
+		};
+		auto l = visible.left();
+		auto t = visible.top();
+		auto r = visible.left() + visible.width();
+		auto b = visible.top() + visible.height();
+		clearOutside(l + radius, t + radius, l, t);
+		clearOutside(r - radius, t + radius, r - radius, t);
+		clearOutside(l + radius, b - radius, l, b - radius);
+		clearOutside(r - radius, b - radius, r - radius, b - radius);
+	}
 
 	POINT origin {x, frame.top()};
 	SIZE size {width, height};
@@ -93,6 +141,72 @@ HWND snapshotOf(const QRect& frame) {
 	ReleaseDC(nullptr, screen);
 	ShowWindow(host, SW_SHOWNOACTIVATE);
 	return host;
+}
+
+}
+
+namespace {
+
+bool hasPainted(HWND hwnd) {
+	RECT raw {};
+	if (!GetWindowRect(hwnd, &raw)) return true;
+	RECT bounds {};
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = raw;
+	auto width = static_cast<int>(raw.right - raw.left);
+	auto height = static_cast<int>(raw.bottom - raw.top);
+	auto left = static_cast<int>(bounds.left - raw.left) + 8;
+	auto top = static_cast<int>(bounds.top - raw.top) + 8;
+	auto right = static_cast<int>(bounds.right - raw.left) - 8;
+	auto bottom = static_cast<int>(bounds.bottom - raw.top) - 8;
+	if (width <= 0 || height <= 0 || right <= left || bottom <= top) return true;
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	info.bmiHeader.biCompression = BI_RGB;
+	void* bits = nullptr;
+	auto* screen = GetDC(nullptr);
+	auto* dc = CreateCompatibleDC(screen);
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+	ReleaseDC(nullptr, screen);
+	if (dc == nullptr || bitmap == nullptr || bits == nullptr) {
+		if (bitmap != nullptr) DeleteObject(bitmap);
+		if (dc != nullptr) DeleteDC(dc);
+		return true;
+	}
+	auto* old = SelectObject(dc, bitmap);
+	auto painted = true;
+	if (PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)) {
+		GdiFlush();
+		const auto* pixels = static_cast<const quint32*>(bits);
+		auto first = pixels[(top * width) + left];
+		auto differs = [first](quint32 pixel) {
+			for (auto shift = 0; shift < 24; shift += 8) {
+				auto a = static_cast<int>((first >> shift) & 0xff);
+				auto b = static_cast<int>((pixel >> shift) & 0xff);
+				if (std::abs(a - b) > 6) return true;
+			}
+			return false;
+		};
+		constexpr int STEPS = 24;
+		painted = false;
+		for (auto y = 0; y < STEPS && !painted; y++) {
+			auto py = top + ((bottom - top - 1) * y / (STEPS - 1));
+			for (auto x = 0; x < STEPS; x++) {
+				auto px = left + ((right - left - 1) * x / (STEPS - 1));
+				if (differs(pixels[(py * width) + px])) {
+					painted = true;
+					break;
+				}
+			}
+		}
+	}
+	SelectObject(dc, old);
+	DeleteObject(bitmap);
+	DeleteDC(dc);
+	return painted;
 }
 
 }
@@ -324,6 +438,23 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
+
+	if (entry.holdThumbnail != nullptr) {
+		auto since = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.start).count();
+		DWM_THUMBNAIL_PROPERTIES hold {};
+		hold.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		auto off = entry.holdOffset;
+		hold.rcSource = {off.x(), off.y(), off.x() + entry.holdSize.width(), off.y() + entry.holdSize.height()};
+		hold.rcDestination = props.rcDestination;
+		hold.opacity = props.opacity;
+		if (!entry.waiting && since > 0 && std::abs(frame.width() - entry.to.width()) <= 2
+		    && std::abs(frame.height() - entry.to.height()) <= 2)
+		{
+			entry.caughtUp = true;
+		}
+		hold.fVisible = entry.caughtUp ? FALSE : TRUE;
+		DwmUpdateThumbnailProperties(entry.holdThumbnail, &hold);
+	}
 }
 
 namespace {
@@ -337,14 +468,25 @@ int depthOf(HWND hwnd) {
 
 void WindowMotion::restack() {
 	std::ranges::stable_sort(this->entries, [](const Entry& a, const Entry& b) { return a.depth > b.depth; });
+	QList<HTHUMBNAIL> old;
 	for (auto& entry: this->entries) {
 		HTHUMBNAIL thumbnail = nullptr;
 		auto* source = entry.snapshot != nullptr ? entry.snapshot : entry.hwnd;
 		if (FAILED(DwmRegisterThumbnail(this->cover, source, &thumbnail))) continue;
-		DwmUnregisterThumbnail(entry.thumbnail);
+		old.append(entry.thumbnail);
 		entry.thumbnail = thumbnail;
+		if (entry.holdThumbnail != nullptr) {
+			HTHUMBNAIL hold = nullptr;
+			if (SUCCEEDED(DwmRegisterThumbnail(this->cover, entry.hold, &hold))) {
+				DwmUnregisterThumbnail(entry.holdThumbnail);
+				entry.holdThumbnail = hold;
+			}
+		}
 		this->layout(entry, entry.progress);
 	}
+	if (old.isEmpty()) return;
+	DwmFlush();
+	for (auto* thumbnail: old) DwmUnregisterThumbnail(thumbnail);
 }
 
 bool WindowMotion::begin(
@@ -355,6 +497,11 @@ bool WindowMotion::begin(
     bool pop,
     bool still
 ) {
+	for (auto i = this->stills.size() - 1; i >= 0; i--) {
+		if (this->stills[i].hwnd != hwnd) continue;
+		release(this->stills[i]);
+		this->stills.removeAt(i);
+	}
 	if (this->moving(hwnd)) {
 		this->retarget(hwnd, to, parked);
 		return true;
@@ -363,10 +510,29 @@ bool WindowMotion::begin(
 
 	HWND snapshot = !pop && still ? snapshotOf(from) : nullptr;
 	auto snapshotSize = from.size();
+	HWND hold = nullptr;
+	QPoint holdOffset;
+	QSize holdSize;
+	if (!pop && snapshot == nullptr && (to.width() > from.width() + 2 || to.height() > from.height() + 2)) {
+		RECT raw {};
+		RECT bounds {};
+		if (GetWindowRect(hwnd, &raw)
+		    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		{
+			holdOffset = QPoint(bounds.left - raw.left, bounds.top - raw.top);
+			holdSize = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
+			hold = snapshotOf(
+			    QRect(raw.left, raw.top, raw.right - raw.left, raw.bottom - raw.top),
+			    hwnd,
+			    QRect(holdOffset, holdSize)
+			);
+		}
+	}
 	HTHUMBNAIL thumbnail = nullptr;
 	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
 	{
 		if (snapshot != nullptr) DestroyWindow(snapshot);
+		if (hold != nullptr) DestroyWindow(hold);
 		if (this->entries.isEmpty()) this->closeCover();
 		return false;
 	}
@@ -386,13 +552,23 @@ bool WindowMotion::begin(
 		    .start = std::chrono::steady_clock::now(),
 		    .waiting = snapshot == nullptr,
 		    .depth = depthOf(hwnd),
+		    .hold = hold,
+		    .holdOffset = holdOffset,
+		    .holdSize = holdSize,
 		});
-		this->layout(this->entries.last(), 0);
+		auto& added = this->entries.last();
+		if (added.hold != nullptr && FAILED(DwmRegisterThumbnail(this->cover, added.hold, &added.holdThumbnail))) {
+			added.holdThumbnail = nullptr;
+		}
+		this->layout(added, 0);
 		if (this->entries.size() > 1) this->restack();
 	}
 
 	this->placeCover(hwnd);
-	if (!IsWindowVisible(this->cover)) ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+	if (!IsWindowVisible(this->cover)) {
+		ShowWindow(this->cover, SW_SHOWNOACTIVATE);
+		DwmFlush();
+	}
 	moveTo(hwnd, parked, false);
 
 	if (!this->worker.joinable()) {
@@ -411,6 +587,10 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		if (entry->to == to && !entry->done) return;
 		entry->parked = parked;
 		entry->retargeted = true;
+		if (entry->holdThumbnail != nullptr) {
+			DwmUnregisterThumbnail(entry->holdThumbnail);
+			entry->holdThumbnail = nullptr;
+		}
 		if (entry->pop && !entry->done) {
 			entry->from = to;
 			entry->to = to;
@@ -485,10 +665,33 @@ void WindowMotion::run() {
 		                < period * 0.75);
 		last = std::chrono::steady_clock::now();
 
+		QList<HWND> unpainted;
+		{
+			auto lock = std::lock_guard(this->mutex);
+			for (const auto& entry: this->entries) {
+				if (!entry.done && entry.waiting && entry.pop && !entry.painted) unpainted.append(entry.hwnd);
+			}
+		}
+		QList<HWND> paintedNow;
+		for (auto* hwnd: unpainted) {
+			if (hasPainted(hwnd)) paintedNow.append(hwnd);
+		}
+
 		auto finished = false;
 		{
 			auto lock = std::lock_guard(this->mutex);
 			auto holding = false;
+			auto longestWait = 0.0;
+			for (const auto& entry: this->entries) {
+				if (!entry.done && entry.waiting) {
+					longestWait = std::max(longestWait, std::chrono::duration<double, std::milli>(last - entry.start).count());
+				}
+			}
+			for (auto& entry: this->entries) {
+				if (entry.done || !entry.waiting || !entry.pop || entry.painted) continue;
+				if (paintedNow.contains(entry.hwnd) || longestWait >= FIRST_FRAME_MS) entry.painted = true;
+				else holding = true;
+			}
 			for (auto& entry: this->entries) {
 				if (entry.done || !entry.waiting) continue;
 				RECT raw {};
@@ -501,7 +704,14 @@ void WindowMotion::run() {
 					    && bounds.bottom - bounds.top >= entry.parked.height() - 2;
 				}
 				auto waited = std::chrono::duration<double, std::milli>(last - entry.start).count();
-				if (!left && waited < TAKEOFF_TIMEOUT_MS) holding = true;
+				if (!left && waited < TAKEOFF_TIMEOUT_MS) {
+					holding = true;
+					if (!entry.pop && waited > 10 && entry.resent < 3) {
+						entry.resent++;
+						qCWarning(logMotion).noquote() << "[park] resend" << entry.resent << entry.hwnd << "after" << waited << "ms";
+						moveTo(entry.hwnd, entry.parked, false);
+					}
+				}
 			}
 			for (auto& entry: this->entries) {
 				if (entry.done) continue;
@@ -513,9 +723,22 @@ void WindowMotion::run() {
 				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
 				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
 				this->layout(entry, progress);
+				if (entry.snapshot == nullptr && !entry.pop) {
+					RECT bounds {};
+					entry.frames++;
+					if (SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))
+					    && (std::abs(static_cast<int>(bounds.right - bounds.left) - entry.to.width()) > 2
+					        || std::abs(static_cast<int>(bounds.bottom - bounds.top) - entry.to.height()) > 2))
+					{
+						entry.lateFrames++;
+					}
+				}
 				if (progress >= 1.0) {
 					entry.done = true;
 					finished = true;
+					if (entry.lateFrames > 0) {
+						qCWarning(logMotion).noquote() << "[stretch]" << entry.hwnd << "app at its old size for" << entry.lateFrames << "of" << entry.frames << "frames, from" << entry.from << "to" << entry.to;
+					}
 				}
 			}
 		}
@@ -534,10 +757,38 @@ void WindowMotion::onFrameDone() {
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (!this->entries[i].done) continue;
 			if (this->entries[i].snapshot == nullptr) {
-				DWM_THUMBNAIL_PROPERTIES props {};
-				props.dwFlags = DWM_TNP_VISIBLE;
-				props.fVisible = FALSE;
-				DwmUpdateThumbnailProperties(this->entries[i].thumbnail, &props);
+				auto& entry = this->entries[i];
+				RECT raw {};
+				RECT bounds {};
+				if (paintsOnlyOnScreen(entry.hwnd) && entry.holdThumbnail == nullptr && GetWindowRect(entry.hwnd, &raw)
+				    && SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+				{
+					auto* still = snapshotOf(
+					    QRect(raw.left, raw.top, raw.right - raw.left, raw.bottom - raw.top),
+					    entry.hwnd,
+					    QRect(bounds.left - raw.left, bounds.top - raw.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
+					);
+					HTHUMBNAIL thumbnail = nullptr;
+					if (still != nullptr && SUCCEEDED(DwmRegisterThumbnail(this->cover, still, &thumbnail))) {
+						auto dest = entry.to.translated(-this->coverRect.topLeft());
+						DWM_THUMBNAIL_PROPERTIES shown {};
+						shown.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+						shown.rcSource = {
+						    bounds.left - raw.left,
+						    bounds.top - raw.top,
+						    bounds.right - raw.left,
+						    bounds.bottom - raw.top
+						};
+						shown.rcDestination = {dest.left(), dest.top(), dest.left() + dest.width(), dest.top() + dest.height()};
+						shown.opacity = 255;
+						shown.fVisible = TRUE;
+						DwmUpdateThumbnailProperties(thumbnail, &shown);
+						entry.hold = still;
+						entry.holdThumbnail = thumbnail;
+					} else if (still != nullptr) {
+						DestroyWindow(still);
+					}
+				}
 			}
 			landing.append(this->entries.takeAt(i));
 		}
@@ -548,8 +799,18 @@ void WindowMotion::onFrameDone() {
 	}
 	for (const auto& entry: landing) {
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
-		else release(entry);
+		else this->stills.append(entry);
 		emit this->landed(entry.hwnd, entry.to);
+	}
+	if (!this->stills.isEmpty()) {
+		QTimer::singleShot(STILL_MS, this, [this]() {
+			for (const auto& entry: this->stills) release(entry);
+			this->stills.clear();
+			auto lock = std::unique_lock(this->mutex);
+			auto none = this->entries.isEmpty();
+			lock.unlock();
+			if (none && this->lingering.isEmpty()) this->closeCover();
+		});
 	}
 	if (!this->lingering.isEmpty()) {
 		QTimer::singleShot(LINGER_MS, this, [this]() {
@@ -558,15 +819,17 @@ void WindowMotion::onFrameDone() {
 			auto lock = std::unique_lock(this->mutex);
 			auto none = this->entries.isEmpty();
 			lock.unlock();
-			if (none) this->closeCover();
+			if (none && this->stills.isEmpty()) this->closeCover();
 		});
 	}
-	if (empty && this->lingering.isEmpty()) this->closeCover();
+	if (empty && this->lingering.isEmpty() && this->stills.isEmpty()) this->closeCover();
 }
 
 void WindowMotion::release(const Entry& entry) {
 	DwmUnregisterThumbnail(entry.thumbnail);
 	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
+	if (entry.holdThumbnail != nullptr) DwmUnregisterThumbnail(entry.holdThumbnail);
+	if (entry.hold != nullptr) DestroyWindow(entry.hold);
 }
 
 void WindowMotion::closeCover() {
@@ -578,6 +841,8 @@ void WindowMotion::closeCover() {
 		this->entries.clear();
 		for (const auto& entry: this->lingering) release(entry);
 		this->lingering.clear();
+		for (const auto& entry: this->stills) release(entry);
+		this->stills.clear();
 	}
 	if (this->cover != nullptr) {
 		DestroyWindow(this->cover);

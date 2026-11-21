@@ -57,10 +57,19 @@ private:
 		bool pop = false;
 		std::chrono::steady_clock::time_point start;
 		bool waiting = true;
+		int frames = 0;
+		int lateFrames = 0;
+		int resent = 0;
+		bool painted = false;
+		bool caughtUp = false;
 		bool done = false;
 		int depth = 0;
 		double progress = 0;
 		bool retargeted = false;
+		HWND hold = nullptr;
+		HTHUMBNAIL holdThumbnail = nullptr;
+		QPoint holdOffset;
+		QSize holdSize;
 	};
 
 	bool ensureCover();
@@ -77,6 +86,7 @@ private:
 	QRect coverRect;
 	QList<Entry> entries;
 	QList<Entry> lingering;
+	QList<Entry> stills;
 	mutable std::mutex mutex;
 	std::thread worker;
 	std::atomic<bool> stop = false;
