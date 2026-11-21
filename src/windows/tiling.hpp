@@ -245,6 +245,7 @@ private:
 	void leaveFullscreen(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
+	void hold(Managed& m, const QRect& tile);
 	bool popIn(Managed& m, const QRect& tile);
 	void updateTinyCorners(Managed& m, const QRect& frame);
 	void restoreTinyCorners(Managed& m);
@@ -289,7 +290,7 @@ private:
 
 	bool mEnabled = false;
 	bool mSuppressWindowShadows = false;
-	bool mAnimateMoves = false;
+	bool mAnimateMoves = true;
 	bool barMoving = false;
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;

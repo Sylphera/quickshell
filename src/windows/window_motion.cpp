@@ -339,6 +339,23 @@ void WindowMotion::placeCover(HWND above) {
 	}
 }
 
+void WindowMotion::slideTo(HWND hwnd, const QPoint& topLeft) {
+	RECT raw {};
+	RECT bounds {};
+	if (!GetWindowRect(hwnd, &raw)) return;
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		bounds = raw;
+	SetWindowPos(
+	    hwnd,
+	    nullptr,
+	    topLeft.x() - (bounds.left - raw.left),
+	    topLeft.y() - (bounds.top - raw.top),
+	    0,
+	    0,
+	    SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS
+	);
+}
+
 void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	RECT raw {};
 	RECT bounds {};
@@ -437,6 +454,7 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	props.opacity = static_cast<BYTE>(std::clamp(std::lround(opacity), 0L, 255L));
 	props.fVisible = TRUE;
 	props.fSourceClientAreaOnly = FALSE;
+	if (entry.live && !entry.overlay) props.fVisible = FALSE;
 	DwmUpdateThumbnailProperties(entry.thumbnail, &props);
 
 	if (entry.holdThumbnail != nullptr) {
@@ -513,21 +531,6 @@ bool WindowMotion::begin(
 	HWND hold = nullptr;
 	QPoint holdOffset;
 	QSize holdSize;
-	if (!pop && snapshot == nullptr && (to.width() > from.width() + 2 || to.height() > from.height() + 2)) {
-		RECT raw {};
-		RECT bounds {};
-		if (GetWindowRect(hwnd, &raw)
-		    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
-		{
-			holdOffset = QPoint(bounds.left - raw.left, bounds.top - raw.top);
-			holdSize = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
-			hold = snapshotOf(
-			    QRect(raw.left, raw.top, raw.right - raw.left, raw.bottom - raw.top),
-			    hwnd,
-			    QRect(holdOffset, holdSize)
-			);
-		}
-	}
 	HTHUMBNAIL thumbnail = nullptr;
 	if (FAILED(DwmRegisterThumbnail(this->cover, snapshot != nullptr ? snapshot : hwnd, &thumbnail)))
 	{
@@ -550,7 +553,7 @@ bool WindowMotion::begin(
 		    .parked = parked,
 		    .pop = pop,
 		    .start = std::chrono::steady_clock::now(),
-		    .waiting = snapshot == nullptr,
+		    .waiting = snapshot == nullptr && pop,
 		    .depth = depthOf(hwnd),
 		    .hold = hold,
 		    .holdOffset = holdOffset,
@@ -569,7 +572,17 @@ bool WindowMotion::begin(
 		ShowWindow(this->cover, SW_SHOWNOACTIVATE);
 		DwmFlush();
 	}
-	moveTo(hwnd, parked, false);
+	if (!pop && snapshot == nullptr) {
+		auto lock = std::lock_guard(this->mutex);
+		auto& added = this->entries.last();
+		added.live = true;
+		added.realSize = QSize(std::min(from.width(), to.width()), std::min(from.height(), to.height()));
+		added.overlay = from.size() != to.size();
+		moveTo(hwnd, QRect(from.topLeft(), added.realSize), false);
+		this->layout(added, 0);
+	} else {
+		moveTo(hwnd, parked, false);
+	}
 
 	if (!this->worker.joinable()) {
 		this->stop.store(false);
@@ -601,6 +614,15 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 			entry->start = std::chrono::steady_clock::now();
 		}
 		entry->done = false;
+		if (entry->live) {
+			auto size = QSize(std::min(entry->realSize.width(), to.width()), std::min(entry->realSize.height(), to.height()));
+			entry->overlay = entry->overlay || entry->from.size() != to.size() || size != to.size();
+			if (size != entry->realSize) {
+				entry->realSize = size;
+				moveTo(hwnd, QRect(entry->current.topLeft(), size), false);
+			}
+			return;
+		}
 	}
 	moveTo(hwnd, parked, false);
 }
@@ -723,6 +745,7 @@ void WindowMotion::run() {
 				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
 				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
 				this->layout(entry, progress);
+				if (entry.live) slideTo(entry.hwnd, entry.current.topLeft());
 				if (entry.snapshot == nullptr && !entry.pop) {
 					RECT bounds {};
 					entry.frames++;
@@ -760,7 +783,8 @@ void WindowMotion::onFrameDone() {
 				auto& entry = this->entries[i];
 				RECT raw {};
 				RECT bounds {};
-				if (paintsOnlyOnScreen(entry.hwnd) && entry.holdThumbnail == nullptr && GetWindowRect(entry.hwnd, &raw)
+				if ((paintsOnlyOnScreen(entry.hwnd) || (entry.live && entry.realSize != entry.to.size()))
+				    && entry.holdThumbnail == nullptr && GetWindowRect(entry.hwnd, &raw)
 				    && SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
 				{
 					auto* still = snapshotOf(

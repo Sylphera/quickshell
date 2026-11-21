@@ -460,7 +460,8 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 			*found = tile;
 			motion->retarget(m.window->hwnd(), tile, parked);
 		}
-		this->place(m, parked);
+		if (chromium && this->barMoving) this->place(m, parked);
+		else this->hold(m, tile);
 		return;
 	}
 	if (m.target.isNull() && this->canPop(m, layout, tile)) {
@@ -483,7 +484,8 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		                    : QRect(parkedFrame(tile, chromium).topLeft(), tile.size());
 		if (motion->begin(m.window->hwnd(), from, tile, parked, false, still)) {
 			this->moving.insert(m.window, tile);
-			this->place(m, parked);
+			if (still) this->place(m, parked);
+			else this->hold(m, tile);
 			return;
 		}
 	}
@@ -2069,8 +2071,15 @@ void TilingManager::onActiveWindowChanged() {
 	}
 }
 
+void TilingManager::hold(Managed& m, const QRect& tile) {
+	m.target = tile;
+	m.accepted = QRect();
+	m.corrections = 0;
+	m.verifying = false;
+}
+
 void TilingManager::onRectChanged(TrackedWindow* window) {
-	if (window == this->dragging) return;
+	if (window == this->dragging || this->moving.contains(window)) return;
 
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
@@ -2088,7 +2097,7 @@ void TilingManager::verify() {
 
 	for (auto* window: pending) {
 		auto iter = this->managed.find(window);
-		if (iter == this->managed.end() || window == this->dragging) continue;
+		if (iter == this->managed.end() || window == this->dragging || this->moving.contains(window)) continue;
 
 		auto& m = iter->second;
 		if (m.layout == nullptr || m.target.isNull()) continue;

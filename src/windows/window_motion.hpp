@@ -62,6 +62,9 @@ private:
 		int resent = 0;
 		bool painted = false;
 		bool caughtUp = false;
+		bool live = false;
+		bool overlay = true;
+		QSize realSize;
 		bool done = false;
 		int depth = 0;
 		double progress = 0;
@@ -80,6 +83,7 @@ private:
 	void layout(Entry& entry, double progress);
 	void restack();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
+	static void slideTo(HWND hwnd, const QPoint& topLeft);
 	static void release(const Entry& entry);
 
 	HWND cover = nullptr;
