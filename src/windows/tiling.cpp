@@ -529,7 +529,7 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
 	auto bounds = rects.monitor.adjusted(-4, -4, 4, 4);
-	return rects.valid && bounds.contains(m.target) && bounds.contains(tile);
+	return rects.valid && (m.fullscreenToggled || (bounds.contains(m.target) && bounds.contains(tile)));
 }
 
 void TilingManager::haltMotion(HWND hwnd) {
@@ -2831,8 +2831,9 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		this->leaveFullscreen(m);
 	}
 
-	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
-	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen");
+	qCWarning(logTiling) << "Window" << window->addressHex() << window->appId()
+	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen") << "state" << static_cast<int>(this->stateOf(m))
+	                   << "layout" << (m.layout != nullptr);
 	this->updateShellFullscreen();
 	return true;
 }
