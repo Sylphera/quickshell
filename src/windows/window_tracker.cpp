@@ -743,7 +743,6 @@ void setParkNewWindows(bool park) {
 	if (gParkNew.exchange(park) != park || gParkHookSet.load() == nullptr) {
 		if (auto set = gParkHookSet.load()) set(park ? TRUE : FALSE, GetCurrentProcessId());
 	}
-	if (park) startParkHook();
 }
 
 void claimEarlyPark(HWND hwnd) {
