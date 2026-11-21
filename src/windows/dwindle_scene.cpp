@@ -12,6 +12,7 @@
 #include <dwmapi.h>
 #include <wrl/client.h>
 
+#include <qimage.h>
 #include <qloggingcategory.h>
 #include <qtimer.h>
 
@@ -76,6 +77,74 @@ bool cloaked(HWND window) {
 	    && value != 0;
 }
 
+float windowRadius(HWND hwnd) {
+	auto region = CreateRectRgn(0, 0, 0, 0);
+	if (region != nullptr) {
+		RECT box {};
+		const auto shaped = GetWindowRgn(hwnd, region) == COMPLEXREGION
+		                 && GetRgnBox(region, &box) != ERROR;
+		int inset = 0;
+		if (shaped) {
+			const auto limit = std::min(64L, (box.right - box.left) / 2);
+			while (inset < limit && !PtInRegion(region, box.left + inset, box.top)) ++inset;
+		}
+		DeleteObject(region);
+		if (inset > 0) return static_cast<float>(inset);
+	}
+	DWM_WINDOW_CORNER_PREFERENCE preference = DWMWCP_DEFAULT;
+	DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
+	if (preference == DWMWCP_DONOTROUND) return 0;
+	const auto smallCorner = preference == DWMWCP_ROUNDSMALL;
+	bool configured = false;
+	const auto radius = qEnvironmentVariableIntValue(
+	    smallCorner ? "II_DWINDLE_SMALL_CORNER_RADIUS" : "II_DWINDLE_CORNER_RADIUS", &configured
+	);
+	const auto dip = configured && radius >= 0 && radius <= 64 ? radius : (smallCorner ? 4 : 8);
+	const auto dpi = GetDpiForWindow(hwnd);
+	return dip * (dpi == 0 ? 1.0f : dpi / 96.0f);
+}
+
+QImage captureWorkspace(const QRect& work) {
+	if (qint64(work.width()) * work.height() > 3840LL * 2160) return {};
+	auto* screen = GetDC(nullptr);
+	if (screen == nullptr) return {};
+	auto* memory = CreateCompatibleDC(screen);
+	BITMAPINFO info {};
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = work.width();
+	info.bmiHeader.biHeight = -work.height();
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	void* pixels = nullptr;
+	auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+	QImage image;
+	if (memory != nullptr && bitmap != nullptr) {
+		auto* previous = SelectObject(memory, bitmap);
+		if (previous != nullptr && BitBlt(memory, 0, 0, work.width(), work.height(), screen,
+		                                 work.x(), work.y(), SRCCOPY)) {
+			GdiFlush();
+			image = QImage(static_cast<uchar*>(pixels), work.width(), work.height(), QImage::Format_RGB32)
+			            .copy();
+		}
+		if (previous != nullptr) SelectObject(memory, previous);
+	}
+	if (bitmap != nullptr) DeleteObject(bitmap);
+	if (memory != nullptr) DeleteDC(memory);
+	ReleaseDC(nullptr, screen);
+	return image;
+}
+
+bool isUncovered(HWND window, const QRect& bounds, HWND host) {
+	DWORD affinity = 0;
+	if (GetWindowDisplayAffinity(window, &affinity) && affinity != WDA_NONE) return false;
+	for (auto* above = GetWindow(window, GW_HWNDPREV); above != nullptr; above = GetWindow(above, GW_HWNDPREV)) {
+		if (above != host && IsWindowVisible(above) && !IsIconic(above)
+		    && !cloaked(above) && frame(above).intersects(bounds))
+			return false;
+	}
+	return true;
+}
+
 qint64 counter() {
 	LARGE_INTEGER value {};
 	QueryPerformanceCounter(&value);
@@ -123,7 +192,7 @@ HWND createHost(const QRect& r) {
 struct Thumbnail {
 	ComPtr<IDCompositionVisual> visual;
 	HTHUMBNAIL handle = nullptr;
-	SIZE sourceSize {};
+	QRect sourceCrop;
 
 	~Thumbnail() {
 		if (this->handle != nullptr) DwmUnregisterThumbnail(this->handle);
@@ -134,6 +203,14 @@ struct Tile {
 	Thumbnail source;
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
+	ComPtr<IDCompositionVisual> liveFrame;
+	ComPtr<IDCompositionRectangleClip> liveClip;
+	QSize liveSize;
+	ComPtr<IDCompositionVisual> placeholder;
+	ComPtr<IDCompositionVisual> retained;
+	QSize retainedSize;
+	float radius = 0;
+	bool showingRetained = false;
 	QRectF from;
 	QRect target;
 	qint64 start = 0;
@@ -185,11 +262,15 @@ public:
 
 private:
 	bool prepare();
-	bool makeTileColor(ID3D11DeviceContext* context);
-	bool addTile(Tile& tile, const DwindleTile& placement);
+	bool makeTileColor();
+	ComPtr<IDCompositionSurface> upload(const QImage& image);
+	bool addTile(Tile& tile, const DwindleTile& placement, const QImage& before);
+	void retain(Tile& tile, const DwindleTile& placement, const QImage& before);
+	bool retainedVisible(Tile& tile, bool visible);
+	bool resizeLiveClip(Tile& tile);
 	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now);
 	bool addSource(Thumbnail& thumb, HWND window, const QRect& crop = {});
-	bool setNativeSize(Thumbnail& thumb);
+	bool setNativeSize(Thumbnail& thumb, HWND window);
 	void refresh();
 	void settle();
 	bool animate(float from, float to, qint64 time, auto setter);
@@ -245,7 +326,7 @@ bool Scene::prepare() {
 	                  "CreateTargetForHwnd")
 	    || !succeeded(this->device->CreateVisual(this->root.GetAddressOf()), "CreateVisual")
 	    || !succeeded(this->target->SetRoot(this->root.Get()), "SetRoot")
-	    || !this->makeTileColor(graphics.context.Get()))
+	    || !this->makeTileColor())
 		return false;
 
 	const auto crop = this->work.translated(-frame(this->backdropWindow).topLeft());
@@ -256,27 +337,36 @@ bool Scene::prepare() {
 	return succeeded(this->root->AddVisual(this->backdrop.visual.Get(), TRUE, nullptr), "Add backdrop");
 }
 
-bool Scene::makeTileColor(ID3D11DeviceContext* context) {
-	if (FAILED(this->device->CreateSurface(
-	        1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, this->tileColor.GetAddressOf()
-	    ))) return false;
+ComPtr<IDCompositionSurface> Scene::upload(const QImage& image) {
+	ComPtr<IDCompositionSurface> content;
+	if (image.isNull() || FAILED(this->device->CreateSurface(
+	        image.width(), image.height(), DXGI_FORMAT_B8G8R8A8_UNORM,
+	        DXGI_ALPHA_MODE_IGNORE, content.GetAddressOf()
+	    ))) return {};
 	ComPtr<IDXGISurface> surface;
 	POINT offset {};
-	if (!succeeded(this->tileColor->BeginDraw(nullptr, IID_PPV_ARGS(surface.GetAddressOf()), &offset),
-	               "BeginDraw"))
-		return false;
+	if (!succeeded(content->BeginDraw(nullptr, IID_PPV_ARGS(surface.GetAddressOf()), &offset),
+	               "BeginDraw")) return {};
 
 	ComPtr<ID3D11Texture2D> texture;
-	auto copied = succeeded(surface.As(&texture), "Tile color texture");
+	auto copied = succeeded(surface.As(&texture), "Workspace texture");
 	if (copied) {
-		constexpr UINT32 color = 0xff202020;
 		const D3D11_BOX region {
 		    static_cast<UINT>(offset.x), static_cast<UINT>(offset.y), 0,
-		    static_cast<UINT>(offset.x + 1), static_cast<UINT>(offset.y + 1), 1,
+		    static_cast<UINT>(offset.x + image.width()), static_cast<UINT>(offset.y + image.height()), 1,
 		};
-		context->UpdateSubresource(texture.Get(), 0, &region, &color, sizeof(color), 0);
+		graphics().context->UpdateSubresource(texture.Get(), 0, &region, image.constBits(),
+		                                      static_cast<UINT>(image.bytesPerLine()), 0);
 	}
-	return succeeded(this->tileColor->EndDraw(), "EndDraw") && copied;
+	if (!succeeded(content->EndDraw(), "EndDraw") || !copied) return {};
+	return content;
+}
+
+bool Scene::makeTileColor() {
+	auto image = QImage(1, 1, QImage::Format_RGB32);
+	image.fill(0xff202020);
+	this->tileColor = this->upload(image);
+	return this->tileColor != nullptr;
 }
 
 bool Scene::addSource(Thumbnail& thumb, HWND window, const QRect& crop) {
@@ -296,25 +386,33 @@ bool Scene::addSource(Thumbnail& thumb, HWND window, const QRect& crop) {
 		qCDebug(logDwindleScene) << "Shared thumbnail unavailable" << source << Qt::hex << result;
 		return false;
 	}
-	return !crop.isEmpty() || this->setNativeSize(thumb);
+	return !crop.isEmpty() || this->setNativeSize(thumb, window);
 }
 
-bool Scene::setNativeSize(Thumbnail& thumb) {
+bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 	SIZE size {};
 	if (!succeeded(DwmQueryThumbnailSourceSize(thumb.handle, &size), "DwmQueryThumbnailSourceSize")
 	    || size.cx <= 0 || size.cy <= 0)
 		return false;
-	if (size.cx == thumb.sourceSize.cx && size.cy == thumb.sourceSize.cy) return true;
+	auto crop = QRect(0, 0, size.cx, size.cy);
+	RECT raw {};
+	const auto visible = frame(window);
+	if (!visible.isEmpty() && GetWindowRect(window, &raw)
+	    && size.cx == raw.right - raw.left && size.cy == raw.bottom - raw.top) {
+		const auto inner = visible.translated(-raw.left, -raw.top);
+		if (crop.contains(inner)) crop = inner;
+	}
+	if (crop == thumb.sourceCrop) return true;
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_RECTDESTINATION
 	             | DWM_TNP_RECTSOURCE | CompositionThumbnail;
 	props.fVisible = TRUE;
 	props.opacity = 255;
-	props.rcDestination = {0, 0, size.cx, size.cy};
-	props.rcSource = props.rcDestination;
+	props.rcDestination = {0, 0, crop.width(), crop.height()};
+	props.rcSource = {crop.x(), crop.y(), crop.x() + crop.width(), crop.y() + crop.height()};
 	if (!succeeded(DwmUpdateThumbnailProperties(thumb.handle, &props), "DwmUpdateThumbnailProperties"))
 		return false;
-	thumb.sourceSize = size;
+	thumb.sourceCrop = crop;
 	return true;
 }
 
@@ -335,35 +433,95 @@ bool Scene::animate(float from, float to, qint64 time, auto setter) {
 	    && SUCCEEDED(setter(animation.Get()));
 }
 
-bool Scene::addTile(Tile& tile, const DwindleTile& placement) {
+bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& before) {
+	tile.radius = windowRadius(placement.window);
 	tile.waitingForSize = placement.previous.isEmpty();
-	ComPtr<IDCompositionVisual> fill;
+	if (!this->addSource(tile.source, placement.window)
+	    || FAILED(this->device->CreateVisual(tile.container.GetAddressOf()))
+	    || FAILED(this->device->CreateVisual(tile.liveFrame.GetAddressOf()))
+	    || FAILED(this->device->CreateRectangleClip(tile.liveClip.GetAddressOf()))
+	    || FAILED(tile.liveClip->SetLeft(0.0f))
+	    || FAILED(tile.liveClip->SetTop(0.0f))
+	    || !this->resizeLiveClip(tile)
+	    || FAILED(tile.liveFrame->SetClip(tile.liveClip.Get()))
+	    || FAILED(tile.liveFrame->AddVisual(tile.source.visual.Get(), FALSE, nullptr))
+	    || FAILED(this->device->CreateRectangleClip(tile.clip.GetAddressOf()))
+	    || FAILED(tile.clip->SetLeft(0.0f))
+	    || FAILED(tile.clip->SetTop(0.0f))
+	    || FAILED(tile.container->SetClip(tile.clip.Get()))
+	    || FAILED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr)))
+		return false;
+
+	if (!tile.waitingForSize) {
+		this->retain(tile, placement, before);
+		return SUCCEEDED(tile.container->AddVisual(tile.liveFrame.Get(), FALSE, nullptr));
+	}
+
 	D2D_MATRIX_3X2_F stretch {};
-	stretch._11 = this->work.width();
-	stretch._22 = this->work.height();
-	return this->addSource(tile.source, placement.window)
-	    && SUCCEEDED(this->device->CreateVisual(fill.GetAddressOf()))
-	    && SUCCEEDED(fill->SetContent(this->tileColor.Get()))
-	    && SUCCEEDED(fill->SetTransform(stretch))
-	    && SUCCEEDED(this->device->CreateVisual(tile.container.GetAddressOf()))
-	    && SUCCEEDED(tile.container->AddVisual(fill.Get(), TRUE, nullptr))
-	    && SUCCEEDED(this->device->CreateRectangleClip(tile.clip.GetAddressOf()))
-	    && SUCCEEDED(tile.clip->SetLeft(0.0f))
-	    && SUCCEEDED(tile.clip->SetTop(0.0f))
-	    && SUCCEEDED(tile.container->SetClip(tile.clip.Get()))
-	    && (tile.waitingForSize
-	        || SUCCEEDED(tile.container->AddVisual(tile.source.visual.Get(), FALSE, nullptr)))
-	    && SUCCEEDED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr));
+	stretch._11 = placement.target.width();
+	stretch._22 = placement.target.height();
+	return SUCCEEDED(this->device->CreateVisual(tile.placeholder.GetAddressOf()))
+	    && SUCCEEDED(tile.placeholder->SetContent(this->tileColor.Get()))
+	    && SUCCEEDED(tile.placeholder->SetTransform(stretch))
+	    && SUCCEEDED(tile.container->AddVisual(tile.placeholder.Get(), TRUE, nullptr));
+}
+
+bool Scene::resizeLiveClip(Tile& tile) {
+	const auto size = tile.source.sourceCrop.size();
+	const auto radius = std::min({tile.radius, size.width() / 2.0f, size.height() / 2.0f});
+	if (FAILED(tile.liveClip->SetRight(static_cast<float>(size.width())))
+	    || FAILED(tile.liveClip->SetBottom(static_cast<float>(size.height())))
+	    || FAILED(tile.liveClip->SetTopLeftRadiusX(radius))
+	    || FAILED(tile.liveClip->SetTopLeftRadiusY(radius))
+	    || FAILED(tile.liveClip->SetTopRightRadiusX(radius))
+	    || FAILED(tile.liveClip->SetTopRightRadiusY(radius))
+	    || FAILED(tile.liveClip->SetBottomLeftRadiusX(radius))
+	    || FAILED(tile.liveClip->SetBottomLeftRadiusY(radius))
+	    || FAILED(tile.liveClip->SetBottomRightRadiusX(radius))
+	    || FAILED(tile.liveClip->SetBottomRightRadiusY(radius)))
+		return false;
+	tile.liveSize = size;
+	return true;
+}
+
+void Scene::retain(Tile& tile, const DwindleTile& placement, const QImage& before) {
+	if (before.isNull() || placement.previous.isEmpty()
+	    || placement.previous.size() == placement.target.size()
+	    || !this->work.contains(placement.previous) || frame(placement.window) != placement.previous
+	    || !isUncovered(placement.window, placement.previous, this->host))
+		return;
+
+	const auto old = placement.previous.translated(-this->work.topLeft());
+	const auto surface = this->upload(before.copy(old));
+	ComPtr<IDCompositionVisual> visual;
+	if (surface != nullptr && SUCCEEDED(this->device->CreateVisual(visual.GetAddressOf()))
+	    && SUCCEEDED(visual->SetContent(surface.Get()))) {
+		tile.retained = std::move(visual);
+		tile.retainedSize = old.size();
+	}
+}
+
+bool Scene::retainedVisible(Tile& tile, bool visible) {
+	if (tile.showingRetained == visible || tile.retained == nullptr) return false;
+	const auto hr = visible ? tile.container->AddVisual(tile.retained.Get(), FALSE, nullptr)
+	                        : tile.container->RemoveVisual(tile.retained.Get());
+	if (FAILED(hr)) return false;
+	tile.showingRetained = visible;
+	return true;
 }
 
 bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64 now) {
 	tile.from = origin;
 	tile.target = target;
 	tile.start = now;
+	if (tile.retainedSize.width() >= origin.width() - 1
+	    && tile.retainedSize.height() >= origin.height() - 1
+	    && (tile.target.width() < origin.width() - 1 || tile.target.height() < origin.height() - 1))
+		this->retainedVisible(tile, true);
 	const auto from = tile.from.translated(-this->work.topLeft());
 	const auto to = tile.target.translated(-this->work.topLeft());
-	const auto radius = [](const QRectF& box) {
-		return static_cast<float>(std::min({8.0, box.width() / 2, box.height() / 2}));
+	const auto radius = [&tile](const QRectF& box) {
+		return static_cast<float>(std::min({double(tile.radius), box.width() / 2, box.height() / 2}));
 	};
 	const auto corner = [this, fromRadius = radius(from), toRadius = radius(to), now](auto setter) {
 		return this->animate(fromRadius, toRadius, now, setter);
@@ -411,11 +569,15 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		if (FAILED(this->root->RemoveVisual(it->second->container.Get()))) return false;
 		it = this->tiles.erase(it);
 	}
+	const auto needFrame = this->tiles.empty() && std::ranges::any_of(plan, [](const auto& tile) {
+		return !tile.previous.isEmpty() && tile.previous.size() != tile.target.size();
+	});
+	const auto before = needFrame ? captureWorkspace(this->work) : QImage();
 	for (const auto& placement: plan) {
 		auto [it, added] = this->tiles.try_emplace(placement.window);
 		if (!added) continue;
 		it->second = std::make_unique<Tile>();
-		if (!this->addTile(*it->second, placement)) {
+		if (!this->addTile(*it->second, placement, before)) {
 			qCDebug(logDwindleScene) << "Could not attach tile" << placement.window;
 			return false;
 		}
@@ -481,20 +643,31 @@ void Scene::refresh() {
 		this->hide();
 		return;
 	}
-	bool attached = false;
+	bool changed = false;
+	const auto now = counter();
 	for (auto& [hwnd, tile]: this->tiles) {
-		if (!IsWindow(hwnd) || !this->setNativeSize(tile->source) || !tile->waitingForSize)
-			continue;
-		const auto actual = frame(hwnd);
-		if (std::abs(actual.width() - tile->target.width()) > 4
-		    || std::abs(actual.height() - tile->target.height()) > 4)
-			continue;
-		if (SUCCEEDED(tile->container->AddVisual(tile->source.visual.Get(), FALSE, nullptr))) {
-			tile->waitingForSize = false;
-			attached = true;
+		if (!IsWindow(hwnd) || !this->setNativeSize(tile->source, hwnd)) continue;
+		if (tile->liveSize != tile->source.sourceCrop.size() && this->resizeLiveClip(*tile)) changed = true;
+		if (tile->waitingForSize) {
+			const auto size = tile->source.sourceCrop.size();
+			if (std::abs(size.width() - tile->target.width()) > 4
+			    || std::abs(size.height() - tile->target.height()) > 4)
+				continue;
+			if (SUCCEEDED(tile->container->AddVisual(tile->liveFrame.Get(), FALSE, nullptr))) {
+				tile->waitingForSize = false;
+				tile->container->RemoveVisual(tile->placeholder.Get());
+				tile->placeholder.Reset();
+				changed = true;
+			}
 		}
+		const auto moving = tile->at(now);
+		const auto fills = [&moving](const QSize& size) {
+			return size.width() >= moving.width() - 1 && size.height() >= moving.height() - 1;
+		};
+		changed |= this->retainedVisible(*tile, !fills(tile->source.sourceCrop.size())
+		                                     && fills(tile->retainedSize));
 	}
-	if (attached && FAILED(this->device->Commit())) this->hide();
+	if (changed && FAILED(this->device->Commit())) this->hide();
 }
 
 void Scene::settle() {
