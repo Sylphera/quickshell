@@ -30,6 +30,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "dwindle_scene.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
 #include "super_drag.hpp"
@@ -424,6 +425,7 @@ void TilingManager::setEnabled(bool enabled) {
 void TilingManager::setAnimateMoves(bool animate) {
 	if (animate == this->mAnimateMoves) return;
 	this->mAnimateMoves = animate;
+	if (!animate) DwindleScene::dismissAll();
 	emit this->animateMovesChanged();
 }
 
@@ -875,6 +877,7 @@ bool TilingManager::start() {
 	}
 
 	recoverOrphanedTinyCorners();
+	if (DwindleScene::enabled()) QTimer::singleShot(0, this, &DwindleScene::warmUp);
 
 	this->tracker = WindowTracker::instance();
 	this->desktops = this->tracker->desktops();
@@ -905,10 +908,15 @@ bool TilingManager::start() {
 	    &TilingManager::onMoveSizeEnded
 	));
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::shownChanged, this, [this]() {
+		DwindleScene::dismissAll();
 		this->updateShellFullscreen();
 	}));
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::desktopsChanged, this, [this]() {
 		this->markAll();
+	}));
+
+	c.append(QObject::connect(this->desktops, &VirtualDesktops::currentChanged, this, [] {
+		DwindleScene::dismissAll();
 	}));
 
 	if (auto* app = qobject_cast<QGuiApplication*>(QGuiApplication::instance())) {
@@ -946,6 +954,7 @@ bool TilingManager::start() {
 }
 
 void TilingManager::stop() {
+	DwindleScene::dismissAll();
 	for (const auto& connection: this->connections) QObject::disconnect(connection);
 	this->connections.clear();
 
@@ -1406,6 +1415,58 @@ void TilingManager::apply(Layout* layout) {
 	}
 
 	layout->tree->compute(rects.work);
+
+	if (DwindleScene::enabled() && !layout->special
+	    && this->desktops->indexOf(layout->desktop) == this->desktops->currentIndex())
+	{
+		auto monitor = monitorForScreen(layout->screen);
+		QList<DwindleTile> plan;
+		QSet<HWND> participants;
+		bool changed = false;
+		auto canPresent = this->mAnimateMoves && !this->barMoving && this->dragging == nullptr
+		       && startup::settled() && this->desktops->shownIndex() == this->desktops->currentIndex()
+		       && layout->tree->kind() == tiling::Kind::Dwindle;
+		if (canPresent) {
+			for (auto id: layout->tree->ids()) {
+				auto* window = this->windowOf(id);
+				if (window == nullptr) continue;
+				const auto& m = this->managed.at(window);
+				if (this->stateOf(m) == State::Hidden) continue;
+				if (this->stateOf(m) != State::Tiled || m.fullscreen || m.popping
+				    || m.elevated || this->moving.contains(window))
+				{
+					canPresent = false;
+					break;
+				}
+				auto tile = this->tileRect(layout, window);
+				if (!rects.work.contains(tile)) {
+					canPresent = false;
+					break;
+				}
+				auto previous = m.target.isEmpty() ? QRect() : this->managedFrame(m);
+				changed |= tile != m.target;
+				plan.append({window->hwnd(), previous, tile});
+				participants.insert(window->hwnd());
+			}
+		}
+		if (canPresent) {
+			for (auto* window: this->tracker->windows()) {
+				if (window->minimized() || window->desktop() != this->desktops->currentIndex()
+				    || participants.contains(window->hwnd())
+				    || !IsWindowVisible(window->hwnd())
+				    || (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+					continue;
+				QRect raw;
+				QRect actual;
+				if (readFrame(window->hwnd(), raw, actual) && actual.intersects(rects.work)) {
+					canPresent = false;
+					break;
+				}
+			}
+		}
+		if (!canPresent) DwindleScene::dismiss(monitor);
+		else DwindleScene::present(monitor, rects.work, plan, changed);
+	}
 
 	auto* scroll = TilingManager::scrollingOf(layout);
 	auto in = toPhysical(this->mGapsIn, layout->screen->devicePixelRatio());
@@ -2041,6 +2102,7 @@ void TilingManager::rescueParked() {
 }
 
 void TilingManager::onScreensChanged() {
+	DwindleScene::dismissAll();
 	for (auto* screen: QGuiApplication::screens()) {
 		QObject::disconnect(screen, nullptr, this, nullptr);
 		auto relayoutAll = [this]() {
@@ -2186,6 +2248,7 @@ void TilingManager::onDeadline() {
 }
 
 void TilingManager::onMoveSizeStarted(TrackedWindow* window) {
+	DwindleScene::dismissAll();
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end() || iter->second.layout == nullptr) return;
 	this->restoreTinyCorners(iter->second);
@@ -2790,6 +2853,7 @@ void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {
 }
 
 bool TilingManager::toggleFullscreen(TrackedWindow* window) {
+	DwindleScene::dismissAll();
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return false;
 	auto& m = iter->second;

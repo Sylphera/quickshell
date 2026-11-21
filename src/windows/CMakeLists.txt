@@ -20,6 +20,7 @@ qt_add_library(quickshell-windows STATIC
 	window_manager.cpp
 	scratchpad.cpp
 	desktop_slide.cpp
+	dwindle_scene.cpp
 	touchpad_gestures.cpp
 	window_motion.cpp
 	native_corners.cpp
@@ -133,6 +134,7 @@ target_link_libraries(quickshell-windows PRIVATE
 	user32
 	shell32
 	dwmapi
+	dcomp
 	gdi32
 	advapi32
 	bcrypt
