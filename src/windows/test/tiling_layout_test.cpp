@@ -72,6 +72,7 @@ class TestTilingLayout: public QObject {
 private slots:
 	void dwindleBurstKeepsTilesApart();
 	void dwindleSwapUsesImmediatePlacement();
+	void dwindleStackedStartupWindowEntersAsNew();
 	void newColumnsGoRightOfTheFocusedOne();
 	void gapsKeepWindowSizesWhileScrolling();
 	void parksColumnsOffTheScreen();
@@ -162,6 +163,29 @@ void TestTilingLayout::dwindleSwapUsesImmediatePlacement() {
 	const QList<QRect> targets {{110, 0, 100, 100}, {0, 0, 100, 100}};
 	QList<std::optional<QRectF>> origins {QRectF(0, 0, 100, 100), QRectF(110, 0, 100, 100)};
 	QVERIFY(!qs::windows::dwindle::planOrigins(targets, origins));
+}
+
+void TestTilingLayout::dwindleStackedStartupWindowEntersAsNew() {
+	using qs::windows::dwindle::dropStackedOrigins;
+	using qs::windows::dwindle::planOrigins;
+
+	const QList<QRect> targets {{0, 0, 956, 1040}, {964, 0, 956, 516}, {964, 524, 956, 516}};
+	QList<std::optional<QRectF>> origins {
+	    QRectF(0, 0, 956, 1040),
+	    QRectF(964, 0, 956, 1040),
+	    QRectF(0, 0, 470, 510),
+	};
+	QVERIFY(!planOrigins(targets, origins));
+	dropStackedOrigins(origins, {false, false, true});
+	QVERIFY(origins[0].has_value());
+	QVERIFY(origins[1].has_value());
+	QVERIFY(!origins[2].has_value());
+	QVERIFY(planOrigins(targets, origins));
+
+	QList<std::optional<QRectF>> swap {QRectF(0, 0, 100, 100), QRectF(110, 0, 100, 100)};
+	dropStackedOrigins(swap, {true, true});
+	QVERIFY(swap[0].has_value() && swap[1].has_value());
+	QVERIFY(!planOrigins({{110, 0, 100, 100}, {0, 0, 100, 100}}, swap));
 }
 
 void TestTilingLayout::newColumnsGoRightOfTheFocusedOne() {

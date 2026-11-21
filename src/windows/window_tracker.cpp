@@ -123,8 +123,7 @@ void unmarkHook(HWND hwnd) {
 	RemovePropW(hwnd, L"qs.py");
 }
 
-bool parksEarly(HWND hwnd) {
-	if (!gParkNew.load()) return false;
+bool coversEarly(HWND hwnd) {
 	DWORD pid = 0;
 	GetWindowThreadProcessId(hwnd, &pid);
 	if (pid == GetCurrentProcessId() || GetWindow(hwnd, GW_OWNER) != nullptr) return false;
@@ -134,6 +133,8 @@ bool parksEarly(HWND hwnd) {
 	if ((exStyle & (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return false;
 	return !IsIconic(hwnd);
 }
+
+bool parksEarly(HWND hwnd) { return gParkNew.load() && coversEarly(hwnd); }
 
 int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100; }
 
@@ -234,7 +235,7 @@ void CALLBACK queueEvent(
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && gEarlyParkCount.load() > 0) parkEarly(hwnd, true);
 	if (event == EVENT_OBJECT_CREATE) {
 		if (gParkHookSet.load() == nullptr && GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
-		return;
+		if (GetAncestor(hwnd, GA_ROOT) != hwnd || !coversEarly(hwnd)) return;
 	}
 
 	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd
@@ -751,6 +752,13 @@ void claimEarlyPark(HWND hwnd) {
 	gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
 }
 
+bool isEarlyParked(HWND hwnd) {
+	if (parkedByHook(hwnd)) return true;
+	if (gEarlyParkCount.load() == 0) return false;
+	auto lock = std::lock_guard(gParkMutex);
+	return gEarlyParked.contains(hwnd);
+}
+
 void releaseEarlyPark(HWND hwnd) {
 	if (gEarlyParkCount.load() == 0 && !parkedByHook(hwnd)) return;
 	RECT rect {};
@@ -796,6 +804,9 @@ void WindowTracker::onEvent(DWORD event, HWND hwnd, DWORD time) {
 	auto tracked = this->byHwnd.contains(hwnd);
 
 	switch (event) {
+	case EVENT_OBJECT_CREATE:
+		if (!tracked) emit this->windowCreated(hwnd);
+		return;
 	case EVENT_SYSTEM_FOREGROUND:
 		this->foregroundDirty = true;
 		if (!tracked) this->candidates.insert(hwnd);

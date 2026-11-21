@@ -24,6 +24,7 @@
 #include <qtmetamacros.h>
 #include <qtypes.h>
 
+#include "dwindle_scene.hpp"
 #include "tiling_layout.hpp"
 
 namespace qs::windows {
@@ -204,6 +205,7 @@ private:
 		QRect restore;
 		bool tinyCornersApplied = false;
 		bool fresh = false;
+		bool staged = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
 		bool tinyBorderSuppressed = false;
@@ -243,6 +245,10 @@ private:
 	void takeOut(Managed& m);
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
+	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
+	void coverNewWindow(HWND hwnd);
+	void stage(Managed& m, const QRect& tile);
+	void releaseStaged(const QList<HWND>& windows);
 	void leaveFullscreen(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);

@@ -877,7 +877,10 @@ bool TilingManager::start() {
 	}
 
 	recoverOrphanedTinyCorners();
-	if (DwindleScene::enabled()) QTimer::singleShot(0, this, &DwindleScene::warmUp);
+	if (DwindleScene::enabled()) {
+		QTimer::singleShot(0, this, &DwindleScene::warmUp);
+		DwindleScene::onRelease([this](const QList<HWND>& windows) { this->releaseStaged(windows); });
+	}
 
 	this->tracker = WindowTracker::instance();
 	this->desktops = this->tracker->desktops();
@@ -889,6 +892,9 @@ bool TilingManager::start() {
 	c.append(
 	    QObject::connect(this->tracker, &WindowTracker::windowRemoved, this, &TilingManager::unmanage)
 	);
+	c.append(QObject::connect(
+	    this->tracker, &WindowTracker::windowCreated, this, &TilingManager::coverNewWindow
+	));
 	c.append(QObject::connect(
 	    this->tracker,
 	    &WindowTracker::activeWindowChanged,
@@ -1202,7 +1208,7 @@ void TilingManager::schedule() {
 
 void TilingManager::sync() {
 	setParkNewWindows(
-	    false && this->mEnabled && this->mAnimateMoves && startup::settled()
+	    DwindleScene::enabled() && this->mEnabled && this->mAnimateMoves && startup::settled()
 	    && this->desktops->shownIndex() == this->desktops->currentIndex()
 	);
 	if (!this->mEnabled) return;
@@ -1416,56 +1422,16 @@ void TilingManager::apply(Layout* layout) {
 
 	layout->tree->compute(rects.work);
 
+	auto presenting = false;
 	if (DwindleScene::enabled() && !layout->special
 	    && this->desktops->indexOf(layout->desktop) == this->desktops->currentIndex())
 	{
 		auto monitor = monitorForScreen(layout->screen);
 		QList<DwindleTile> plan;
-		QSet<HWND> participants;
 		bool changed = false;
-		auto canPresent = this->mAnimateMoves && !this->barMoving && this->dragging == nullptr
-		       && startup::settled() && this->desktops->shownIndex() == this->desktops->currentIndex()
-		       && layout->tree->kind() == tiling::Kind::Dwindle;
-		if (canPresent) {
-			for (auto id: layout->tree->ids()) {
-				auto* window = this->windowOf(id);
-				if (window == nullptr) continue;
-				const auto& m = this->managed.at(window);
-				if (this->stateOf(m) == State::Hidden) continue;
-				if (this->stateOf(m) != State::Tiled || m.fullscreen || m.popping
-				    || m.elevated || this->moving.contains(window))
-				{
-					canPresent = false;
-					break;
-				}
-				auto tile = this->tileRect(layout, window);
-				if (!rects.work.contains(tile)) {
-					canPresent = false;
-					break;
-				}
-				auto previous = m.target.isEmpty() ? QRect() : this->managedFrame(m);
-				changed |= tile != m.target;
-				plan.append({window->hwnd(), previous, tile});
-				participants.insert(window->hwnd());
-			}
-		}
-		if (canPresent) {
-			for (auto* window: this->tracker->windows()) {
-				if (window->minimized() || window->desktop() != this->desktops->currentIndex()
-				    || participants.contains(window->hwnd())
-				    || !IsWindowVisible(window->hwnd())
-				    || (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
-					continue;
-				QRect raw;
-				QRect actual;
-				if (readFrame(window->hwnd(), raw, actual) && actual.intersects(rects.work)) {
-					canPresent = false;
-					break;
-				}
-			}
-		}
-		if (!canPresent) DwindleScene::dismiss(monitor);
+		if (!this->dwindlePlan(layout, rects.work, plan, changed, false)) DwindleScene::dismiss(monitor);
 		else DwindleScene::present(monitor, rects.work, plan, changed);
+		presenting = DwindleScene::presenting(monitor);
 	}
 
 	auto* scroll = TilingManager::scrollingOf(layout);
@@ -1489,8 +1455,102 @@ void TilingManager::apply(Layout* layout) {
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
 		if (m.popping) continue;
+		if (presenting && !m.fullscreen && !parked
+		    && (m.staged || (m.target.isNull() && isEarlyParked(window->hwnd()))))
+		{
+			this->stage(m, tile);
+			continue;
+		}
 		this->placeMoving(m, layout, tile);
 	}
+}
+
+void TilingManager::stage(Managed& m, const QRect& tile) {
+	auto* hwnd = m.window->hwnd();
+	claimEarlyPark(hwnd);
+	auto staged = parkedFrame(tile);
+	m.staged = true;
+	m.target = tile;
+	m.accepted = staged;
+	m.verifying = false;
+	m.corrections = 0;
+	if (this->managedFrame(m) != staged)
+		setFrame(hwnd, staged, true, m.tinyCornersApplied ? &m.tinyFrameInsets : nullptr);
+}
+
+void TilingManager::releaseStaged(const QList<HWND>& windows) {
+	for (auto& [window, m]: this->managed) {
+		if (!m.staged || !windows.contains(window->hwnd())) continue;
+		m.staged = false;
+		m.accepted = QRect();
+		if (m.target.isNull() || this->stateOf(m) != State::Tiled) continue;
+		this->send(m, this->managedFrame(m));
+	}
+}
+
+bool TilingManager::dwindlePlan(
+    Layout* layout,
+    const QRect& work,
+    QList<DwindleTile>& plan,
+    bool& changed,
+    bool still
+) {
+	if (!this->mAnimateMoves || this->barMoving || this->dragging != nullptr || !startup::settled()
+	    || this->desktops->shownIndex() != this->desktops->currentIndex()
+	    || layout->tree->kind() != tiling::Kind::Dwindle)
+		return false;
+	QSet<HWND> participants;
+	for (auto id: layout->tree->ids()) {
+		auto* window = this->windowOf(id);
+		if (window == nullptr) continue;
+		const auto& m = this->managed.at(window);
+		if (this->stateOf(m) == State::Hidden) continue;
+		if (this->stateOf(m) != State::Tiled || m.fullscreen || m.popping || m.elevated
+		    || this->moving.contains(window))
+			return false;
+		auto tile = this->tileRect(layout, window);
+		if (!work.contains(tile)) return false;
+		if (still) {
+			if (m.target != tile) return false;
+			plan.append({window->hwnd(), tile, tile, true});
+		} else {
+			auto previous = m.target.isEmpty() ? QRect() : this->managedFrame(m);
+			auto settled = !previous.isEmpty() && std::abs(previous.left() - m.target.left()) <= 4
+			            && std::abs(previous.top() - m.target.top()) <= 4
+			            && std::abs(previous.right() - m.target.right()) <= 4
+			            && std::abs(previous.bottom() - m.target.bottom()) <= 4;
+			changed |= tile != m.target;
+			plan.append({window->hwnd(), previous, tile, settled});
+		}
+		participants.insert(window->hwnd());
+	}
+	for (auto* window: this->tracker->windows()) {
+		if (window->minimized() || window->desktop() != this->desktops->currentIndex()
+		    || participants.contains(window->hwnd()) || !IsWindowVisible(window->hwnd())
+		    || (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+			continue;
+		QRect raw;
+		QRect actual;
+		if (readFrame(window->hwnd(), raw, actual) && actual.intersects(work)) return false;
+	}
+	return true;
+}
+
+void TilingManager::coverNewWindow(HWND hwnd) {
+	if (!this->mEnabled || !DwindleScene::enabled() || !IsWindow(hwnd) || IsWindowVisible(hwnd)) return;
+	auto current = this->desktops->currentIndex();
+	if (current < 0 || current >= this->desktops->count()) return;
+	auto* monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+	auto* screen = screenForMonitor(monitor);
+	if (screen == nullptr) return;
+	auto* layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	if (layout == nullptr) return;
+	auto rects = monitorRects(monitor);
+	if (!rects.valid) return;
+	QList<DwindleTile> plan;
+	bool changed = false;
+	if (this->dwindlePlan(layout, rects.work, plan, changed, true))
+		DwindleScene::cover(monitor, rects.work, plan);
 }
 
 QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const {

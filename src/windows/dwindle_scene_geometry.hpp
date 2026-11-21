@@ -65,6 +65,23 @@ inline std::optional<QRectF> openingOrigin(const QRectF& target, const QList<Mot
 	return best;
 }
 
+inline void dropStackedOrigins(QList<std::optional<QRectF>>& origins, const QList<bool>& movable) {
+	constexpr auto epsilon = 0.5;
+	QList<qsizetype> stacked;
+	for (qsizetype i = 0; i < origins.size(); ++i) {
+		if (!movable[i] || !origins[i].has_value()) continue;
+		for (qsizetype j = 0; j < origins.size(); ++j) {
+			if (i == j || !origins[j].has_value()) continue;
+			const auto overlap = origins[i]->intersected(*origins[j]);
+			if (overlap.width() > epsilon && overlap.height() > epsilon) {
+				stacked.append(i);
+				break;
+			}
+		}
+	}
+	for (auto i: stacked) origins[i].reset();
+}
+
 inline bool planOrigins(const QList<QRect>& targets, QList<std::optional<QRectF>>& origins) {
 	QList<Motion> placed;
 	placed.reserve(targets.size());

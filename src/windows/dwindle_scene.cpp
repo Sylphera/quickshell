@@ -29,6 +29,14 @@ Q_LOGGING_CATEGORY(logDwindleScene, "quickshell.windows.dwindle.scene", QtWarnin
 
 constexpr double Duration = 0.16;
 constexpr auto SettleMs = 55;
+constexpr double JoinGrace = 0.12;
+constexpr double CoverHold = 0.7;
+constexpr int ReleaseRetries = 12;
+
+std::function<void(const QList<HWND>&)>& releaser() {
+	static auto* release = new std::function<void(const QList<HWND>&)>();
+	return *release;
+}
 constexpr auto OverlayClass = L"Quickshell.DwindleComposition";
 constexpr WORD SharedThumbnailOrdinal = 147;
 constexpr DWORD SharedThumbnailKind = 2;
@@ -258,6 +266,7 @@ public:
 	~Scene() { this->hide(); }
 
 	bool show(const QList<DwindleTile>& plan);
+	void hold();
 	void hide();
 	[[nodiscard]] bool visible() const { return this->host != nullptr; }
 	[[nodiscard]] bool matches(const QList<DwindleTile>& plan) const;
@@ -269,6 +278,7 @@ private:
 	bool makeTileColor();
 	ComPtr<IDCompositionSurface> upload(const QImage& image);
 	bool addTile(Tile& tile, const DwindleTile& placement, const QImage& before);
+	bool awaitSize(Tile& tile, const QRect& target);
 	void retain(Tile& tile, const DwindleTile& placement, const QImage& before);
 	bool retainedVisible(Tile& tile, bool visible);
 	bool resizeLiveClip(Tile& tile);
@@ -277,6 +287,8 @@ private:
 	bool setNativeSize(Thumbnail& thumb, HWND window);
 	void refresh();
 	void settle();
+	bool raise();
+	[[nodiscard]] HWND coveringHost() const;
 	bool animate(float from, float to, qint64 time, auto setter);
 
 	HWND host = nullptr;
@@ -291,6 +303,12 @@ private:
 	QTimer idle;
 	QTimer sample;
 	int retries = 0;
+	HWND stranger = nullptr;
+	qint64 strangerSince = 0;
+	qint64 holdUntil = 0;
+	QImage coverFrame;
+	bool released = false;
+	void release();
 };
 
 HWND backdropFor(const QRect& work, HWND host) {
@@ -475,10 +493,20 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 		this->retain(tile, placement, before);
 		return SUCCEEDED(tile.container->AddVisual(tile.liveFrame.Get(), FALSE, nullptr));
 	}
+	return this->awaitSize(tile, placement.target);
+}
 
+bool Scene::awaitSize(Tile& tile, const QRect& target) {
+	if (!tile.waitingForSize) {
+		this->retainedVisible(tile, false);
+		tile.retained.Reset();
+		tile.retainedSize = {};
+		if (FAILED(tile.container->RemoveVisual(tile.liveFrame.Get()))) return false;
+		tile.waitingForSize = true;
+	}
 	D2D_MATRIX_3X2_F stretch {};
-	stretch._11 = placement.target.width();
-	stretch._22 = placement.target.height();
+	stretch._11 = target.width();
+	stretch._22 = target.height();
 	return SUCCEEDED(this->device->CreateVisual(tile.placeholder.GetAddressOf()))
 	    && SUCCEEDED(tile.placeholder->SetContent(this->tileColor.Get()))
 	    && SUCCEEDED(tile.placeholder->SetTransform(stretch))
@@ -595,6 +623,15 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		return !tile.previous.isEmpty() && tile.previous.size() != tile.target.size();
 	});
 	const auto before = needFrame ? captureWorkspace(this->work) : QImage();
+	if (!this->coverFrame.isNull()) {
+		for (const auto& placement: plan) {
+			auto found = this->tiles.find(placement.window);
+			if (found == this->tiles.end()) continue;
+			auto& tile = *found->second;
+			if (tile.target.isEmpty() || tile.retained != nullptr || tile.from != QRectF(tile.target)) continue;
+			this->retain(tile, {placement.window, tile.target, placement.target, true}, this->coverFrame);
+		}
+	}
 	for (const auto& placement: plan) {
 		auto [it, added] = this->tiles.try_emplace(placement.window);
 		if (!added) continue;
@@ -611,12 +648,22 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 	QList<QRect> targets;
 	targets.reserve(plan.size());
 	QList<std::optional<QRectF>> origins(plan.size());
+	QList<bool> movable(plan.size(), false);
 	for (qsizetype i = 0; i < plan.size(); ++i) {
 		const auto& placement = plan[i];
 		const auto& tile = *this->tiles.at(placement.window);
 		targets.append(placement.target);
-		if (!tile.target.isEmpty()) origins[i] = tile.at(start);
-		else if (!placement.previous.isEmpty()) origins[i] = placement.previous;
+		if (!tile.target.isEmpty()) {
+			origins[i] = tile.at(start);
+		} else if (!placement.previous.isEmpty()) {
+			origins[i] = placement.previous;
+			movable[i] = !placement.settled;
+		}
+	}
+	dwindle::dropStackedOrigins(origins, movable);
+	for (qsizetype i = 0; i < plan.size(); ++i) {
+		if (!movable[i] || origins[i].has_value()) continue;
+		if (!this->awaitSize(*this->tiles.at(plan[i].window), plan[i].target)) return false;
 	}
 	if (!dwindle::planOrigins(targets, origins)) {
 		qCDebug(logDwindleScene) << "No non-overlapping transition for" << targets.size() << "tiles";
@@ -630,22 +677,37 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		}
 	}
 	if (!succeeded(this->device->Commit(), "Commit")) return false;
-	if (!IsWindowVisible(this->host)) {
-		auto panels = WinPanelWindow::aboveWindowHandles();
-		auto above = HWND_TOPMOST;
-		for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-			if (panels.contains(hwnd) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
-				above = hwnd;
-		}
-		if (!SetWindowPos(this->host, above, 0, 0, 0, 0,
-		                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW))
-			return false;
-	}
+	if (!IsWindowVisible(this->host) && !this->raise()) return false;
 	this->retries = 0;
+	this->released = false;
 	this->idle.start(static_cast<int>(Duration * 1000) + SettleMs);
 	this->sample.start();
 	qCDebug(logDwindleScene) << "Animating" << plan.size() << "tiles in" << this->work;
 	return true;
+}
+
+bool Scene::raise() {
+	auto panels = WinPanelWindow::aboveWindowHandles();
+	auto above = HWND_TOPMOST;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (panels.contains(hwnd) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+			above = hwnd;
+	}
+	return SetWindowPos(this->host, above, 0, 0, 0, 0,
+	                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+}
+
+HWND Scene::coveringHost() const {
+	if ((GetWindowLongPtrW(this->host, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) return this->host;
+	for (auto* above = GetWindow(this->host, GW_HWNDPREV); above != nullptr;
+	     above = GetWindow(above, GW_HWNDPREV))
+	{
+		if (IsWindowVisible(above) && !cloaked(above)
+		    && (GetWindowLongPtrW(above, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0
+		    && frame(above).intersects(this->work))
+			return above;
+	}
+	return nullptr;
 }
 
 void Scene::refresh() {
@@ -653,20 +715,50 @@ void Scene::refresh() {
 		this->hide();
 		return;
 	}
+	if (cloaked(this->host) || this->coveringHost() != nullptr) {
+		auto* over = this->coveringHost();
+		const auto wasCloaked = cloaked(this->host);
+		for (auto pass = 0; pass < 16; ++pass) {
+			auto* stray = this->coveringHost();
+			if (stray == nullptr || stray == this->host) break;
+			SetWindowPos(stray, HWND_NOTOPMOST, 0, 0, 0, 0,
+			             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+		}
+		const auto raised = this->raise();
+		if (!raised || cloaked(this->host) || this->coveringHost() != nullptr) {
+			wchar_t name[128] {};
+			if (over != nullptr && over != this->host) GetClassNameW(over, name, 128);
+			qCDebug(logDwindleScene) << "Scene host stays hidden: cloaked" << wasCloaked << "topmost"
+			                         << ((GetWindowLongPtrW(this->host, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+			                         << "under" << over << QString::fromWCharArray(name) << "raised" << raised
+			                         << "foreground" << GetForegroundWindow();
+			this->hide();
+			return;
+		}
+		qCDebug(logDwindleScene) << "Scene host raised again; put back in the normal band" << over;
+	}
 	if (GetAsyncKeyState(VK_LBUTTON) < 0 || GetAsyncKeyState(VK_RBUTTON) < 0
 	    || GetAsyncKeyState(VK_MBUTTON) < 0)
 	{
 		this->hide();
 		return;
 	}
+	const auto now = counter();
 	const auto foreground = GetForegroundWindow();
 	const auto intersecting = this->work.intersects(frame(foreground));
 	if (foreground != nullptr && intersecting && !this->tiles.contains(foreground)) {
-		this->hide();
-		return;
+		if (foreground != this->stranger) {
+			this->stranger = foreground;
+			this->strangerSince = now;
+		}
+		if (static_cast<double>(now - this->strangerSince) / frequency() > JoinGrace) {
+			this->hide();
+			return;
+		}
+	} else {
+		this->stranger = nullptr;
 	}
 	bool changed = false;
-	const auto now = counter();
 	for (auto& [hwnd, tile]: this->tiles) {
 		if (!IsWindow(hwnd) || !this->setNativeSize(tile->source, hwnd)) continue;
 		if ((tile->liveSize != tile->source.sourceCrop.size()
@@ -695,7 +787,28 @@ void Scene::refresh() {
 	if (changed && FAILED(this->device->Commit())) this->hide();
 }
 
+void Scene::release() {
+	if (this->released) return;
+	this->released = true;
+	QList<HWND> windows;
+	for (const auto& [hwnd, tile]: this->tiles) windows.append(hwnd);
+	if (!windows.isEmpty() && releaser()) releaser()(windows);
+}
+
+void Scene::hold() {
+	this->holdUntil = counter() + static_cast<qint64>(CoverHold * frequency());
+	if (!this->coverFrame.isNull()) return;
+	QTimer::singleShot(0, &this->sample, [this] {
+		if (this->visible() && this->coverFrame.isNull()) this->coverFrame = captureWorkspace(this->work);
+	});
+}
+
 void Scene::settle() {
+	const auto now = counter();
+	if (now < this->holdUntil) {
+		this->idle.start(static_cast<int>((this->holdUntil - now) * 1000 / frequency()) + 1);
+		return;
+	}
 	const auto placed = std::all_of(this->tiles.begin(), this->tiles.end(), [](const auto& pair) {
 		const auto& [hwnd, tile] = pair;
 		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) return true;
@@ -705,7 +818,13 @@ void Scene::settle() {
 		    && std::abs(actual.width() - tile->target.width()) <= 4
 		    && std::abs(actual.height() - tile->target.height()) <= 4;
 	});
-	if (!placed && this->retries++ < 3) {
+	if (!this->released) {
+		this->release();
+		this->retries = 0;
+		this->idle.start(16);
+		return;
+	}
+	if (!placed && this->retries++ < ReleaseRetries) {
 		this->idle.start(16);
 		return;
 	}
@@ -715,6 +834,10 @@ void Scene::settle() {
 void Scene::hide() {
 	this->idle.stop();
 	this->sample.stop();
+	this->release();
+	this->stranger = nullptr;
+	this->holdUntil = 0;
+	this->coverFrame = {};
 	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
 	if (this->target != nullptr) this->target->SetRoot(nullptr);
 	if (this->device != nullptr) this->device->Commit();
@@ -765,7 +888,33 @@ void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<Dwin
 	}
 }
 
+void DwindleScene::cover(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles) {
+	if (work.isEmpty()) return;
+	auto& scene = scenes()[monitor];
+	if (scene != nullptr && scene->visible() && scene->work == work) {
+		scene->hold();
+		return;
+	}
+	if (scene == nullptr || scene->work != work) scene = std::make_unique<Scene>(work);
+	if (!scene->show(tiles)) {
+		qCDebug(logDwindleScene) << "Could not cover" << tiles.size() << "tiles";
+		DwindleScene::dismiss(monitor);
+		return;
+	}
+	scene->hold();
+	qCDebug(logDwindleScene) << "Covering" << tiles.size() << "tiles for a new window";
+}
+
 void DwindleScene::dismiss(HMONITOR monitor) { scenes().erase(monitor); }
+
+bool DwindleScene::presenting(HMONITOR monitor) {
+	auto found = scenes().find(monitor);
+	return found != scenes().end() && found->second->visible();
+}
+
+void DwindleScene::onRelease(std::function<void(const QList<HWND>&)> release) {
+	releaser() = std::move(release);
+}
 
 void DwindleScene::dismissAll() { scenes().clear(); }
 
