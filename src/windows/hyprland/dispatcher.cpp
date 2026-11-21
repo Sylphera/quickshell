@@ -182,10 +182,6 @@ bool closeShellWindow(HWND hwnd) {
 	return true;
 }
 
-// Hyprland warps the cursor to a window focused or moved from the keyboard
-// (cursor:no_warps is off in end-4), so focus following the mouse doesn't snap
-// back on the next nudge. Windows move asynchronously, so a moved one is
-// followed a moment later.
 constexpr int WARP_AFTER_MOVE_MS = 120;
 
 void warpToWindow(HWND hwnd) {
@@ -205,8 +201,6 @@ void warpToWindowLater(TrackedWindow* window, int delayMs) {
 	});
 }
 
-// Focus lands asynchronously: follow it once the tracker reports the new
-// active window, or give up after a moment.
 constexpr int WARP_FOCUS_TIMEOUT_MS = 300;
 
 void warpToFocusChange(WindowTracker* tracker) {
@@ -221,9 +215,6 @@ void warpToFocusChange(WindowTracker* tracker) {
 	QTimer::singleShot(WARP_FOCUS_TIMEOUT_MS, context, [context]() { context->deleteLater(); });
 }
 
-// killactive closes the focused window, as in Hyprland, or the shell's own
-// window in front when no app window is focused.
-// Whether nothing else shows on the window's desktop (or in special with it).
 bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
 	auto special = Scratchpad::holds(window);
 	for (auto* other: tracker->windows()) {
@@ -236,10 +227,8 @@ bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
 }
 
 void closeFocused(WindowTracker* tracker) {
-	// The window focused now: Windows doesn't always announce handing focus on.
 	tracker->syncActive();
 	if (auto* window = tracker->activeWindow()) {
-		// end-4's windowsOut: a still of it pops out while it closes.
 		auto target = QPointer<TrackedWindow>(window);
 		auto close = [target]() {
 			if (target) target->close();

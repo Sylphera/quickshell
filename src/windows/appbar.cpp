@@ -176,10 +176,6 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 
 	auto granted = toQRect(data.rc);
 
-	// Explorer recomputes the work area now and then (as the shell hides its
-	// taskbar at startup, say) and may leave this bar's space out; the same
-	// place granted again must then be set again. Only then: setting it
-	// notifies the shell's other appbars, which would answer in kind.
 	auto workLost = false;
 	MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
 	if (GetMonitorInfoW(MonitorFromRect(&data.rc, MONITOR_DEFAULTTONEAREST), &info)) {
@@ -193,8 +189,6 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 		this->mReserved = toQRect(data.rc);
 		qCDebug(logAppBar) << "Reserved" << this->mReserved << "on edge" << edge << "for" << hwnd;
 
-		// Explorer can recompute the work area right after, without a word to
-		// appbars (hiding its taskbar as the shell starts does): look again.
 		for (auto delay: {1500, 5000}) {
 			QTimer::singleShot(delay, QCoreApplication::instance(), [hwnd, data]() mutable {
 				if (!IsWindow(hwnd)) return;
@@ -211,8 +205,6 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 	this->mMonitor = monitor;
 	this->mSize = size;
 	this->mPositionValid = true;
-	// Tiling placed windows before this bar had its space (as the shell
-	// starts), and Explorer may never report it: they go clear of it now.
 	if (setOwnReservation(hwnd, monitor, edge, this->mReserved)) {
 		QTimer::singleShot(0, QCoreApplication::instance(), []() {
 			TilingManager::instance()->workAreaChanged();

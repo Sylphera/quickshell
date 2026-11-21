@@ -10,8 +10,6 @@
 
 namespace qs::windows::tiling {
 
-// Pick the visible Dwindle leaf nearest to the pointer, including when the
-// cursor lies inside a gap. This does not modify Dwindle's split rules.
 [[nodiscard]] inline LayoutEngine::Id
 cursorInsertionTarget(const LayoutEngine& layout, const QPoint& cursor) {
 	auto chosen = LayoutEngine::Id(0);
@@ -39,4 +37,4 @@ cursorInsertionTarget(const LayoutEngine& layout, const QPoint& cursor) {
 	return chosen;
 }
 
-} // namespace qs::windows::tiling
+}

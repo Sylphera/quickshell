@@ -240,8 +240,6 @@ public:
 	///
 	/// The popup can also be blocked by setting `QS_NO_RELOAD_POPUP=1`.
 	Q_INVOKABLE void inhibitReloadPopup() { this->mInhibitReloadPopup = true; }
-	/// Collect JavaScript garbage and drop compiled components nothing uses any
-	/// more, e.g. after a large window such as settings was unloaded.
 	Q_INVOKABLE void trimMemory();
 	/// Check if Quickshell's version is at least `major.minor` and the listed
 	/// unreleased features are available. If Quickshell is newer than the given version

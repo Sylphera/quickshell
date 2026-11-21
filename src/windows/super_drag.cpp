@@ -45,7 +45,6 @@ constexpr UINT WM_SD_ENDED = WM_APP + 3;
 constexpr UINT WM_SD_WHEEL = WM_APP + 4;
 constexpr UINT WM_SD_WORKSPACE_WHEEL = WM_APP + 5;
 constexpr UINT WM_SD_HOVER = WM_APP + 6;
-// After Windows hands focus on to the window it picks.
 constexpr int REFOCUS_AFTER_CLOSE_MS = 100;
 
 constexpr LPARAM FLAG_RESIZE = 1;
@@ -559,8 +558,6 @@ SuperDragManager::SuperDragManager(QObject* parent): QObject(parent) {
 
 	gGuiWindow.store(this->messageWindow);
 
-	// Hyprland refocuses through the pointer when a window goes away, so with
-	// follow_mouse the window under it takes focus, not the one Windows picks.
 	QObject::connect(WindowTracker::instance(), &WindowTracker::windowRemoved, this, [this]() {
 		if (!this->mFocusFollowsMouse) return;
 		QTimer::singleShot(REFOCUS_AFTER_CLOSE_MS, this, [this]() {
@@ -646,21 +643,13 @@ bool isMotionCover(HWND hwnd) {
 	return wcscmp(cls, L"QuickshellWindowMotion") == 0 || wcscmp(cls, L"QuickshellWindowPop") == 0
 	    || wcscmp(cls, L"QuickshellMotionSnapshot") == 0;
 }
-} // namespace
+}
 
-// Only app windows take focus this way, and only when nothing else owns the
-// pointer: the shell's own UI, an open menu, a capture, a drag, special
-// leaving or a desktop switch on its way.
 void SuperDragManager::onHover(POINT point, bool byLayout) {
 	auto* hit = WindowFromPoint(point);
 	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
-	// The shell's own UI keeps the pointer; its window animations don't.
 	if (root != nullptr && isOwnProcessWindow(root) && !isMotionCover(root)) return;
 
-	// Like Hyprland, a tiled window takes focus where its tile is, not where it
-	// is drawn: while windows slide, what's under the pointer is an animation
-	// cover, the wallpaper or a neighbour passing through. A floating window on
-	// top still takes it where it is.
 	auto* hitWindow = root != nullptr ? WindowTracker::instance()->windowFor(root) : nullptr;
 	auto* tiling = TilingManager::active();
 	if (byLayout && tiling != nullptr && (hitWindow == nullptr || tiling->isTiled(hitWindow))) {
@@ -677,9 +666,6 @@ void SuperDragManager::onHover(POINT point, bool byLayout) {
 	if (root == foreground) return;
 	if (foreground != nullptr) {
 		if (isOwnProcessWindow(foreground)) return;
-		// A popup, menu or dialog of the window under the pointer keeps focus: in
-		// Hyprland those are part of their window. Taking focus back closed a
-		// browser's extension popup as soon as the pointer moved.
 		if (GetAncestor(foreground, GA_ROOTOWNER) == root) return;
 		if (WindowTracker::instance()->windowFor(foreground) == nullptr) {
 			DWORD foregroundPid = 0;
@@ -698,9 +684,6 @@ void SuperDragManager::onHover(POINT point, bool byLayout) {
 	auto* window = WindowTracker::instance()->windowFor(root);
 	if (window == nullptr || window->minimized() || !IsWindowVisible(root)) return;
 
-	// Hyprland's float_switch_override_focus = 1 (end-4 keeps the default): the
-	// pointer moves focus between tiled and floating windows, not from one
-	// floating window to another.
 	auto floating = [tiling](TrackedWindow* w) { return tiling == nullptr || !tiling->isTiled(w); };
 	auto* focused = WindowTracker::instance()->windowFor(foreground);
 	if (focused != nullptr && floating(focused) && floating(window)) return;
@@ -808,7 +791,6 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 		return SuperDragManager::onWheel(message, info);
 	}
 
-	// Focus follows the pointer; the GUI thread decides, one move at a time.
 	if (message == WM_MOUSEMOVE && gFocusFollows.load(std::memory_order_relaxed)
 	    && !isDown(VK_LBUTTON) && !isDown(VK_RBUTTON) && !isDown(VK_MBUTTON)
 	    && !gHoverPending.exchange(true))
@@ -842,8 +824,6 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 bool SuperDragManager::onWheel(WPARAM message, const MSLLHOOKSTRUCT* info) {
 	if (!isDown(VK_LWIN) && !isDown(VK_RWIN)) return false;
 
-	// The vertical wheel switches workspaces like end-4; the horizontal one
-	// walks the scrolling layout's columns.
 	auto horizontal = message == WM_MOUSEHWHEEL;
 	auto workspaces = !horizontal && gWheelWorkspaces.load(std::memory_order_relaxed);
 	if (!workspaces) {

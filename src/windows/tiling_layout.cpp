@@ -121,13 +121,8 @@ void DwindleLayout::insert(Id id, Id target, const QPoint* cursor) {
 	leaf->parent = split;
 
 	const auto box = split->box;
-	// Hyprland retains floating-point layout boxes in its BSP tree. Windows
-	// needs integer HWND coordinates, but rounded boxes must not drive the
-	// direction of a future split (a rounded square can be a wide subpixel box).
 	const auto ideal = split->idealBox.isValid() ? split->idealBox : QRectF(box);
 	split->id = 0;
-	// Hyprland uses side-by-side only when width > height. In particular,
-	// square containers split top/bottom, not left/right.
 	split->splitTop = ideal.height() >= ideal.width();
 	split->splitPinned = false;
 	split->ratio = this->defaultRatio;
@@ -144,9 +139,6 @@ void DwindleLayout::insert(Id id, Id target, const QPoint* cursor) {
 	} else if (this->forceSplit == 2) {
 		newFirst = false;
 	} else if (cursor != nullptr) {
-		// Match Hyprland's half-cell threshold (including cursor positions in
-		// reserved areas outside the target), not QRect::center() which rounds
-		// the midpoint down by one pixel for even-sized rectangles.
 		auto mid = split->splitTop ? ideal.top() + ideal.height() / 2.0
 		                           : ideal.left() + ideal.width() / 2.0;
 		newFirst = split->splitTop ? cursor->y() < mid : cursor->x() < mid;
@@ -744,7 +736,6 @@ bool MasterLayout::resize(Id id, int dx, int dy) {
 	grow(dy, Edge::Bottom, Edge::Top);
 	return changed;
 }
-
 
 namespace {
 

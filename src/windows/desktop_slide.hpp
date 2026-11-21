@@ -17,16 +17,9 @@
 
 namespace qs::windows {
 
-// Blocks until the compositor's next frame (see desktop_slide.cpp).
 void waitForCompositorFrame();
-// The display's refresh period, in milliseconds.
 double compositorRefreshMs();
 
-// Hyprland slides workspaces in its compositor. Windows switches virtual
-// desktops at once, so this covers the switch with live DWM thumbnails of the
-// wallpaper and of the desktops' windows, slid under the shell's own panels.
-// Desktops sit on a strip and a camera moves along it, so a new switch in the
-// middle of a slide just gives the camera a new target.
 class DesktopSlide: public QObject {
 	Q_OBJECT;
 
@@ -34,15 +27,9 @@ public:
 	static DesktopSlide* instance();
 	Q_DISABLE_COPY_MOVE(DesktopSlide);
 
-	// Returns whether a slide now covers the switch.
 	bool begin(qsizetype from, qsizetype to);
 
-	// Hyprland's workspace swipe: the slide follows a gesture instead of its
-	// clock. `offset` is how far the gesture has gone, in desktop widths;
-	// positive heads for the next desktop, negative for the previous one.
 	void swipeUpdate(double offset);
-	// The gesture lets go, at `velocity` desktop widths a second: like Hyprland,
-	// it switches if it went far or fast enough that way, and slides back if not.
 	void swipeEnd(double velocity);
 
 private:
@@ -100,7 +87,6 @@ private:
 	std::chrono::steady_clock::time_point startedAt;
 	bool settledSent = false;
 	bool commitSent = false;
-	// While a swipe drives the camera.
 	bool manual = false;
 	double manualCamera = 0;
 	bool swiping = false;
@@ -115,4 +101,4 @@ private:
 	HBITMAP wallBitmap = nullptr;
 };
 
-} // namespace qs::windows
+}

@@ -223,8 +223,6 @@ void TaskbarManager::refreshMode() {
 		this->enable();
 		return;
 	}
-	// Switching modes must update the existing bars immediately. Otherwise
-	// the old edge-hover state survives until the next pointer movement.
 	POINT cursor {};
 	GetCursorPos(&cursor);
 	if (!this->mAlwaysHidden && (this->atTrigger({cursor.x, cursor.y}) || this->overBar({cursor.x, cursor.y}))) {

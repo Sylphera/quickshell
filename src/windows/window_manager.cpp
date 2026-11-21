@@ -224,9 +224,6 @@ void WorkspaceBehavior::watchTracker() {
 	QObject::connect(this->tracker, &WindowTracker::activeWindowChanged, this, retry);
 	QObject::connect(this->tracker, &WindowTracker::flushed, this, retry);
 
-	// Hyprland's focus_on_close: closing the focused window hands focus on.
-	// Windows usually does, but now and then leaves it on the desktop or on
-	// nothing; repairFocus then gives it to the most recent window here.
 	QObject::connect(this->tracker, &WindowTracker::activeWindowChanged, this, [this]() {
 		if (auto* active = this->tracker->activeWindow()) this->lastActive = active;
 	});

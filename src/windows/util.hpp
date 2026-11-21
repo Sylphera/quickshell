@@ -24,15 +24,8 @@ void setFocusedScreen(QScreen* screen);
 void prioritizeInputThread(int priority);
 void optOutOfProcessPowerThrottling();
 [[nodiscard]] MonitorRects monitorRects(HMONITOR monitor);
-// Space a shell bar reserved as an appbar on `edge` (ABE_*): monitorRects
-// leaves it out of the work area even when Explorer has dropped it, as it
-// does for a bottom bar while it hides its own taskbar there.
-// Returns whether it changed.
 bool setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& reserved);
 void clearOwnReservation(HWND hwnd);
-// The shell is about to change a monitor's work area (the bar toggling): until
-// Windows reports it, or for `ms`, monitorRects answers with it already, so
-// windows slide before apps react to the change themselves.
 void expectWorkArea(HMONITOR monitor, const QRect& work, int ms);
 
 class ScreenMapper {

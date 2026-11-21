@@ -41,17 +41,10 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
-	// The work area changed in a way Qt doesn't report (a shell appbar
-	// reserving its space): every layout is placed again.
 	void workAreaChanged() { this->markAll(); }
-	// The tiled window whose tile holds the point, by layout: also while windows
-	// slide and only their animation covers are on screen.
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
-	// Moves the special workspace's tiles down by this many physical pixels and
-	// places them at once, for its slide in and out.
 	void setSpecialOffset(int offset);
 	[[nodiscard]] int specialOffset() const { return this->mSpecialOffset; }
-	// Frames of the special layout's tiled windows with no slide offset.
 	[[nodiscard]] QHash<HWND, QRect> specialFrames() const;
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
@@ -125,9 +118,6 @@ public:
 	bool centerColumn(TrackedWindow* window);
 	bool toggleFit(TrackedWindow* window);
 	bool toggleFullWidth(TrackedWindow* window);
-	// Hyprland's fullscreen, without touching the window's frame or styles: a
-	// tiled window's tile becomes the whole monitor, a floating one is moved to
-	// cover it and back. False if it can't (minimized, maximized, elevated).
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	void updateShellFullscreen();
@@ -212,7 +202,6 @@ private:
 		bool offscreen = false;
 		QRect restore;
 		bool tinyCornersApplied = false;
-		// Appeared after the shell started, and not placed yet: pops in.
 		bool fresh = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
@@ -221,9 +210,7 @@ private:
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
-		// Popping in: it waits off screen until the pop lands.
 		bool popping = false;
-		// Where a floating window was before it went fullscreen (raw rect).
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
 	};
@@ -301,10 +288,7 @@ private:
 	bool mEnabled = false;
 	bool mSuppressWindowShadows = false;
 	bool mAnimateMoves = true;
-	// Set while the bar is toggling: windows slide even while tiling is still
-	// checking where an app put its window, since they wait off screen anyway.
 	bool barMoving = false;
-	// Windows sliding to a new tile, with the tile they go to.
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
@@ -375,10 +359,6 @@ public:
 	explicit Tiling(QObject* parent = nullptr);
 
 	Q_INVOKABLE void relayout();
-	// The bar on `screenName` is about to reserve `reserved` logical pixels at
-	// its edge (0 when hidden): windows start sliding now, before Windows changes
-	// the work area and apps react to it. A state, not a change, so toggling
-	// faster than the reservation follows cannot drift.
 	Q_INVOKABLE void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool enabled() const;

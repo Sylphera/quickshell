@@ -304,7 +304,6 @@ void DecorationManager::apply(TrackedWindow* window) {
 	if (isOwnProcessWindow(hwnd) || !reachable(hwnd)) return;
 
 	auto state = this->applied.value(hwnd);
-	// Only the sub-80px legacy shrinking path owns this HWND mask.
 	auto tinyRoundedTile = GetPropW(hwnd, L"QuickshellTilingTinyRounded") != nullptr;
 
 	auto supported = DecorationManager::supported();
@@ -312,9 +311,6 @@ void DecorationManager::apply(TrackedWindow* window) {
 	auto mode = supported ? this->borderMode() : BorderMode::System;
 	auto color = active ? this->mActiveColor : this->mInactiveColor;
 	if (mode == BorderMode::Colors && !color.isValid()) mode = BorderMode::System;
-	// A window covering its monitor (fullscreen) gets neither a border nor
-	// rounded corners, as Windows does for maximized ones: they left gaps of
-	// wallpaper in the screen's corners.
 	auto covering = supported && window->fullscreen();
 	if (covering) mode = BorderMode::None;
 

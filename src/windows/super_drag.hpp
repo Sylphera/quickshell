@@ -25,11 +25,7 @@ public:
 	void setEnabled(bool enabled);
 	void setWheelColumns(bool enabled);
 	[[nodiscard]] bool focusFollowsMouse() const { return this->mFocusFollowsMouse; }
-	// Hyprland's follow_mouse = 1: moving the pointer focuses the app window
-	// under it.
 	void setFocusFollowsMouse(bool enabled);
-	// end-4's Super+wheel binds: the handler gets the steps (positive is down,
-	// to the next workspace) and the modifier: none, Ctrl, or Shift/Alt.
 	enum class WheelBind { Workspace, OccupiedWorkspace, MoveWindow };
 	void setWorkspaceWheel(std::function<void(int steps, WheelBind bind)> handler);
 

@@ -1189,8 +1189,6 @@ void HotkeyManager::runDispatch(const Bind& bind) {
 
 namespace {
 
-// The program Windows opens https links with, so a bind can start the user's
-// browser the way end-4's Super+W does.
 QString defaultBrowser() {
 	wchar_t path[MAX_PATH] {};
 	DWORD size = MAX_PATH;
@@ -1200,7 +1198,7 @@ QString defaultBrowser() {
 	return QString::fromWCharArray(path);
 }
 
-} // namespace
+}
 
 void HotkeyManager::runExec(const Bind& bind) const {
 	auto commands = QStringList();

@@ -30,8 +30,6 @@ class Dispatcher;
 
 } // namespace qs::hyprland::ipc
 
-// Like upstream: moc must see these types whole, or a HyprlandMonitor* can
-// reach QML as an opaque QVariant (no id, no scale) depending on load order.
 Q_MOC_INCLUDE("hyprland_toplevel.hpp")
 Q_MOC_INCLUDE("monitor.hpp")
 Q_MOC_INCLUDE("workspace.hpp")

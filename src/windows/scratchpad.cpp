@@ -32,7 +32,6 @@ constexpr int DIM_ALPHA = 51;
 constexpr int DIM_STEP = 18;
 constexpr int DIM_FRAME_MS = 16;
 constexpr ULONGLONG FOCUS_GRACE_MS = 400;
-// end-4's specialWorkspaceIn and specialWorkspaceOut: slidevert from below.
 constexpr double SLIDE_IN_MS = 280;
 constexpr double SLIDE_OUT_MS = 120;
 constexpr int LANDING_TRIES = 20;
@@ -116,8 +115,6 @@ void placeAt(HWND hwnd, HWND insertAfter, const QRect& rect) {
 	);
 }
 
-// Hyprland draws the top layer (the bar, the dock) over special's windows:
-// they go into the topmost band just under the shell's lowest top panel.
 HWND lowestTopPanel() {
 	const auto panels = WinPanelWindow::aboveWindowHandles();
 	HWND lowest = nullptr;
@@ -151,9 +148,6 @@ void raise(HWND hwnd) {
 	}
 }
 
-// The window left special without going through remove(): the tracker lost it
-// for a moment, or it was recreated. If it's still alive it must not stay
-// pinned to every desktop, or it follows the user around.
 void release(HWND hwnd, const QRect& rect) {
 	if (IsWindow(hwnd)) {
 		if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
@@ -186,10 +180,6 @@ QRect visibleRect(HWND hwnd) {
 	return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
 }
 
-// Windows a previous shell left in special: killed, crashed or restarted
-// without releasing them. The mark only goes once the window is unpinned, or
-// it would stay on every desktop with nothing left to tell it apart.
-// Returns whether some are still waiting for the desktop accessor.
 struct OrphanScan {
 	QList<HWND> held;
 	bool pending = false;
@@ -218,7 +208,7 @@ bool recoverOrphans(const QList<HWND>& held = {}) {
 	return scan.pending;
 }
 
-} // namespace
+}
 
 namespace {
 QPointer<Scratchpad> SCRATCHPAD; // NOLINT
@@ -263,21 +253,15 @@ Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 	    &Scratchpad::onActiveWindowChanged
 	);
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::currentChanged, this, [this]() {
-		// A switch begun before opening special commits after the desktop slide.
-		// Its currentChanged only acknowledges the desktop already shown at open.
 		auto* desktops = VirtualDesktops::instance();
 		if (this->mShown && desktops->currentIndex() != this->openedDesktop) this->hideNow();
 	});
-	// The real switch is deferred under the desktop slide; special leaves as
-	// soon as the switch is asked for, like Hyprland, not when it commits.
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::shownChanged, this, [this]() {
 		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
 			this->hideNow();
 	});
 }
 
-// A desktop switch covers the screen with its own slide, and special's slide
-// out on top of it would leave a ghost of the window behind. It just goes.
 void Scratchpad::hideNow() {
 	if (!this->mShown) return;
 	this->preparing = false;
@@ -321,8 +305,6 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 			forceForegroundWindow(hwnd);
 		} else if (!follow) {
 			this->park(entry);
-			// The desktop it left closes the gap now, not the next time
-			// special opens.
 			if (auto* tiling = TilingManager::active()) tiling->markWindow(window);
 		}
 	}
@@ -347,7 +329,6 @@ void Scratchpad::remove(TrackedWindow* window) {
 
 void Scratchpad::setShown(bool shown) {
 	if (shown && this->hiding) {
-		// Super+S in the middle of the slide out turns it back.
 		this->hiding = false;
 		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
 		this->showDim();
@@ -364,8 +345,6 @@ void Scratchpad::setShown(bool shown) {
 		this->shownAt = GetTickCount64();
 		this->mShown = true;
 		this->preparing = true;
-		// A window Windows unpinned (moving it to a desktop does) would drag
-		// the user to its desktop the moment special focuses it.
 		auto* desktops = VirtualDesktops::instance();
 		for (const auto& entry: this->entries) {
 			if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd))
@@ -431,21 +410,11 @@ int Scratchpad::slideDistance() const {
 	return rects.valid ? rects.monitor.height() : 0;
 }
 
-// Moving the real windows every frame stutters: each move goes through the
-// app and lands whenever it gets to it. Like the desktop slide, the motion is
-// live DWM thumbnails on a click-through cover, stepped on the compositor's
-// clock off the GUI thread. The real windows wait below the screen and move
-// once, under their thumbnails, when the slide in ends.
 void Scratchpad::moveReal(int offset) {
 	this->realOffset = offset;
 	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(offset);
 }
 
-// The hand-off between thumbnails and real windows has to land in a single
-// compositor frame: for a frame with both on screen a translucent window looks
-// twice as opaque, and with neither the window blinks out. Tiling moves
-// windows asynchronously, so this moves them itself, synchronously, right next
-// to the cover change, and tiling then finds them already in place.
 void Scratchpad::jumpReal(int offset) {
 	auto delta = offset - this->realOffset;
 	if (delta != 0) {
@@ -473,8 +442,6 @@ void Scratchpad::slide(bool in) {
 	this->slideGeneration++;
 
 	if (this->cover == nullptr) {
-		// Showing windows go below the screen first; on hide the cover comes up
-		// and the windows leave in the same frame.
 		if (in) {
 			this->moveReal(this->slideDistance());
 			this->openCover(true);
@@ -519,8 +486,6 @@ void Scratchpad::openCover(bool show) {
 		cls.lpszClassName = COVER_CLASS;
 		registered = RegisterClassExW(&cls) != 0;
 	}
-	// One pixel short of the monitor: a topmost window covering it exactly is
-	// taken by Explorer for a fullscreen app, and the shell's panels step down.
 	auto monitor = rects.monitor.adjusted(0, 1, 0, 0);
 	this->cover = CreateWindowExW(
 	    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -547,7 +512,6 @@ void Scratchpad::openCover(bool show) {
 	    sizeof(noTransitions)
 	);
 
-	// Thumbnails stack in the order they are registered: bottom first.
 	QList<HWND> stack;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
 		for (const auto& entry: this->entries) {
@@ -581,7 +545,6 @@ void Scratchpad::openCover(bool show) {
 	DwmFlush();
 }
 
-// Right above the topmost special window, so the shell's panels stay on top.
 void Scratchpad::placeCover() {
 	if (this->cover == nullptr) return;
 	HWND top = nullptr;
@@ -605,8 +568,6 @@ void Scratchpad::placeCover() {
 	);
 }
 
-// Called with slideMutex held. The source follows the window's own frame, so
-// a window still settling into its tile shows as it is.
 void Scratchpad::layoutCover(double offset) {
 	auto shift = static_cast<int>(std::lround(offset));
 	for (const auto& thumb: this->coverThumbs) {
@@ -688,9 +649,6 @@ void Scratchpad::onSlideDone() {
 		if (this->hiding) this->finishHide();
 		return;
 	}
-	// The windows jump under their thumbnails and the cover leaves at once.
-	// The cover's own removal reaches the screen a frame after a window move,
-	// so its thumbnails are switched off first, which DWM applies right away.
 	this->slideStop.store(true);
 	if (this->slideWorker.joinable()) this->slideWorker.join();
 	{
@@ -820,10 +778,6 @@ void Scratchpad::showDim() {
 	auto work = monitorRects(this->mMonitor).work;
 	if (work.isEmpty()) return;
 
-	// Hyprland draws dim_special over what lies under special and below the
-	// top layer, so end-4's bar and dock never dim. The dim is the topmost of
-	// the ordinary windows: over every app, under every topmost window (the
-	// shell's panels, and special's windows, which are raised topmost).
 	SetWindowPos(this->dim, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	SetWindowPos(
 	    this->dim,
@@ -846,9 +800,6 @@ void Scratchpad::hideDim() {
 	else this->dimTimer.start();
 }
 
-// With the windows sliding, the dim follows them on the slide's own clock and
-// curve, as Hyprland's dim_special follows the special workspace. Without a
-// slide it fades on its timer.
 bool Scratchpad::slideDrivesDim() const {
 	return TilingManager::active() != nullptr && !this->entries.isEmpty();
 }
@@ -907,9 +858,6 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 	this->relayout();
 	if (!this->mShown) return;
 
-	// Closing a window in special hands focus to another one there, as in
-	// Hyprland. Windows hands it to a window behind special instead, which read
-	// as leaving special and hid it while it still had windows.
 	this->shownAt = GetTickCount64();
 	QTimer::singleShot(0, this, [this]() {
 		if (!this->mShown || this->entries.isEmpty()) return;
@@ -955,9 +903,7 @@ void Scratchpad::restoreForCrash() {
 		if (hwnd == nullptr || !IsWindow(hwnd)) continue;
 		auto rect = unpackRect(slot.rect.load());
 		if (!rect.isEmpty()) placeAt(hwnd, HWND_NOTOPMOST, rect);
-		// The mark stays: unpinning isn't safe from a crash handler, and the
-		// next shell finds the window by it and unpins it.
 	}
 }
 
-} // namespace qs::windows
+}

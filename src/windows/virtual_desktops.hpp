@@ -64,8 +64,6 @@ public:
 
 	bool switchTo(qsizetype index);
 	void switchToAsync(qsizetype index);
-	// The desktop the shell shows as current. While a slide covers a switch,
-	// Windows only switches at its end, but the shell already shows the target.
 	[[nodiscard]] qsizetype shownIndex() const {
 		return this->pendingTarget >= 0 ? this->pendingTarget : this->mCurrent;
 	}

@@ -910,9 +910,6 @@ void WinPanelWindow::updateDimensions() {
 			}
 		}
 	} else {
-		// Windows gives the space back a moment after the appbar goes: until
-		// then the work area still leaves it out, and a panel let go of its
-		// space (the dock, unpinned) jumped off its edge and back.
 		auto previous = this->appBar.registered() ? this->appBar.reservedRect() : QRect();
 		this->appBar.remove();
 		if (previous.isValid() && rects.valid) {
@@ -1416,9 +1413,6 @@ void WinPanelWindow::scheduleFocusGrab() {
 		auto* foreground = GetForegroundWindow();
 		if (foreground == this->hwnd() || isOwnProcessWindow(foreground)) return;
 
-		// Windows' own prompts must stay usable over an exclusive panel (the
-		// lock screen): Windows Hello asking for the PIN, and a UAC prompt.
-		// Anything else, Task Manager included, gets the focus taken back.
 		DWORD pid = 0;
 		GetWindowThreadProcessId(foreground, &pid);
 		if (auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {

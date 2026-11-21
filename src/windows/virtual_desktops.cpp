@@ -640,8 +640,6 @@ void VirtualDesktops::switchToAsync(qsizetype index) {
 		return;
 	}
 
-	// Showing and hiding every window of both desktops is the heavy part of a
-	// switch. Under a slide it waits for the slide's end, behind a still cover.
 	auto shown = this->shownIndex();
 	if (DesktopSlide::instance()->begin(shown, index)) {
 		this->pendingTarget = index;

@@ -75,9 +75,6 @@ private:
 
 		qCDebug(logFocusGrab) << "Button pressed at" << position << "on" << root;
 
-		// The native screen corners toggle the sidebars themselves; a click on
-		// them dismissing a sidebar first would have it reopen at once. They
-		// belong to every grab, as the bar does.
 		if (root != nullptr && isOwnProcessWindow(root)) {
 			wchar_t name[64] {};
 			GetClassNameW(root, name, 64);

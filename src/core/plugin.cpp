@@ -11,7 +11,6 @@ namespace {
 QS_LOGGING_CATEGORY(logStartup, "quickshell.startup", QtWarningMsg);
 }
 
-// Registrars may run before static objects in other translation units.
 static QVector<QsEnginePlugin*>& registeredPlugins() {
 	static QVector<QsEnginePlugin*> plugins; // NOLINT
 	return plugins;

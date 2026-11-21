@@ -138,8 +138,6 @@ public:
 
 	[[nodiscard]] const QList<TrackedWindow*>& windows() const { return this->mWindows; }
 	[[nodiscard]] TrackedWindow* activeWindow() const { return this->mActive; }
-	// Reads the foreground window now. Windows doesn't always announce a
-	// change (handing focus on after a close, or after a desktop switch).
 	void syncActive() { this->updateActive(); }
 	[[nodiscard]] TrackedWindow* windowFor(HWND hwnd) const { return this->byHwnd.value(hwnd); }
 	[[nodiscard]] VirtualDesktops* desktops() const { return this->mDesktops; }
@@ -209,10 +207,6 @@ private:
 	std::vector<WindowEvent> spareEvents;
 };
 
-// end-4's windowsIn: a new window waits off screen from the moment it shows,
-// so it is never seen where Windows put it before it pops in. Tiling turns it
-// on, and takes the window when it places it; a window tiling doesn't place
-// goes back where it showed.
 void setParkNewWindows(bool park);
 void claimEarlyPark(HWND hwnd);
 void releaseEarlyPark(HWND hwnd);

@@ -147,7 +147,6 @@ public:
 
 		setCloaked(window, true);
 
-		// A window popping in stays cloaked: its pop-in uncloaks it when done.
 		auto uncloak = [guard = QPointer<QQuickWindow>(window)]() {
 			if (guard != nullptr && guard->property("qsPopIn").toBool()) return;
 			setCloaked(guard, false);

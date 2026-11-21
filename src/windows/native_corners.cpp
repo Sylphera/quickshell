@@ -23,15 +23,13 @@ constexpr int TOPMOST_MS = 2000;
 bool cornerIsRight(int corner) { return corner == 1 || corner == 3; }
 bool cornerIsBottom(int corner) { return corner >= 2; }
 
-} // namespace
+}
 
 NativeScreenCorners::NativeScreenCorners(QObject* parent): QObject(parent) {
 	this->rebuildTimer.setSingleShot(true);
 	this->rebuildTimer.setInterval(0);
 	QObject::connect(&this->rebuildTimer, &QTimer::timeout, this, &NativeScreenCorners::rebuild);
 
-	// Other topmost windows (the shell's own panels among them) come and go;
-	// the corners stay over them, like end-4's overlay layer.
 	this->topmostTimer.setInterval(TOPMOST_MS);
 	QObject::connect(&this->topmostTimer, &QTimer::timeout, this, [this]() {
 		for (const auto& corner: this->corners) {
@@ -189,9 +187,6 @@ void NativeScreenCorners::rebuild() {
 			    QRect(right ? width - hotWidth : 0, bottom ? height - hotHeight : 0, hotWidth, hotHeight);
 		}
 
-		// Premultiplied BGRA: the fill outside a quarter circle centred on the
-		// far corner, antialiased, plus a near-invisible hot zone so it can
-		// be hit-tested.
 		BITMAPINFO info {};
 		info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 		info.bmiHeader.biWidth = width;
@@ -308,4 +303,4 @@ LRESULT NativeScreenCorners::handle(int index, UINT msg, WPARAM wParam, LPARAM l
 	}
 }
 
-} // namespace qs::windows
+}

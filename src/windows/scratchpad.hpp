@@ -91,7 +91,7 @@ private:
 	struct CoverThumb {
 		HWND hwnd = nullptr;
 		HTHUMBNAIL thumbnail = nullptr;
-		QRect frame; // where the window rests, in screen coordinates
+		QRect frame;
 	};
 	HWND cover = nullptr;
 	QPoint coverOrigin;
@@ -113,4 +113,4 @@ private:
 	[[nodiscard]] bool slideDrivesDim() const;
 };
 
-} // namespace qs::windows
+}

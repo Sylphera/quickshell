@@ -13,7 +13,6 @@ namespace qs::windows {
 
 namespace {
 
-// end-4: windowsMove, speed 3 (300 ms), emphasizedDecel.
 constexpr double MOVE_MS = 300;
 constexpr double CURVE_X1 = 0.05;
 constexpr double CURVE_Y1 = 0.7;
@@ -21,11 +20,8 @@ constexpr double CURVE_X2 = 0.1;
 constexpr double CURVE_Y2 = 1.0;
 constexpr auto* COVER_CLASS = L"QuickshellWindowMotion";
 constexpr COLORREF COVER_KEY = RGB(255, 0, 255);
-// An app that takes longer than this to leave slides anyway.
 constexpr double TAKEOFF_TIMEOUT_MS = 0;
-// Two compositor frames for an app to repaint at its new size before sliding.
 constexpr int REPAINT_SETTLE_MS = 33;
-// How long a still stays over a window that landed, while it paints again.
 constexpr int LINGER_MS = 400;
 
 double bezierAt(double a, double b, double t) {
@@ -33,9 +29,6 @@ double bezierAt(double a, double b, double t) {
 	return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t;
 }
 
-// Chromium and Electron stop painting a window that is off screen, and drop
-// its picture a moment later: a thumbnail of it goes blank mid-slide. Like the
-// desktop slide, they travel as a still taken before they leave.
 bool paintsOnlyOnScreen(HWND hwnd) {
 	wchar_t cls[64] {};
 	GetClassNameW(hwnd, cls, 64);
@@ -102,7 +95,7 @@ HWND snapshotOf(const QRect& frame) {
 	return host;
 }
 
-} // namespace
+}
 
 bool WindowMotion::travelsAsStill(HWND hwnd) { return paintsOnlyOnScreen(hwnd); }
 
@@ -119,7 +112,6 @@ double ease(double x) {
 	return bezierAt(CURVE_Y1, CURVE_Y2, (lo + hi) / 2);
 }
 
-// How long a window that was asked to close may take before it comes back.
 constexpr int CLOSE_GIVE_BACK_MS = 1500;
 
 QRect lerp(const QRect& a, const QRect& b, double t) {
@@ -130,7 +122,6 @@ QRect lerp(const QRect& a, const QRect& b, double t) {
 	);
 }
 
-// Whether `window` is above `reference` in the z-order.
 bool isAbove(HWND window, HWND reference) {
 	for (auto* hwnd = GetWindow(reference, GW_HWNDPREV); hwnd != nullptr;
 	     hwnd = GetWindow(hwnd, GW_HWNDPREV))
@@ -142,7 +133,7 @@ bool isAbove(HWND window, HWND reference) {
 
 QPointer<WindowMotion> MOTION; // NOLINT
 
-} // namespace
+}
 
 WindowMotion* WindowMotion::instance() {
 	if (MOTION.isNull()) MOTION = new WindowMotion(QCoreApplication::instance());
@@ -152,15 +143,11 @@ WindowMotion* WindowMotion::instance() {
 WindowMotion::WindowMotion(QObject* parent): QObject(parent) {}
 
 WindowMotion::~WindowMotion() {
-	// Never leave a window waiting off screen.
 	this->stop.store(true);
 	if (this->worker.joinable()) this->worker.join();
 	for (const auto& entry: this->entries) {
 		if (!IsWindow(entry.hwnd)) continue;
 		moveTo(entry.hwnd, entry.to, true);
-		// Chromium resized for a second target while nearly all off screen took
-		// itself for hidden and came back grey. A frame change, without a
-		// resize (that showed an empty frame), makes it lay out and paint.
 		if (entry.retargeted && travelsAsStill(entry.hwnd)) {
 			SetWindowPos(entry.hwnd, nullptr, 0, 0, 0, 0,
 			    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -190,9 +177,6 @@ bool WindowMotion::ensureCover() {
 		registered = RegisterClassExW(&cls) != 0;
 	}
 
-	// One pixel short of the screens at the top: a window covering a monitor
-	// exactly is taken by Explorer for a fullscreen app, and the shell's
-	// panels step down behind everything for as long as it is there.
 	this->coverRect = QRect(
 	    GetSystemMetrics(SM_XVIRTUALSCREEN),
 	    GetSystemMetrics(SM_YVIRTUALSCREEN) + 1,
@@ -225,8 +209,6 @@ bool WindowMotion::ensureCover() {
 	return true;
 }
 
-// Just above the highest moving window: windows over it (floating ones, the
-// shell's panels) stay over its thumbnail.
 void WindowMotion::placeCover(HWND above) {
 	if (this->cover == nullptr || !IsWindowVisible(this->cover) || isAbove(above, this->cover)) {
 		auto* previous = GetWindow(above, GW_HWNDPREV);
@@ -254,7 +236,6 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	auto right = raw.right - bounds.right;
 	auto bottom = raw.bottom - bounds.bottom;
 	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
-	// A hung app would hold the shell up; it moves when it wakes instead.
 	if (!wait || IsHungAppWindow(hwnd)) flags |= SWP_ASYNCWINDOWPOS;
 	SetWindowPos(
 	    hwnd,
@@ -269,9 +250,6 @@ void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 
 namespace {
 
-// How much of a picture of `source` to show in `frame` without stretching it,
-// as Winland does: one scale for both sides, just enough to cover the frame,
-// with the picture held at its top left and cut off on the right and bottom.
 QSize coveringPart(const QSize& source, const QSize& frame) {
 	if (source.isEmpty() || frame.isEmpty()) return source;
 	auto scale = std::max(
@@ -284,15 +262,12 @@ QSize coveringPart(const QSize& source, const QSize& frame) {
 	};
 }
 
-} // namespace
+}
 
-// Called with the mutex held. The source follows the window's own frame, so it
-// shows the window at whatever size it has reached.
 void WindowMotion::layout(Entry& entry, double progress) {
 	entry.progress = progress;
 	auto eased = ease(progress);
 	entry.current = lerp(entry.from, entry.to, eased);
-	// windowsIn: popin 80% and fadeIn, both on the same curve.
 	auto opacity = 255.0;
 	auto shown = entry.current;
 	if (entry.pop) {
@@ -310,7 +285,6 @@ void WindowMotion::layout(Entry& entry, double progress) {
 		opacity = 255.0 * eased;
 	}
 	if (entry.snapshot != nullptr) {
-		// The whole still, stretched to where the window is on its way.
 		auto dest = shown.translated(-this->coverRect.topLeft());
 		auto part = entry.snapshotSize;
 		DWM_THUMBNAIL_PROPERTIES props {};
@@ -337,8 +311,6 @@ void WindowMotion::layout(Entry& entry, double progress) {
 	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY
 	              | DWM_TNP_SOURCECLIENTAREAONLY;
 	auto frame = QSize(bounds.right - bounds.left, bounds.bottom - bounds.top);
-	// The whole window, stretched to where it is on its way, as Hyprland
-	// stretches its buffer: it has its new size already, so it lands at 1:1.
 	auto part = frame;
 	props.rcSource = {
 	    bounds.left - raw.left,
@@ -361,11 +333,8 @@ int depthOf(HWND hwnd) {
 		depth++;
 	return depth;
 }
-} // namespace
+}
 
-// Called with the mutex held. DWM draws thumbnails in the order they were
-// registered, which was the order the windows set off in: one sliding over
-// another that sits above it. They are registered again, the deepest first.
 void WindowMotion::restack() {
 	std::ranges::stable_sort(this->entries, [](const Entry& a, const Entry& b) { return a.depth > b.depth; });
 	for (auto& entry: this->entries) {
@@ -415,8 +384,6 @@ bool WindowMotion::begin(
 		    .parked = parked,
 		    .pop = pop,
 		    .start = std::chrono::steady_clock::now(),
-		    // A still covers the window already: no need to wait for it to leave,
-		    // which a busy app (Chromium repainting after a landing) takes long to.
 		    .waiting = snapshot == nullptr,
 		    .depth = depthOf(hwnd),
 		});
@@ -424,8 +391,6 @@ bool WindowMotion::begin(
 		if (this->entries.size() > 1) this->restack();
 	}
 
-	// The thumbnail is in the window's place before the window leaves it, in
-	// the same compositor frame.
 	this->placeCover(hwnd);
 	if (!IsWindowVisible(this->cover)) ShowWindow(this->cover, SW_SHOWNOACTIVATE);
 	moveTo(hwnd, parked, false);
@@ -447,7 +412,6 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		entry->parked = parked;
 		entry->retargeted = true;
 		if (entry->pop && !entry->done) {
-			// Still popping in: keep growing, toward the new tile.
 			entry->from = to;
 			entry->to = to;
 		} else {
@@ -490,18 +454,12 @@ void WindowMotion::run() {
 		auto finished = false;
 		{
 			auto lock = std::lock_guard(this->mutex);
-			// Windows that move together set off together: each one starting
-			// once its own app had left put them out of step, one sliding over
-			// another that hadn't moved yet. They wait for the slowest (up to
-			// the timeout) and start in the same frame.
 			auto holding = false;
 			for (auto& entry: this->entries) {
 				if (entry.done || !entry.waiting) continue;
 				RECT raw {};
 				RECT bounds {};
 				auto left = GetWindowRect(entry.hwnd, &raw) && raw.left >= entry.parked.left() - 64;
-				// And has taken the size it waits at: before that, its picture
-				// is too small for the frame and leaves a gap.
 				if (left && !entry.pop
 				    && SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
 				{
@@ -516,8 +474,6 @@ void WindowMotion::run() {
 				if (entry.waiting) {
 					if (holding) continue;
 					entry.waiting = false;
-					// Hold still a moment longer: the app repaints at its new size
-					// while in place, instead of during the curve's fast start.
 					entry.start = last + std::chrono::milliseconds(REPAINT_SETTLE_MS);
 				}
 				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
@@ -535,8 +491,6 @@ void WindowMotion::run() {
 	}
 }
 
-// Thumbnail visibility reaches the screen right away, a window move a frame
-// later at most: thumbnails go first, then the windows jump into place.
 void WindowMotion::onFrameDone() {
 	this->donePending.store(false);
 	QList<Entry> landing;
@@ -545,7 +499,6 @@ void WindowMotion::onFrameDone() {
 		auto lock = std::lock_guard(this->mutex);
 		for (auto i = this->entries.size() - 1; i >= 0; i--) {
 			if (!this->entries[i].done) continue;
-			// A still stays up over its window while that paints (see lingering).
 			if (this->entries[i].snapshot == nullptr) {
 				DWM_THUMBNAIL_PROPERTIES props {};
 				props.dwFlags = DWM_TNP_VISIBLE;
@@ -560,8 +513,6 @@ void WindowMotion::onFrameDone() {
 		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
 	}
 	for (const auto& entry: landing) {
-		// An app that stopped painting while away comes back blank for a few
-		// frames: its still stays over it, in place, until it has painted.
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
 		else release(entry);
 		emit this->landed(entry.hwnd, entry.to);
@@ -602,8 +553,6 @@ void WindowMotion::closeCover() {
 
 namespace {
 
-// end-4: windowsIn speed 3 (300 ms), windowsOut speed 2 (200 ms), both
-// emphasizedDecel; popin 80% in, 90% out; fadeIn/fadeOut alongside.
 constexpr double POP_IN_MS = 300;
 constexpr double POP_OUT_MS = 200;
 constexpr double POP_IN_SCALE = 0.8;
@@ -615,7 +564,7 @@ void setCloaked(HWND hwnd, bool cloaked) {
 	DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &value, sizeof(value));
 }
 
-} // namespace
+}
 
 void WindowPop::popIn(HWND hwnd) {
 	if (hwnd == nullptr) return;
@@ -628,10 +577,6 @@ int WindowPop::popOut(HWND hwnd) {
 	return static_cast<int>(POP_OUT_MS);
 }
 
-// Acrylic glass for a window with a see-through backdrop (Windows Terminal's
-// acrylic, Windows 11's mica): a thumbnail carries the app's content but not
-// the backdrop DWM draws behind it, which then showed up only once the window
-// landed. This sits under the cover and follows the thumbnail's rect.
 struct AccentPolicy {
 	DWORD accentState;
 	DWORD accentFlags;
@@ -756,9 +701,6 @@ HWND createMotionCover(const QRect& frame) {
 	return cover;
 }
 
-// A cover in `frame` that shows `source` (its `sourceRect`) popping in or out,
-// stacked just above `below`. `shown` runs once the cover is up and `done`
-// on the GUI thread when the animation ends.
 bool popCover(
     HWND source,
     const QRect& frame,
@@ -831,8 +773,6 @@ bool popCover(
 	if (shown) shown();
 	DwmFlush();
 
-	// A short animation on its own thread, on the compositor clock; the cover
-	// is released back on the thread that owns it.
 	std::thread([cover, thumbnail, apply, in, lingerMs, glass, done = std::move(done)]() {
 		auto duration = in ? POP_IN_MS : POP_OUT_MS;
 		auto start = std::chrono::steady_clock::now();
@@ -858,8 +798,6 @@ bool popCover(
 		    QCoreApplication::instance(),
 		    [cover, thumbnail, done, lingerMs, glass]() {
 			    if (done) done();
-			    // Over a window that just moved into place, the cover stays a
-			    // moment, until the window is there.
 			    QTimer::singleShot(lingerMs, QCoreApplication::instance(), [cover, thumbnail, glass]() {
 				    DwmUnregisterThumbnail(thumbnail);
 				    DestroyWindow(cover);
@@ -872,7 +810,7 @@ bool popCover(
 	return true;
 }
 
-} // namespace
+}
 
 void WindowPop::start(HWND hwnd, bool in) {
 	RECT raw {};
@@ -891,7 +829,6 @@ void WindowPop::start(HWND hwnd, bool in) {
 	    bounds.right - raw.left,
 	    bounds.bottom - raw.top
 	};
-	// The thumbnail takes the window's place in the same frame it hides.
 	auto popped = popCover(
 	    hwnd,
 	    frame,
@@ -915,12 +852,8 @@ bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
 	}
 	auto frame =
 	    QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
-	// A still of it as it looks now: the app is gone a moment later.
 	auto* still = snapshotOf(frame);
 	if (still == nullptr) return false;
-	// The real window leaves the screen as its still starts popping out, or it
-	// showed whole behind the still until the app was done closing. An app
-	// that doesn't close (it asks to save, say) gets it back.
 	RECT raw {};
 	GetWindowRect(hwnd, &raw);
 	auto away = [hwnd, raw, close]() {
@@ -946,8 +879,6 @@ bool WindowPop::closeOut(HWND hwnd, const std::function<void()>& close) {
 }
 
 namespace {
-// How long a new window may take to reach its tile's size before popping in
-// anyway, and how long the cover stays once the window is in place.
 constexpr int SIZE_WAIT_MS = 300;
 constexpr int SIZE_POLL_MS = 16;
 constexpr int LAND_LINGER_MS = 60;
@@ -981,11 +912,9 @@ void popInNow(HWND hwnd, const QRect& frame, const std::function<void()>& land) 
 		land();
 	}
 }
-} // namespace
+}
 
 void WindowPop::popInAt(HWND hwnd, const QRect& frame, const std::function<void()>& land) {
-	// The app may still be at the size it opened with: popping that in blew its
-	// content up. Wait (briefly) for it to take its tile's size first.
 	auto* timer = new QTimer(QCoreApplication::instance());
 	auto started = std::chrono::steady_clock::now();
 	timer->setInterval(SIZE_POLL_MS);
@@ -1001,4 +930,4 @@ void WindowPop::popInAt(HWND hwnd, const QRect& frame, const std::function<void(
 	timer->start();
 }
 
-} // namespace qs::windows
+}

@@ -1,25 +1,14 @@
-// Loaded by Windows into every app while the shell runs, to give a new app
-// window end-4's windowsIn without it ever showing where Windows put it.
-//
-// The shell can only ask another app's window to move, and a busy app gets to
-// it a few frames late, so the window would flash at its own spot first. Here,
-// inside the app, the window's own WM_WINDOWPOSCHANGING is changed before it
-// happens: the first time a plain app window shows, it shows below every
-// screen, and while it waits there, the app's own moves keep it there too. The
-// shell takes it by removing the "qs.parked" mark, and gives up after a while.
 
 #include <windows.h>
 
-// Shared by every copy of the DLL, in every app. Allocated explicitly: zero
-// initialized data would otherwise land in .bss, which isn't shared.
 #pragma section(".qsshared", read, write, shared)
 __declspec(allocate(".qsshared")) volatile LONG gEnabled = 0;   // NOLINT
 __declspec(allocate(".qsshared")) volatile DWORD gShellPid = 0; // NOLINT
 
 namespace {
 
-constexpr const wchar_t* PROP_PARKED = L"qs.parked"; // tick when parked
-constexpr const wchar_t* PROP_X = L"qs.px";          // where the app wants it
+constexpr const wchar_t* PROP_PARKED = L"qs.parked";
+constexpr const wchar_t* PROP_X = L"qs.px";
 constexpr const wchar_t* PROP_Y = L"qs.py";
 constexpr DWORD GIVE_UP_MS = 5000;
 
@@ -27,7 +16,6 @@ int parkedTop() {
 	return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100;
 }
 
-// A plain resizable app window: what tiling takes. Same rules as the shell's.
 bool qualifies(HWND hwnd) {
 	if (GetAncestor(hwnd, GA_ROOT) != hwnd || GetWindow(hwnd, GW_OWNER) != nullptr) return false;
 	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
@@ -68,8 +56,6 @@ bool givenUp(HWND hwnd, ULONG_PTR parkedAt) {
 	return true;
 }
 
-// About to show for the first time: move it below the screens right now, while
-// it is still hidden, so it shows there.
 void onPosChanging(HWND hwnd, const WINDOWPOS* pos) {
 	if ((pos->flags & SWP_SHOWWINDOW) == 0 || IsWindowVisible(hwnd)) return;
 	if (GetPropW(hwnd, PROP_PARKED) != nullptr) return;
@@ -88,8 +74,6 @@ void onPosChanging(HWND hwnd, const WINDOWPOS* pos) {
 	park(hwnd, x);
 }
 
-// Moved while it waits (the app placing itself): remember where it wanted to
-// be, and put it back below the screens before anything is drawn.
 void onPosChanged(HWND hwnd, const WINDOWPOS* pos) {
 	if ((pos->flags & SWP_NOMOVE) != 0) return;
 	auto parkedAt = reinterpret_cast<ULONG_PTR>(GetPropW(hwnd, PROP_PARKED)); // NOLINT
@@ -98,7 +82,7 @@ void onPosChanged(HWND hwnd, const WINDOWPOS* pos) {
 	remember(hwnd, pos->x, pos->y);
 	park(hwnd, pos->x);
 }
-} // namespace
+}
 
 extern "C" {
 
@@ -119,6 +103,6 @@ __declspec(dllexport) void qsParkSetEnabled(BOOL enabled, DWORD shellPid) {
 	InterlockedExchange(&gEnabled, enabled != FALSE ? 1 : 0);
 }
 
-} // extern "C"
+}
 
 BOOL WINAPI DllMain(HINSTANCE /*instance*/, DWORD /*reason*/, LPVOID /*reserved*/) { return TRUE; }

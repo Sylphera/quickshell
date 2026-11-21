@@ -216,8 +216,6 @@ void HyprlandToplevel::refreshIpcObject() {
 	auto* tiling = TilingManager::active();
 	auto floating = tiling != nullptr ? !tiling->isTiled(window) : fullscreen == 0;
 
-	// Hyprland keeps special's windows on a workspace of their own, so end-4's
-	// overview, bar and dock leave them out of the regular ones.
 	auto special = qs::windows::Scratchpad::instance()->contains(window);
 	auto workspaceObject = special
 	    ? QVariantMap {{"id", -98}, {"name", QStringLiteral("special:special")}}

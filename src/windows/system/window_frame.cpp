@@ -127,9 +127,6 @@ bool WindowFrame::ensureVisible(QObject* object) {
 
 namespace {
 
-// Windows waiting to pop in. DWM ignores a cloak set on a window before it
-// shows, and Qt reports it visible before Windows does, so the cloak goes on
-// when the window itself is told it showed, before DWM draws it.
 std::set<HWND>& pendingPops() {
 	static std::set<HWND> pending; // NOLINT
 	return pending;
@@ -160,20 +157,16 @@ void watchShow(HWND hwnd) {
 	pendingPops().insert(hwnd);
 }
 
-} // namespace
+}
 
 void WindowFrame::popIn(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);
 	if (window == nullptr) return;
-	// Cloaked before it first shows: a window cloaked once visible flashes
-	// for a frame. Call this while the window is still hidden.
 	window->setProperty("qsPopIn", true);
 	auto* hwnd = reinterpret_cast<HWND>(window->winId()); // NOLINT(performance-no-int-to-ptr)
 	WindowPop::popIn(hwnd);
 	if (!window->isVisible()) watchShow(hwnd);
 
-	// It shows blank until its first frame: pop it in once it has painted,
-	// or a moment after it shows if no frame is reported.
 	auto started = std::make_shared<bool>(false);
 	auto begin = [hwnd, started]() {
 		if (*started) return;
@@ -194,8 +187,6 @@ void WindowFrame::popIn(QObject* object) {
 		arm();
 		return;
 	}
-	// DWM ignores a cloak set on a window that was never shown; set it again
-	// the moment it shows, inside setVisible, before Qt renders a frame.
 	auto shown = std::make_shared<QMetaObject::Connection>();
 	*shown = QObject::connect(window, &QWindow::visibleChanged, window, [hwnd, arm, shown](bool visible) {
 		if (!visible) return;
@@ -205,12 +196,11 @@ void WindowFrame::popIn(QObject* object) {
 	}, Qt::DirectConnection);
 }
 namespace {
-// Windows declaring popIn get end-4's windowsIn when they show.
 const bool POP_HOOK = []() {
 	ProxyWindowBase::beforeShowHook = [](QWindow* window) { WindowFrame::popIn(window); };
 	return true;
 }();
-} // namespace
+}
 
 int WindowFrame::popOut(QObject* object) {
 	auto* window = qobject_cast<QWindow*>(object);

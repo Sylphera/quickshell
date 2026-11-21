@@ -65,11 +65,9 @@ std::atomic<bool> gParkNew = false;                             // NOLINT
 std::mutex gParkMutex;                                          // NOLINT
 std::unordered_map<HWND, std::pair<RECT, qint64>> gEarlyParked; // NOLINT
 std::atomic<int> gEarlyParkCount = 0;                           // NOLINT
-constexpr qint64 EARLY_PARK_MS = 1000;     // never tracked: not an app window after all
-constexpr qint64 EARLY_PARK_SAFETY_MS = 5000; // tracked: tiling releases it; just in case
+constexpr qint64 EARLY_PARK_MS = 1000;
+constexpr qint64 EARLY_PARK_SAFETY_MS = 5000;
 
-// The park hook (park_hook/park_hook.cpp) parks new windows from inside the
-// app, with no delay; what follows here is the fallback when it can't load.
 constexpr const wchar_t* PARK_PROP = L"qs.parked";
 using ParkSetEnabled = void (*)(BOOL, DWORD);
 std::atomic<ParkSetEnabled> gParkHookSet = nullptr; // NOLINT
@@ -83,8 +81,6 @@ void startParkHook() {
 			auto* slash = wcsrchr(path, L'\\');
 			if (slash == nullptr) return;
 			wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"qs-window-park.dll");
-			// Apps keep a hook DLL loaded after it is unhooked, and would reuse an
-			// old copy by its name; each build gets a name of its own.
 			WIN32_FILE_ATTRIBUTE_DATA info {};
 			if (!GetFileAttributesExW(path, GetFileExInfoStandard, &info)) return;
 			wchar_t copy[MAX_PATH] {};
@@ -98,7 +94,6 @@ void startParkHook() {
 			auto* proc = reinterpret_cast<HOOKPROC>(GetProcAddress(module, "qsParkCallWndProc")); // NOLINT
 			auto set = reinterpret_cast<ParkSetEnabled>(GetProcAddress(module, "qsParkSetEnabled")); // NOLINT
 			if (proc == nullptr || set == nullptr) return;
-			// Its own thread: 32-bit apps reach the hook through the thread that set it.
 			if (SetWindowsHookExW(WH_CALLWNDPROC, proc, module, 0) == nullptr) return;
 			set(gParkNew.load() ? TRUE : FALSE, GetCurrentProcessId());
 			gParkHookSet.store(set);
@@ -128,7 +123,6 @@ void unmarkHook(HWND hwnd) {
 	RemovePropW(hwnd, L"qs.py");
 }
 
-// A plain resizable app window of another process: what tiling takes.
 bool parksEarly(HWND hwnd) {
 	if (!gParkNew.load()) return false;
 	DWORD pid = 0;
@@ -143,8 +137,6 @@ bool parksEarly(HWND hwnd) {
 
 int parkedTop() { return GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) + 100; }
 
-// again: the window was parked already and moved itself back on screen, as
-// apps restoring their saved position do right after showing.
 void parkEarly(HWND hwnd, bool again = false) {
 	auto byHook = parkedByHook(hwnd);
 	if (byHook && again) return;
@@ -164,8 +156,6 @@ void parkEarly(HWND hwnd, bool again = false) {
 		}
 	}
 	if (byHook) return;
-	// Below every screen, in the same column, so it still belongs to the
-	// monitor it opened on.
 	auto y = parkedTop();
 	SetWindowPos(
 	    hwnd,
@@ -242,13 +232,11 @@ void CALLBACK queueEvent(
 	if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || hwnd == nullptr) return;
 
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && gEarlyParkCount.load() > 0) parkEarly(hwnd, true);
-	// Parked while still hidden, so it shows already off screen.
 	if (event == EVENT_OBJECT_CREATE) {
 		if (gParkHookSet.load() == nullptr && GetAncestor(hwnd, GA_ROOT) == hwnd && parksEarly(hwnd)) parkEarly(hwnd);
 		return;
 	}
 
-	// Also a window shown again: Explorer reuses its closed windows.
 	if (event == EVENT_OBJECT_SHOW && GetAncestor(hwnd, GA_ROOT) == hwnd
 	    && (parkedByHook(hwnd) || (mayBecomeTracked(hwnd) && parksEarly(hwnd))))
 	{
@@ -669,8 +657,6 @@ WindowTracker::WindowTracker() {
 	    &WindowTracker::settleCloakChanges
 	);
 
-	// Switching desktops, Windows can hand focus to a window there without a
-	// foreground event, so look again for a while instead of keeping none.
 	this->foregroundRetryTimer.setSingleShot(true);
 	this->foregroundRetryTimer.setInterval(FOREGROUND_RETRY_MS);
 	QObject::connect(&this->foregroundRetryTimer, &QTimer::timeout, this, &WindowTracker::updateActive);
@@ -787,7 +773,6 @@ void releaseEarlyPark(HWND hwnd) {
 
 void WindowTracker::drainEvents() {
 	gEventWakePending.store(false);
-	// Whatever tiling didn't take in time goes back where it showed.
 	if (gEarlyParkCount.load() > 0) {
 		QTimer::singleShot(EARLY_PARK_MS + 50, this, []() { releaseStaleEarlyParks(); });
 		QTimer::singleShot(EARLY_PARK_SAFETY_MS + 50, this, []() { releaseStaleEarlyParks(); });
@@ -885,8 +870,6 @@ void WindowTracker::schedule() {
 }
 
 void WindowTracker::flush() {
-	// Processing an unordered QSet here changed the Dwindle tree for simultaneous
-	// windows. Preserve their first WinEvent discovery order instead.
 	auto candidates = this->candidates.takeAll();
 
 	for (auto* hwnd: candidates) {

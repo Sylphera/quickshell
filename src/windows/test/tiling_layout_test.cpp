@@ -781,8 +781,6 @@ void TestTilingLayout::squareDwindleMatchesHyprland() {
 	const auto pointer = QPoint(120, 120);
 	layout.insert(B, A, &pointer);
 	layout.compute(square);
-	// end-4 uses the Hyprland default split_width_multiplier=1.0:
-	// a square is divided vertically, preserving the child order on close.
 	QCOMPARE(layout.box(B), QRect(0, 0, 800, 400));
 	QCOMPARE(layout.box(A), QRect(0, 400, 800, 400));
 	layout.remove(B);
@@ -795,7 +793,6 @@ void TestTilingLayout::dwindleUsesHyprlandHalfCellBoundary() {
 	layout.configure(Options {});
 	layout.insert(A, 0, nullptr);
 	layout.compute(QRect(0, 0, 1000, 800));
-	// The Hyprland midpoint is x=500, not QRect::center().x()=499.
 	const auto point = QPoint(499, 100);
 	layout.insert(B, A, &point);
 	layout.compute(QRect(0, 0, 1000, 800));
@@ -850,8 +847,6 @@ void TestTilingLayout::closingNestedDwindleBranchesMatchesHyprland() {
 	QCOMPARE(layout.box(C), QRect(600, 0, 300, 400));
 	QCOMPARE(layout.box(D), QRect(900, 0, 300, 400));
 
-	// Hyprland removes a leaf and its split-parent, promoting the sibling,
-	// without balancing other branches or changing their split direction.
 	layout.remove(C);
 	layout.compute(area);
 	QCOMPARE(layout.box(D), QRect(600, 0, 600, 400));
@@ -926,8 +921,6 @@ void TestTilingLayout::subpixelDwindleSplitMatchesHyprland() {
 	layout.compute(area);
 	QCOMPARE(layout.box(C), QRect(4, 0, 3, 3));
 
-	// The rounded physical box of C is 3x3, but Hyprland's fractional
-	// layout box is 3.5x2.5. Its next split must therefore be horizontal.
 	const auto innerLeft = QPoint(5, 1);
 	layout.insert(D, C, &innerLeft);
 	layout.compute(area);

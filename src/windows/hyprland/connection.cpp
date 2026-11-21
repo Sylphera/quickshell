@@ -145,8 +145,6 @@ HyprlandIpc::HyprlandIpc()
 	masks->acquireButtonEvents();
 	masks->acquireMonitorEvents();
 
-	// end-4: Super+wheel walks workspaces, Ctrl+Super+wheel only the occupied
-	// ones, and Shift or Alt with Super+wheel takes the window along.
 	using WheelBind = qs::windows::SuperDragManager::WheelBind;
 	qs::windows::SuperDragManager::instance()->setWorkspaceWheel([this](int steps, WheelBind bind) {
 		auto amount = QString(steps > 0 ? "+%1" : "-%1").arg(qAbs(steps));

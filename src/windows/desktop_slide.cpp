@@ -35,20 +35,14 @@ Q_LOGGING_CATEGORY(logSlide, "quickshell.windows.slide", QtWarningMsg);
 
 constexpr auto* OVERLAY_CLASS = L"QuickshellDesktopSlide";
 constexpr double SLIDE_MS = 700;
-// end-4's gestures: workspace_swipe_cancel_ratio = 0.2, and a quick flick
-// switches even short of it (workspace_swipe_min_speed_to_force).
 constexpr double SWIPE_CANCEL_RATIO = 0.2;
 constexpr double SWIPE_FORCE_SPEED = 1.5;
 constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
 constexpr int HOLD_MS = 150;
-// end-4's curve has covered 99.5 % of the way by then (about 10 px left,
-// moving about 1 px a frame). The real switch happens there, under the cover:
-// any stutter it causes is too small to see, and the new windows take input.
 constexpr int COMMIT_MS = 400;
 
-// end-4's menu_decel curve for the workspaces animation.
 constexpr double CURVE_X1 = 0.1;
 constexpr double CURVE_Y1 = 1.0;
 constexpr double CURVE_X2 = 0.0;
@@ -72,8 +66,6 @@ double ease(double x) {
 
 LRESULT CALLBACK overlayProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	switch (msg) {
-	// Until the switch is committed the windows under the cover are the old
-	// desktop's, so clicks stop here. Afterwards the cover lets them through.
 	case WM_NCHITTEST: return HTCLIENT;
 	case WM_MOUSEACTIVATE: return MA_NOACTIVATEANDEAT;
 	case WM_SETCURSOR: SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE;
@@ -146,8 +138,6 @@ bool ownWindow(HWND hwnd) {
 	return pid == GetCurrentProcessId();
 }
 
-// A tiled window can carry a region that clips it to its tile; the thumbnail
-// ignores it, so the source is cut to the region's bounds instead.
 QRect sourceOf(HWND hwnd, const QRect& rect) {
 	RECT box {};
 	auto kind = GetWindowRgnBox(hwnd, &box);
@@ -157,8 +147,6 @@ QRect sourceOf(HWND hwnd, const QRect& rect) {
 	return {0, 0, rect.width(), rect.height()};
 }
 
-// Wait for the next compositor frame, the way wiri paces its animations:
-// Windows 11's compositor clock when dcomp.dll exports it, DwmFlush otherwise.
 // Adapted from wiri's src/animation/clock.rs, Copyright (c) 2026 jolionlands,
 // MIT License (see third-party/wiri-LICENSE).
 void waitForFrame() {
@@ -235,7 +223,7 @@ bool hideThumbnail(HTHUMBNAIL thumbnail) {
 	return SUCCEEDED(DwmUpdateThumbnailProperties(thumbnail, &props));
 }
 
-} // namespace
+}
 
 DesktopSlide* DesktopSlide::instance() {
 	static QPointer<DesktopSlide> slide; // NOLINT
@@ -274,14 +262,12 @@ bool DesktopSlide::begin(qsizetype from, qsizetype to) {
 void DesktopSlide::swipeUpdate(double offset) {
 	auto* desktops = VirtualDesktops::instance();
 	if (!this->swiping) {
-		// A swipe starts from what is on screen, even mid-slide.
 		this->swiping = true;
 		this->swipeFrom = desktops->shownIndex();
 	}
 	auto from = this->swipeFrom;
 	auto way = offset > 0 ? 1 : (offset < 0 ? -1 : 0);
 	auto to = from + way;
-	// Past the first or last desktop there is nothing to swipe to.
 	if (way == 0 || to < 0 || to >= desktops->count()) {
 		to = from;
 		offset = 0;
@@ -311,7 +297,6 @@ void DesktopSlide::swipeEnd(double velocity) {
 		return std::abs(offset) > SWIPE_CANCEL_RATIO
 		    || (std::abs(velocity) > SWIPE_FORCE_SPEED && velocity * offset > 0);
 	};
-	// Nothing on either desktop to slide: switch without one.
 	if (this->overlay == nullptr) {
 		if (this->swipeOffset != 0 && goesBy(this->swipeOffset)) {
 			VirtualDesktops::instance()->switchToAsync(this->swipeFrom + (this->swipeOffset > 0 ? 1 : -1));
@@ -327,7 +312,6 @@ void DesktopSlide::swipeEnd(double velocity) {
 		to = goes ? this->target : this->swipeFrom;
 	}
 	qCDebug(logSlide) << "Swipe let go toward" << to << "from" << this->swipeFrom << "velocity" << velocity;
-	// Retargets from where the fingers left it, then carries on by the clock.
 	this->retarget(to);
 	{
 		auto lock = std::lock_guard(this->mutex);
@@ -375,19 +359,15 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	}
 	this->retarget(to);
 
-	// The first frame on screen must already match what was there.
 	this->carryPanels();
 	this->layoutThumbs(0);
 	ShowWindow(this->overlay, SW_SHOWNOACTIVATE);
 	DwmFlush();
-	// The copies of the panels are on screen now; the real ones can go behind.
 	if (this->panelsCarried) {
 		WinPanelWindow::setCoverOverPanels(true);
 		this->placeUnderPanels();
 	}
 	{
-		// The slide starts on the first frame the cover is on screen; the setup
-		// before it must not eat into end-4's front-loaded curve.
 		auto lock = std::lock_guard(this->mutex);
 		this->startedAt = std::chrono::steady_clock::now();
 	}
@@ -401,8 +381,6 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 void DesktopSlide::retarget(qsizetype to) {
 	if (to == this->target) return;
 
-	// Register live destinations before starting the next segment. The worker
-	// leaves their thumbnails hidden until a strip position is assigned.
 	this->addLiveDesktop(to);
 	if (this->panelsCarried) {
 		this->liftFullscreen(to);
@@ -421,9 +399,6 @@ void DesktopSlide::retarget(qsizetype to) {
 		                ? this->manualCamera
 		                : this->cameraFrom + (this->cameraTo - this->cameraFrom) * ease(progress);
 
-		// Like Hyprland, only the desktop under the camera and the requested one
-		// sit side by side: the new one goes right next to what is on screen, and
-		// any other desktop on the way between them leaves the strip.
 		auto here = this->target;
 		auto nearest = std::numeric_limits<double>::max();
 		for (auto iter = this->bases.cbegin(); iter != this->bases.cend(); ++iter) {
@@ -442,8 +417,6 @@ void DesktopSlide::retarget(qsizetype to) {
 			auto value = static_cast<double>(iter.value());
 			auto other = key != here && key != to;
 			auto inTheWay = other && value >= low && value <= high;
-			// A keyboard retarget need not keep the DWM surfaces of desks that
-			// have already passed outside the viewport.
 			auto outOfSight = !this->manual && other
 			               && std::abs(value - camera) >= this->monitor.width();
 			if (!inTheWay && !outOfSight) {
@@ -482,7 +455,6 @@ bool DesktopSlide::prepareLiveOverlay(const QRect& monitor, const QList<HWND>& w
 	this->liveMonitor = monitor;
 	this->liveBackdropSources = backdrops;
 	this->liveWarmPending = true;
-	// DWM composites in registration order. Reserve the wallpaper first.
 	for (auto* source: backdrops) addBackdrop(this->liveOverlay, source, monitor);
 	return true;
 }
@@ -527,7 +499,6 @@ void DesktopSlide::warmLiveThumbs() {
 }
 
 void DesktopSlide::clearLiveOverlay() {
-	// Destroying the destination also removes its DWM thumbnail links.
 	if (this->liveOverlay != nullptr) DestroyWindow(this->liveOverlay);
 	this->liveOverlay = nullptr;
 	this->liveMonitor = {};
@@ -536,10 +507,6 @@ void DesktopSlide::clearLiveOverlay() {
 	this->liveThumbnailOrder.clear();
 }
 
-// Hyprland draws the top layer over windows but under a fullscreen one, and
-// the layer stays put while workspaces slide. When a fullscreen window takes
-// part in a slide, the bar and the other top panels ride in the cover as
-// fixed copies between the windows and that one.
 bool DesktopSlide::carryPanels() {
 	{
 		auto lock = std::lock_guard(this->mutex);
@@ -579,9 +546,6 @@ bool DesktopSlide::carryPanels() {
 	return true;
 }
 
-// DWM draws thumbnails in the order they were registered: a fullscreen
-// window's goes again, over the panels'. Only `desktop`'s, when given: one
-// that joins a slide already on.
 void DesktopSlide::liftFullscreen(qsizetype desktop) {
 	auto lock = std::lock_guard(this->mutex);
 	for (auto& thumb: this->thumbs) {
@@ -613,8 +577,6 @@ void DesktopSlide::releaseThumb(const Thumb& thumb) {
 		DwmUnregisterThumbnail(thumb.thumbnail);
 		return;
 	}
-	// A thumbnail belongs to the persistent live overlay; keep its link
-	// when it leaves the slide, provided DWM still recognizes the source.
 	if (hideThumbnail(thumb.thumbnail)) return;
 	DwmUnregisterThumbnail(thumb.thumbnail);
 	this->liveThumbnails.remove(thumb.window);
@@ -640,7 +602,6 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		auto* hwnd = windows[i];
 		if (ownWindow(hwnd)) continue;
 		auto* window = tracker->windowFor(hwnd);
-		// Special windows are pinned to every desktop; they leave with special.
 		if (Scratchpad::holds(window)) continue;
 		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
 		auto rect = rectOf(hwnd);
@@ -648,8 +609,6 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		if (!existing.contains(hwnd)) sources.append(hwnd);
 	}
 
-	// Focus may change the native stacking order between transitions.
-	// Re-register a group only when the cached links are out of order.
 	qsizetype previous = -1;
 	bool outOfOrder = false;
 	for (auto* hwnd: sources) {
@@ -672,7 +631,6 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		auto source = sourceOf(hwnd, rect);
 		auto local = source.translated(rect.topLeft() - this->monitor.topLeft());
 		auto backdrop = hasWindowBackdrop(hwnd);
-		// Crop native resize margins out of backdrop and Chromium windows.
 		RECT bounds {};
 		if ((backdrop || isChromium(hwnd)) && source.size() == rect.size()
 		    && SUCCEEDED(
@@ -722,7 +680,6 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 	return complete;
 }
 
-// Called with the slide mutex held, or before starting the worker.
 void DesktopSlide::layoutThumbs(double camera) {
 	const auto viewport = QRect(QPoint(), this->monitor.size());
 	for (auto& thumb: this->thumbs) {
@@ -749,7 +706,6 @@ void DesktopSlide::run() {
 	auto last = std::chrono::steady_clock::now();
 	auto period = refreshPeriodMs();
 	while (!this->stop.load()) {
-		// The clock can wake early; never step faster than the display refreshes.
 		do {
 			waitForFrame();
 		} while (!this->stop.load()
@@ -809,7 +765,6 @@ void DesktopSlide::onSettled() {
 		return;
 	}
 
-	// Keystrokes a moment apart keep the same cover instead of rebuilding it.
 	QTimer::singleShot(HOLD_MS, this, [this, target, started]() {
 		{
 			auto lock = std::lock_guard(this->mutex);
@@ -819,17 +774,12 @@ void DesktopSlide::onSettled() {
 	});
 }
 
-// Panels are left alone: repainting their full-screen transparent windows to
-// restack them can flash a frame. The cover slides in just under the lowest.
 void DesktopSlide::placeUnderPanels() {
 	HWND lowest = nullptr;
 	for (auto* hwnd: topLevelWindows()) {
 		if (hwnd == this->overlay || !ownWindow(hwnd) || !topmost(hwnd)) continue;
 		lowest = hwnd;
 	}
-	// Into the topmost band first: placed after a panel alone, the cover could
-	// land among plain windows, and the desktop it leaves then stayed over the
-	// slide until the real switch.
 	SetWindowPos(
 	    this->overlay,
 	    HWND_TOPMOST,
@@ -851,7 +801,6 @@ void DesktopSlide::placeUnderPanels() {
 		);
 	}
 
-	// Whether anything that isn't the shell's sits over the cover now.
 	wchar_t lowestClass[64] {};
 	if (lowest != nullptr) GetClassNameW(lowest, lowestClass, 64);
 	HWND over = nullptr;
@@ -863,7 +812,6 @@ void DesktopSlide::placeUnderPanels() {
 	}
 	qCDebug(logSlide) << "Cover placed under" << lowest << QString::fromWCharArray(lowestClass) << "topmost"
 	                  << topmost(this->overlay) << "plain window over it" << over;
-	// That panel had dropped among plain windows itself: then over everything.
 	if (over != nullptr) {
 		SetWindowPos(
 		    this->overlay,
@@ -948,13 +896,11 @@ void DesktopSlide::releaseBackdrop() {
 void DesktopSlide::finish() {
 	this->stop.store(true);
 	if (this->worker.joinable()) this->worker.join();
-	// The real panels come back where the copies are before the cover goes.
 	if (this->panelsCarried) {
 		WinPanelWindow::setCoverOverPanels(false);
 		this->panelsCarried = false;
 	}
 	if (this->overlay != nullptr) {
-		// Hide the entire scene before unregistering any of its sources.
 		ShowWindow(this->overlay, SW_HIDE);
 		DwmFlush();
 	}
@@ -976,4 +922,4 @@ void DesktopSlide::finish() {
 void waitForCompositorFrame() { waitForFrame(); }
 double compositorRefreshMs() { return refreshPeriodMs(); }
 
-} // namespace qs::windows
+}

@@ -31,8 +31,6 @@ public:
 	static void runOnReload();
 };
 
-// MSVC does not support GNU's constructor attribute. Register at C++ startup
-// on that toolchain, preserving the constructor attribute elsewhere.
 // NOLINTBEGIN
 #if defined(_MSC_VER) && !defined(__clang__)
 #define QS_REGISTER_PLUGIN(clazz)                                                                  \

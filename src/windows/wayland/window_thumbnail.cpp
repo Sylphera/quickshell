@@ -181,9 +181,6 @@ void WindowThumbnail::sync() {
 		this->setSourceSize(QSize());
 		return;
 	}
-	// DWM reports the size of the visible frame, but rcSource counts from the
-	// window's corner, invisible resize borders included: offset by them, or the
-	// thumbnail shows a transparent strip and loses as much on the other side.
 	RECT frame {0, 0, source.cx, source.cy};
 	RECT bounds {};
 	RECT visible {};
@@ -295,8 +292,6 @@ void WindowThumbnail::place() {
 
 void WindowThumbnail::shapeHost(bool rounded) {
 	if (this->mHost == nullptr) return;
-	// DWM ignores window regions when it draws a thumbnail, but it does clip
-	// it to the rounded corners it gives the window itself.
 	auto corners = rounded ? DWMWCP_ROUND : DWMWCP_DONOTROUND;
 	DwmSetWindowAttribute(this->mHost, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
 	COLORREF border = DWMWA_COLOR_NONE;

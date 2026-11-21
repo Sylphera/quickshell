@@ -53,7 +53,7 @@ struct ExpectedWork {
 };
 std::mutex gExpectedMutex;                              // NOLINT
 std::unordered_map<HMONITOR, ExpectedWork> gExpectedWork; // NOLINT
-} // namespace
+}
 
 void expectWorkArea(HMONITOR monitor, const QRect& work, int ms) {
 	auto lock = std::lock_guard(gExpectedMutex);
