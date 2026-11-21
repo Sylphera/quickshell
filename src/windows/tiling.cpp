@@ -76,6 +76,7 @@ void setWindowShadowsSuppressed(bool suppress) {
 using tiling::Edge;
 
 constexpr int SYNC_DELAY_MS = 30;
+constexpr int STAGED_POP_MS = 330;
 constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
 constexpr int HUNG_RETRY_MS = 500;
@@ -1469,6 +1470,9 @@ void TilingManager::stage(Managed& m, const QRect& tile) {
 	auto* hwnd = m.window->hwnd();
 	claimEarlyPark(hwnd);
 	auto staged = parkedFrame(tile);
+	if (!m.staged) {
+		QTimer::singleShot(STAGED_POP_MS, this, [this, hwnd]() { this->releaseStaged({hwnd}); });
+	}
 	m.staged = true;
 	m.target = tile;
 	m.accepted = staged;
@@ -1484,6 +1488,8 @@ void TilingManager::releaseStaged(const QList<HWND>& windows) {
 		m.staged = false;
 		m.accepted = QRect();
 		if (m.target.isNull() || this->stateOf(m) != State::Tiled) continue;
+		SetWindowPos(window->hwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
+		             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 		this->send(m, this->managedFrame(m));
 	}
 }
