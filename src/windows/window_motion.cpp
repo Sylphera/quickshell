@@ -356,6 +356,24 @@ void WindowMotion::slideTo(HWND hwnd, const QPoint& topLeft) {
 	);
 }
 
+void WindowMotion::clipTo(HWND hwnd, const QSize& visible) {
+	if (IsHungAppWindow(hwnd)) return;
+	if (visible.isEmpty()) {
+		SetWindowRgn(hwnd, nullptr, TRUE);
+		return;
+	}
+	RECT raw {};
+	RECT bounds {};
+	if (!GetWindowRect(hwnd, &raw)) return;
+	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+		bounds = raw;
+	auto left = static_cast<int>(bounds.left - raw.left);
+	auto top = static_cast<int>(bounds.top - raw.top);
+	auto* region = CreateRectRgn(left, top, left + visible.width(), top + visible.height());
+	if (region == nullptr) return;
+	if (SetWindowRgn(hwnd, region, FALSE) == 0) DeleteObject(region);
+}
+
 void WindowMotion::moveTo(HWND hwnd, const QRect& frame, bool wait) {
 	RECT raw {};
 	RECT bounds {};
@@ -576,7 +594,7 @@ bool WindowMotion::begin(
 		auto lock = std::lock_guard(this->mutex);
 		auto& added = this->entries.last();
 		added.live = true;
-		added.realSize = QSize(std::min(from.width(), to.width()), std::min(from.height(), to.height()));
+		added.realSize = to.size();
 		added.overlay = from.size() != to.size();
 		moveTo(hwnd, QRect(from.topLeft(), added.realSize), false);
 		this->layout(added, 0);
@@ -615,11 +633,10 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		}
 		entry->done = false;
 		if (entry->live) {
-			auto size = QSize(std::min(entry->realSize.width(), to.width()), std::min(entry->realSize.height(), to.height()));
-			entry->overlay = entry->overlay || entry->from.size() != to.size() || size != to.size();
-			if (size != entry->realSize) {
-				entry->realSize = size;
-				moveTo(hwnd, QRect(entry->current.topLeft(), size), false);
+			entry->overlay = entry->overlay || entry->from.size() != to.size();
+			if (to.size() != entry->realSize) {
+				entry->realSize = to.size();
+				moveTo(hwnd, QRect(entry->current.topLeft(), to.size()), false);
 			}
 			return;
 		}
@@ -745,7 +762,15 @@ void WindowMotion::run() {
 				auto elapsed = std::chrono::duration<double, std::milli>(last - entry.start).count();
 				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
 				this->layout(entry, progress);
-				if (entry.live) slideTo(entry.hwnd, entry.current.topLeft());
+				if (entry.live) {
+					slideTo(entry.hwnd, entry.current.topLeft());
+					if (entry.overlay) {
+						clipTo(entry.hwnd, QSize(
+						    std::min(entry.current.width(), entry.realSize.width()),
+						    std::min(entry.current.height(), entry.realSize.height())
+						));
+					}
+				}
 				if (entry.snapshot == nullptr && !entry.pop) {
 					RECT bounds {};
 					entry.frames++;
@@ -783,7 +808,7 @@ void WindowMotion::onFrameDone() {
 				auto& entry = this->entries[i];
 				RECT raw {};
 				RECT bounds {};
-				if ((paintsOnlyOnScreen(entry.hwnd) || (entry.live && entry.realSize != entry.to.size()))
+				if (paintsOnlyOnScreen(entry.hwnd) && !entry.live
 				    && entry.holdThumbnail == nullptr && GetWindowRect(entry.hwnd, &raw)
 				    && SUCCEEDED(DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
 				{
@@ -819,7 +844,10 @@ void WindowMotion::onFrameDone() {
 		empty = this->entries.isEmpty();
 	}
 	for (const auto& entry: landing) {
-		if (IsWindow(entry.hwnd)) moveTo(entry.hwnd, entry.to, true);
+		if (IsWindow(entry.hwnd)) {
+			if (entry.live && entry.overlay) clipTo(entry.hwnd, QSize());
+			moveTo(entry.hwnd, entry.to, true);
+		}
 	}
 	for (const auto& entry: landing) {
 		if (entry.snapshot != nullptr) this->lingering.append(entry);
@@ -850,6 +878,7 @@ void WindowMotion::onFrameDone() {
 }
 
 void WindowMotion::release(const Entry& entry) {
+	if (entry.live && entry.overlay && IsWindow(entry.hwnd)) clipTo(entry.hwnd, QSize());
 	DwmUnregisterThumbnail(entry.thumbnail);
 	if (entry.snapshot != nullptr) DestroyWindow(entry.snapshot);
 	if (entry.holdThumbnail != nullptr) DwmUnregisterThumbnail(entry.holdThumbnail);

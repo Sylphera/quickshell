@@ -84,6 +84,7 @@ private:
 	void restack();
 	static void moveTo(HWND hwnd, const QRect& frame, bool wait);
 	static void slideTo(HWND hwnd, const QPoint& topLeft);
+	static void clipTo(HWND hwnd, const QSize& visible);
 	static void release(const Entry& entry);
 
 	HWND cover = nullptr;
