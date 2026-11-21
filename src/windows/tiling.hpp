@@ -124,6 +124,7 @@ public:
 	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
+	void haltMotion(HWND hwnd);
 	void edgeDrag(const QPoint& delta);
 	void endEdgeDrag();
 
@@ -210,6 +211,7 @@ private:
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
+		bool dropped = false;
 		bool popping = false;
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;

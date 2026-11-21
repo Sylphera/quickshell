@@ -33,6 +33,8 @@ public:
 	);
 	void retarget(HWND hwnd, const QRect& to, const QRect& parked);
 	void cancel(HWND hwnd);
+	HWND windowAt(POINT point);
+	QRect stopAt(HWND hwnd);
 	[[nodiscard]] bool moving(HWND hwnd) const;
 	[[nodiscard]] static bool travelsAsStill(HWND hwnd);
 

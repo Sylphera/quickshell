@@ -20,6 +20,7 @@
 #include "keyboard_hook.hpp"
 #include "scratchpad.hpp"
 #include "tiling.hpp"
+#include "window_motion.hpp"
 #include "virtual_desktops.hpp"
 #include "util.hpp"
 #include "window_tracker.hpp"
@@ -169,7 +170,8 @@ bool isElevatedCached(HWND hwnd) {
 }
 
 HWND dragTarget(POINT point) {
-	auto* hit = WindowFromPhysicalPoint(point);
+	auto* hit = WindowMotion::instance()->windowAt(point);
+	if (hit == nullptr) hit = WindowFromPhysicalPoint(point);
 	if (hit == nullptr) return nullptr;
 
 	auto* hwnd = GetAncestor(hit, GA_ROOT);
@@ -361,6 +363,7 @@ void beginDrag(Drag& drag, HWND hwnd, bool resize, POINT point) {
 			drag.watched = (result & STARTED_WATCHED) != 0;
 		}
 
+		if (GetWindowRect(hwnd, &drag.origin)) drag.requested = drag.origin;
 		qCDebug(logSuperDrag) << "Shell answered" << (sent != 0) << "tiled" << drag.tiled << "watched"
 		                      << drag.watched;
 	}
@@ -913,6 +916,7 @@ LRESULT SuperDragManager::onStarted(HWND hwnd, LPARAM flags) {
 
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return 0;
+	tiling->haltMotion(hwnd);
 
 	auto* tracker = WindowTracker::instance();
 	this->guiDrag.hwnd = hwnd;

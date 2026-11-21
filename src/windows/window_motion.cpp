@@ -425,6 +425,40 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 	moveTo(hwnd, parked, false);
 }
 
+HWND WindowMotion::windowAt(POINT point) {
+	auto lock = std::lock_guard(this->mutex);
+	HWND found = nullptr;
+	auto depth = 0;
+	for (const auto& entry: this->entries) {
+		if (entry.done) continue;
+		auto shown = entry.pop ? entry.to : entry.current;
+		if (!shown.contains(QPoint(point.x, point.y))) continue;
+		if (found == nullptr || entry.depth < depth) {
+			found = entry.hwnd;
+			depth = entry.depth;
+		}
+	}
+	return found;
+}
+
+QRect WindowMotion::stopAt(HWND hwnd) {
+	QRect shown;
+	auto empty = false;
+	{
+		auto lock = std::lock_guard(this->mutex);
+		for (auto i = this->entries.size() - 1; i >= 0; i--) {
+			if (this->entries[i].hwnd != hwnd) continue;
+			const auto& entry = this->entries[i];
+			shown = entry.pop ? entry.to : entry.current;
+			release(entry);
+			this->entries.removeAt(i);
+		}
+		empty = this->entries.isEmpty();
+	}
+	if (empty) this->closeCover();
+	return shown;
+}
+
 void WindowMotion::cancel(HWND hwnd) {
 	auto empty = false;
 	{

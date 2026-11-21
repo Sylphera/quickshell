@@ -193,7 +193,7 @@ QRect frameWithInsets(const QRect& raw, const QMargins& insets) {
 	);
 }
 
-void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins* insets = nullptr) {
+void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins* insets = nullptr, bool wait = false) {
 	QRect raw;
 	QRect frame;
 	if (!readFrame(hwnd, raw, frame)) return;
@@ -203,7 +203,8 @@ void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins
 	auto right = insets ? insets->right() : rightOf(raw) - rightOf(frame);
 	auto bottom = insets ? insets->bottom() : bottomOf(raw) - bottomOf(frame);
 
-	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+	if (!wait) flags |= SWP_ASYNCWINDOWPOS;
 	if (tiled) flags |= SWP_NOSENDCHANGING;
 	SetWindowPos(
 	    hwnd,
@@ -472,7 +473,9 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		}
 	}
 	m.fresh = false;
-	if (this->canAnimate(m, layout, tile)) {
+	auto animate = this->canAnimate(m, layout, tile);
+	m.dropped = false;
+	if (animate) {
 		auto from = this->managedFrame(m);
 		auto chromium = WindowMotion::travelsAsStill(m.window->hwnd());
 		auto still = chromium && this->barMoving;
@@ -499,6 +502,7 @@ bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& 
 }
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
+	if (m.dropped) return this->mAnimateMoves && !m.offscreen && IsWindowVisible(m.window->hwnd()) && !IsIconic(m.window->hwnd());
 	if (!this->mAnimateMoves || m.target.isNull() || tile == m.target) return false;
 	if ((m.verifying && !this->barMoving) || m.offscreen || m.tinyCornersApplied || m.window == this->dragging) return false;
 
@@ -520,6 +524,17 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
 	return rects.valid && rects.monitor.contains(m.target) && rects.monitor.contains(tile) ;
+}
+
+void TilingManager::haltMotion(HWND hwnd) {
+	for (auto iter = this->moving.begin(); iter != this->moving.end(); ++iter) {
+		if (iter.key()->hwnd() != hwnd) continue;
+		auto tile = iter.value();
+		this->moving.erase(iter);
+		auto shown = WindowMotion::instance()->stopAt(hwnd);
+		setFrame(hwnd, shown.isNull() ? tile : shown, false, nullptr, true);
+		return;
+	}
 }
 
 void TilingManager::onMotionLanded(HWND hwnd, const QRect& /*frame*/) {
@@ -2180,6 +2195,7 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 	auto& m = iter->second;
+	m.dropped = true;
 
 	auto* hwnd = window->hwnd();
 	if (m.layout == nullptr || m.target.isNull() || IsIconic(hwnd) || IsZoomed(hwnd)) {
