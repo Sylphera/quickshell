@@ -193,6 +193,7 @@ struct Thumbnail {
 	ComPtr<IDCompositionVisual> visual;
 	HTHUMBNAIL handle = nullptr;
 	QRect sourceCrop;
+	QRect sourceRect;
 	QPoint contentOffset;
 
 	~Thumbnail() {
@@ -398,6 +399,7 @@ bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 	    || size.cx <= 0 || size.cy <= 0)
 		return false;
 	auto crop = QRect(0, 0, size.cx, size.cy);
+	auto source = crop;
 	RECT raw {};
 	const auto visible = frame(window);
 	thumb.contentOffset = {};
@@ -408,19 +410,26 @@ bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 			crop = inner;
 		} else if (crop.size() == visible.size() && QRect(QPoint(), rawSize).contains(inner)) {
 			thumb.contentOffset = -inner.topLeft();
+			source = QRect(QPoint(), rawSize);
 		}
 	}
-	if (crop == thumb.sourceCrop) return true;
+	if (crop == thumb.sourceCrop && source == thumb.sourceRect) return true;
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_RECTDESTINATION
 	             | DWM_TNP_RECTSOURCE | CompositionThumbnail;
 	props.fVisible = TRUE;
 	props.opacity = 255;
-	props.rcDestination = {0, 0, crop.width(), crop.height()};
-	props.rcSource = {crop.x(), crop.y(), crop.x() + crop.width(), crop.y() + crop.height()};
+	props.rcDestination = {0, 0, source.width(), source.height()};
+	props.rcSource = {source.x(), source.y(), source.x() + source.width(), source.y() + source.height()};
+	if (source != crop && FAILED(DwmUpdateThumbnailProperties(thumb.handle, &props))) {
+		source = crop;
+		props.rcDestination = {0, 0, crop.width(), crop.height()};
+		props.rcSource = {crop.x(), crop.y(), crop.x() + crop.width(), crop.y() + crop.height()};
+	}
 	if (!succeeded(DwmUpdateThumbnailProperties(thumb.handle, &props), "DwmUpdateThumbnailProperties"))
 		return false;
 	thumb.sourceCrop = crop;
+	thumb.sourceRect = source;
 	return true;
 }
 
