@@ -595,8 +595,7 @@ bool WindowMotion::begin(
 		auto& added = this->entries.last();
 		added.live = true;
 		added.realSize = to.size();
-		added.overlay = from.size() != to.size();
-		moveTo(hwnd, QRect(from.topLeft(), added.realSize), false);
+		added.overlay = false;
 		this->layout(added, 0);
 	} else {
 		moveTo(hwnd, parked, false);
@@ -633,11 +632,6 @@ void WindowMotion::retarget(HWND hwnd, const QRect& to, const QRect& parked) {
 		}
 		entry->done = false;
 		if (entry->live) {
-			entry->overlay = entry->overlay || entry->from.size() != to.size();
-			if (to.size() != entry->realSize) {
-				entry->realSize = to.size();
-				moveTo(hwnd, QRect(entry->current.topLeft(), to.size()), false);
-			}
 			return;
 		}
 	}
@@ -763,7 +757,7 @@ void WindowMotion::run() {
 				auto progress = std::clamp(elapsed / MOVE_MS, 0.0, 1.0);
 				this->layout(entry, progress);
 				if (entry.live) {
-					slideTo(entry.hwnd, entry.current.topLeft());
+					moveTo(entry.hwnd, entry.current, false);
 					if (entry.overlay) {
 						clipTo(entry.hwnd, QSize(
 						    std::min(entry.current.width(), entry.realSize.width()),
