@@ -188,7 +188,7 @@ private:
 	bool makeTileColor(ID3D11DeviceContext* context);
 	bool addTile(Tile& tile, const DwindleTile& placement);
 	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now);
-	bool addSource(Thumbnail& thumb, HWND window, const QRect& bounds = {});
+	bool addSource(Thumbnail& thumb, HWND window, const QRect& crop = {});
 	bool setNativeSize(Thumbnail& thumb);
 	void refresh();
 	void settle();
@@ -248,9 +248,12 @@ bool Scene::prepare() {
 	    || !this->makeTileColor(graphics.context.Get()))
 		return false;
 
-	auto area = frame(this->backdropWindow).translated(-this->work.topLeft());
-	return this->addSource(this->backdrop, this->backdropWindow, area)
-	    && succeeded(this->root->AddVisual(this->backdrop.visual.Get(), TRUE, nullptr), "Add backdrop");
+	const auto crop = this->work.translated(-frame(this->backdropWindow).topLeft());
+	if (!this->addSource(this->backdrop, this->backdropWindow, crop)) {
+		qCDebug(logDwindleScene) << "Could not attach desktop background" << crop;
+		return false;
+	}
+	return succeeded(this->root->AddVisual(this->backdrop.visual.Get(), TRUE, nullptr), "Add backdrop");
 }
 
 bool Scene::makeTileColor(ID3D11DeviceContext* context) {
@@ -276,24 +279,24 @@ bool Scene::makeTileColor(ID3D11DeviceContext* context) {
 	return succeeded(this->tileColor->EndDraw(), "EndDraw") && copied;
 }
 
-bool Scene::addSource(Thumbnail& thumb, HWND window, const QRect& bounds) {
+bool Scene::addSource(Thumbnail& thumb, HWND window, const QRect& crop) {
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_RECTDESTINATION
 	             | DWM_TNP_RECTSOURCE | CompositionThumbnail;
 	props.fSourceClientAreaOnly = FALSE;
 	props.fVisible = TRUE;
 	props.opacity = 255;
-	auto area = bounds.isEmpty() ? QRect(QPoint(), frame(window).size()) : bounds;
-	if (area.isEmpty()) return false;
-	props.rcSource = {0, 0, area.width(), area.height()};
-	props.rcDestination = {area.x(), area.y(), area.x() + area.width(), area.y() + area.height()};
+	const auto source = crop.isEmpty() ? QRect(QPoint(), frame(window).size()) : crop;
+	if (source.isEmpty() || source.x() < 0 || source.y() < 0) return false;
+	props.rcSource = {source.x(), source.y(), source.x() + source.width(), source.y() + source.height()};
+	props.rcDestination = {0, 0, source.width(), source.height()};
 	auto result = createThumbnail(this->host, window, this->desktopDevice.Get(), &props,
 	                              thumb.visual.GetAddressOf(), &thumb.handle);
 	if (FAILED(result) || thumb.visual == nullptr || thumb.handle == nullptr) {
-		qCDebug(logDwindleScene) << "Shared thumbnail unavailable" << Qt::hex << result;
+		qCDebug(logDwindleScene) << "Shared thumbnail unavailable" << source << Qt::hex << result;
 		return false;
 	}
-	return !bounds.isEmpty() || this->setNativeSize(thumb);
+	return !crop.isEmpty() || this->setNativeSize(thumb);
 }
 
 bool Scene::setNativeSize(Thumbnail& thumb) {
@@ -431,7 +434,10 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		if (!tile.target.isEmpty()) origins[i] = tile.at(start);
 		else if (!placement.previous.isEmpty()) origins[i] = placement.previous;
 	}
-	if (!dwindle::planOrigins(targets, origins)) return false;
+	if (!dwindle::planOrigins(targets, origins)) {
+		qCDebug(logDwindleScene) << "No non-overlapping transition for" << targets.size() << "tiles";
+		return false;
+	}
 	for (qsizetype i = 0; i < plan.size(); ++i) {
 		const auto& placement = plan[i];
 		if (!this->update(*this->tiles.at(placement.window), *origins[i], placement.target, start)) {
@@ -454,6 +460,7 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 	this->retries = 0;
 	this->idle.start(static_cast<int>(Duration * 1000) + SettleMs);
 	this->sample.start();
+	qCDebug(logDwindleScene) << "Animating" << plan.size() << "tiles in" << this->work;
 	return true;
 }
 
