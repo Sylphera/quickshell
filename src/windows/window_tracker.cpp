@@ -27,6 +27,7 @@
 
 #include "desktopentry_backend.hpp"
 #include "startup.hpp"
+#include "tiling.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 
@@ -531,6 +532,7 @@ void TrackedWindow::activate() {
 }
 
 void TrackedWindow::close() {
+	if (auto* tiling = TilingManager::active()) tiling->prepareClose(this);
 	if (PostMessageW(this->mHwnd, WM_CLOSE, 0, 0)) return;
 	if (GetLastError() != ERROR_ACCESS_DENIED) return;
 	PostMessageW(this->mHwnd, WM_SYSCOMMAND, SC_CLOSE, 0);

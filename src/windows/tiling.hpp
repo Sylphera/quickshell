@@ -42,6 +42,7 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
+	void prepareClose(TrackedWindow* window);
 	void workAreaChanged() { this->markAll(); }
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
 	void setSpecialOffset(int offset);
@@ -91,6 +92,7 @@ public:
 	void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
+	[[nodiscard]] bool occupiesDwindleTile(HWND hwnd) const;
 	[[nodiscard]] TrackedWindow* focusedWindow() const;
 
 	bool focusDirection(Edge direction);
@@ -125,7 +127,7 @@ public:
 	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
-	void haltMotion(HWND hwnd);
+	void haltMotion(HWND hwnd, bool resize);
 	void edgeDrag(const QPoint& delta);
 	void endEdgeDrag();
 
@@ -165,6 +167,7 @@ private:
 		std::unique_ptr<tiling::LayoutEngine> tree;
 		TrackedWindow* lastFocused = nullptr;
 		bool special = false;
+		bool animateRearrangement = false;
 	};
 
 	enum class State : quint8 {
@@ -206,8 +209,12 @@ private:
 		bool tinyCornersApplied = false;
 		bool fresh = false;
 		bool staged = false;
+		bool contractionHeld = false;
+		bool stageUntilHandoff = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
+		bool tinyChromiumCorners = false;
+		bool nativeFrameRefreshRequested = false;
 		bool tinyBorderSuppressed = false;
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
@@ -247,18 +254,22 @@ private:
 	void apply(Layout* layout);
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
 	void coverNewWindow(HWND hwnd);
-	void stage(Managed& m, const QRect& tile);
-	void releaseStaged(const QList<HWND>& windows);
+	void stage(Managed& m, const QRect& tile, bool untilHandoff = false);
+	bool holdContraction(Managed& m, const QRect& tile);
+	bool stageOccluding(HWND hwnd);
+	void releaseStaged(const QList<HWND>& windows, bool timer = false);
 	void leaveFullscreen(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
+	void cacheNextCloseFrame();
 	bool popIn(Managed& m, const QRect& tile);
 	void updateTinyCorners(Managed& m, const QRect& frame);
 	void restoreTinyCorners(Managed& m);
 	void reassertTinyDecorations();
 	[[nodiscard]] QRect managedFrame(const Managed& m) const;
-	void send(Managed& m, const QRect& frame);
+	bool needsNativeFrameRefresh(Managed& m);
+	void send(Managed& m, const QRect& frame, bool refreshNativeFrame = false);
 	void armDeadline();
 	void restoreFloating(Managed& m);
 
@@ -299,6 +310,7 @@ private:
 	bool mSuppressWindowShadows = false;
 	bool mAnimateMoves = true;
 	bool barMoving = false;
+	bool barRelayoutPending = false;
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
@@ -326,6 +338,7 @@ private:
 	QSet<Layout*> dirtyLayouts;
 	QSet<TrackedWindow*> unverified;
 	TrackedWindow* dragging = nullptr;
+	QRect dragOrigin;
 	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
 	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
 	[[nodiscard]] bool canPop(const Managed& m, const Layout* layout, const QRect& tile) const;
@@ -337,6 +350,8 @@ private:
 	QTimer syncTimer;
 	QTimer verifyTimer;
 	QTimer deadlineTimer;
+	QTimer closeCacheTimer;
+	qsizetype nextCloseWindow = 0;
 	QList<QMetaObject::Connection> connections;
 };
 

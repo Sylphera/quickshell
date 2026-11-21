@@ -44,10 +44,12 @@
 #include "appbar.hpp"
 #include "blur.hpp"
 #include "desktop_host.hpp"
+#include "dwindle_scene.hpp"
 #include "input_mask.hpp"
 #include "panel_animation.hpp"
 #include "panel_effects.hpp"
 #include "startup.hpp"
+#include "tiling.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 
@@ -361,11 +363,32 @@ public:
 		}
 	}
 
-	[[nodiscard]] bool fullscreenAppActive() const { return this->mFullscreenApp; }
+	[[nodiscard]] bool fullscreenAppActive() const {
+		if (!this->mFullscreenApp || !DwindleScene::enabled()) return this->mFullscreenApp;
+		auto* tiling = TilingManager::active();
+		return tiling == nullptr || !tiling->occupiesDwindleTile(GetForegroundWindow());
+	}
 	[[nodiscard]] bool shellFullscreen(HWND hwnd) const {
 		return this->mShellFullscreen.contains(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
 	}
 	[[nodiscard]] const QList<WinPanelWindow*>& panels() const { return this->mPanels; }
+
+	[[nodiscard]] bool dwindleBarAbove(const WinPanelWindow& panel) const {
+		return panel.bNamespace.value() == QStringLiteral("quickshell:bar")
+		    && this->dwindleBarMonitors.contains(MonitorFromWindow(panel.hwnd(), MONITOR_DEFAULTTONULL));
+	}
+
+	void setDwindleBarAbove(HMONITOR monitor, bool above) {
+		if (monitor == nullptr || this->dwindleBarMonitors.contains(monitor) == above) return;
+		if (above) this->dwindleBarMonitors.insert(monitor);
+		else this->dwindleBarMonitors.remove(monitor);
+
+		for (auto* panel: this->mPanels) {
+			if (panel->bNamespace.value() == QStringLiteral("quickshell:bar") && panel->hwnd() != nullptr
+			    && MonitorFromWindow(panel->hwnd(), MONITOR_DEFAULTTONULL) == monitor)
+				panel->updateLayer();
+		}
+	}
 
 	void setFullscreenAppActive(bool active) {
 		if (active == this->mFullscreenApp) return;
@@ -389,6 +412,7 @@ private:
 	QList<WinPanelWindow*> mPanels;
 	bool mFullscreenApp = false;
 	QSet<HMONITOR> mShellFullscreen;
+	QSet<HMONITOR> dwindleBarMonitors;
 };
 
 bool WinProxiedWindow::event(QEvent* event) {
@@ -1002,8 +1026,8 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Top:
 	{
 		auto* stack = WinPanelStack::instance();
-		auto behind = (stack->fullscreenAppActive() && !gCoverActive) || stack->shellFullscreen(hwnd)
-		           || gCoverOverPanels;
+		auto behind = (stack->fullscreenAppActive() && !gCoverActive && !stack->dwindleBarAbove(*this))
+		           || stack->shellFullscreen(hwnd) || gCoverOverPanels;
 		insertAfter = behind ? HWND_BOTTOM : HWND_TOPMOST;
 	}
 		break;
@@ -1025,6 +1049,10 @@ QList<HWND> WinPanelWindow::aboveWindowHandles() {
 		if (hwnd != nullptr && IsWindowVisible(hwnd)) list.append(hwnd);
 	}
 	return list;
+}
+
+void WinPanelWindow::setDwindleBarAbove(HMONITOR monitor, bool above) {
+	WinPanelStack::instance()->setDwindleBarAbove(monitor, above);
 }
 
 void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }

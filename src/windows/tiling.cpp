@@ -84,12 +84,14 @@ constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
 constexpr int TINY_CORNER_LIMIT = 80;
+constexpr int CHROMIUM_CORNER_LIMIT = 256;
 constexpr int SYSTEM_CAPTION_MIN = 8;
 constexpr int TINY_CORNER_RADIUS = 12;
 constexpr qint32 SPECIAL_GAPS_OUT = 30;
 constexpr GUID SPECIAL_DESKTOP = {0x5ec1a100, 0x0000, 0x0000, {0x73, 0x70, 0x65, 0x63, 0x69, 0x61, 0x6c, 0x00}};
 constexpr std::size_t TINY_CORNER_SLOTS = 256;
 constexpr auto* TINY_CORNER_PROP = L"QuickshellTilingTinyRounded";
+constexpr auto* CHROMIUM_CORNER_PROP = L"QuickshellTilingChromiumRounded";
 
 struct TinyCornerSlot {
 	std::atomic<HWND> hwnd {nullptr};
@@ -130,10 +132,25 @@ bool markTinyCornerOwner(HWND hwnd, int preference) {
 
 constexpr UINT_PTR TINY_CORNER_NC_DISABLED = 0x100;
 
+bool restoreChromiumCorners(HWND hwnd, bool keepRound = false) {
+	if (RemovePropW(hwnd, CHROMIUM_CORNER_PROP) == nullptr) return false;
+	if (keepRound) return true;
+
+	auto current = DWM_WINDOW_CORNER_PREFERENCE {};
+	if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &current, sizeof(current)))
+	    && current == DWMWCP_ROUND)
+	{
+		auto preference = DWMWCP_DEFAULT;
+		DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
+	}
+	return true;
+}
+
 void recoverOrphanedTinyCorners() {
 	int restored = 0;
 	EnumWindows(
 	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    if (!IsHungAppWindow(hwnd)) restoreChromiumCorners(hwnd);
 		    auto saved = reinterpret_cast<UINT_PTR>(GetPropW(hwnd, TINY_CORNER_PROP));
 		    auto original = saved & 0xff;
 		    if (original < 1 || original > 4 || IsHungAppWindow(hwnd)) return TRUE;
@@ -195,7 +212,8 @@ QRect frameWithInsets(const QRect& raw, const QMargins& insets) {
 	);
 }
 
-void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins* insets = nullptr, bool wait = false) {
+void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins* insets = nullptr,
+              bool wait = false, bool refreshNativeFrame = false) {
 	QRect raw;
 	QRect frame;
 	if (!readFrame(hwnd, raw, frame)) return;
@@ -207,7 +225,8 @@ void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins
 
 	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
 	if (!wait) flags |= SWP_ASYNCWINDOWPOS;
-	if (tiled) flags |= SWP_NOSENDCHANGING;
+	if (refreshNativeFrame) flags |= SWP_FRAMECHANGED;
+	else if (tiled) flags |= SWP_NOSENDCHANGING;
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
@@ -393,6 +412,8 @@ TilingManager::TilingManager() {
 	this->deadlineTimer.setSingleShot(true);
 	this->deadlineTimer.setInterval(DEADLINE_MS);
 	QObject::connect(&this->deadlineTimer, &QTimer::timeout, this, &TilingManager::onDeadline);
+	this->closeCacheTimer.setInterval(250);
+	QObject::connect(&this->closeCacheTimer, &QTimer::timeout, this, &TilingManager::cacheNextCloseFrame);
 
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, [this]() {
@@ -426,7 +447,12 @@ void TilingManager::setEnabled(bool enabled) {
 void TilingManager::setAnimateMoves(bool animate) {
 	if (animate == this->mAnimateMoves) return;
 	this->mAnimateMoves = animate;
-	if (!animate) DwindleScene::dismissAll();
+	if (this->mEnabled && animate && DwindleScene::enabled()) this->closeCacheTimer.start();
+	if (!animate) {
+		this->closeCacheTimer.stop();
+		DwindleScene::clearCloseCache();
+		DwindleScene::dismissAll();
+	}
 	emit this->animateMovesChanged();
 }
 
@@ -535,7 +561,14 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 	return rects.valid && (m.fullscreenToggled || (bounds.contains(m.target) && bounds.contains(tile)));
 }
 
-void TilingManager::haltMotion(HWND hwnd) {
+void TilingManager::haltMotion(HWND hwnd, bool resize) {
+	const auto frame = DwindleScene::frameForDrag(hwnd);
+	if (!frame.isEmpty()) {
+		DwindleScene::dismissAll();
+		if (!resize && IsWindow(hwnd) && !IsHungAppWindow(hwnd))
+			setFrame(hwnd, frame, false, nullptr, true);
+	}
+
 	for (auto iter = this->moving.begin(); iter != this->moving.end(); ++iter) {
 		if (iter.key()->hwnd() != hwnd) continue;
 		auto tile = iter.value();
@@ -832,6 +865,21 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 	else work.setBottom(std::max(rects.monitor.bottom() - physical, work.top()));
 	expectWorkArea(monitor, work, 1500);
 
+	if (DwindleScene::enabled() && this->mLayout == QStringLiteral("dwindle")) {
+		if (this->barRelayoutPending) return;
+		this->barRelayoutPending = true;
+		QTimer::singleShot(0, this, [this] {
+			this->barRelayoutPending = false;
+			if (!this->mEnabled) return;
+			WinPanelWindow::raiseDemoted();
+			this->barMoving = true;
+			this->relayout();
+			this->sync();
+			this->barMoving = false;
+		});
+		return;
+	}
+
 	this->barMoving = true;
 	this->relayout();
 	this->sync();
@@ -867,6 +915,21 @@ bool TilingManager::isTiled(TrackedWindow* window) const {
 	return iter != this->managed.end() && iter->second.layout != nullptr;
 }
 
+bool TilingManager::occupiesDwindleTile(HWND hwnd) const {
+	if (this->tracker == nullptr) return false;
+	auto found = this->managed.find(this->tracker->windowFor(hwnd));
+	if (found == this->managed.end()) return false;
+
+	const auto& m = found->second;
+	if (m.layout == nullptr || m.layout->special || m.layout->tree->kind() != tiling::Kind::Dwindle
+	    || m.fullscreen || m.offscreen || m.staged || m.target.isEmpty()
+	    || this->stateOf(m) != State::Tiled || m.window->borderlessFullscreen())
+		return false;
+
+	const auto actual = this->managedFrame(m);
+	return actual == m.target || (m.verifying && actual == m.before);
+}
+
 bool TilingManager::start() {
 	this->ownerMutex = CreateMutexW(nullptr, TRUE, L"Local\\QuickshellTiling");
 	if (this->ownerMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -880,6 +943,7 @@ bool TilingManager::start() {
 	recoverOrphanedTinyCorners();
 	if (DwindleScene::enabled()) {
 		QTimer::singleShot(0, this, &DwindleScene::warmUp);
+		DwindleScene::onOcclusion([this](HWND hwnd) { return this->stageOccluding(hwnd); });
 		DwindleScene::onRelease([this](const QList<HWND>& windows) { this->releaseStaged(windows); });
 	}
 
@@ -957,10 +1021,13 @@ bool TilingManager::start() {
 
 	this->onActiveWindowChanged();
 	this->schedule();
+	if (this->mAnimateMoves && DwindleScene::enabled()) this->closeCacheTimer.start();
 	return true;
 }
 
 void TilingManager::stop() {
+	this->closeCacheTimer.stop();
+	DwindleScene::clearCloseCache();
 	DwindleScene::dismissAll();
 	for (const auto& connection: this->connections) QObject::disconnect(connection);
 	this->connections.clear();
@@ -1046,6 +1113,19 @@ void TilingManager::unmanage(TrackedWindow* window) {
 
 	auto wasFullscreen = iter->second.fullscreen || window->fullscreen();
 	auto* from = iter->second.layout;
+	const auto hwnd = window->hwnd();
+	if (DwindleScene::enabled() && this->mAnimateMoves && from != nullptr && !from->special
+	    && this->layoutAlive(from) && from->tree->kind() == tiling::Kind::Dwindle
+	    && !iter->second.fullscreen && !iter->second.offscreen && !window->minimized()
+	    && this->desktops->indexOf(from->desktop) == this->desktops->shownIndex()
+	    && this->desktops->shownIndex() == this->desktops->currentIndex()
+	    && (!IsWindow(hwnd) || !IsWindowVisible(hwnd)))
+	{
+		auto* monitor = monitorForScreen(from->screen);
+		const auto rects = monitorRects(monitor);
+		if (rects.valid)
+			DwindleScene::useCachedCloseFrame(monitor, rects.work, hwnd, window->pid(), iter->second.target, true);
+	}
 	auto refocus = from != nullptr && from->lastFocused == window
 	            && TilingManager::scrollingOf(from) != nullptr;
 
@@ -1312,9 +1392,11 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 		return;
 	}
 
-	if (m.layout != nullptr) this->takeOut(m);
+	const auto transferred = m.layout != nullptr;
+	if (transferred) this->takeOut(m);
 
 	if (want != nullptr) {
+		want->animateRearrangement |= transferred;
 		auto cursor = cursorPos();
 		this->insertInto(m, want, nullptr, &cursor);
 	}
@@ -1388,6 +1470,7 @@ void TilingManager::takeOut(Managed& m) {
 	m.layout = nullptr;
 	m.target = QRect();
 	m.accepted = QRect();
+	m.contractionHeld = false;
 	m.verifying = false;
 	this->unverified.remove(m.window);
 
@@ -1395,10 +1478,77 @@ void TilingManager::takeOut(Managed& m) {
 	emit this->windowTilingChanged(m.window);
 }
 
+void TilingManager::prepareClose(TrackedWindow* window) {
+	if (!DwindleScene::enabled() || !this->mAnimateMoves || this->barMoving
+	    || this->dragging != nullptr || !startup::settled()
+	    || this->desktops->shownIndex() != this->desktops->currentIndex())
+		return;
+
+	auto found = this->managed.find(window);
+	if (found == this->managed.end()) {
+		qCDebug(logTiling) << "Dwindle close unmanaged" << window->hwnd();
+		return;
+	}
+
+	auto& m = found->second;
+	auto* layout = m.layout;
+	if (layout == nullptr || !this->layoutAlive(layout) || layout->special
+	    || layout->tree->kind() != tiling::Kind::Dwindle
+	    || this->desktops->indexOf(layout->desktop) != this->desktops->currentIndex()
+	    || this->stateOf(m) != State::Tiled || m.fullscreen || m.offscreen || m.popping
+	    || m.target.isEmpty() || this->moving.contains(window))
+	{
+		qCDebug(logTiling) << "Dwindle close ineligible" << window->hwnd() << m.target
+		                  << m.fullscreen << m.offscreen << m.popping
+		                  << this->moving.contains(window);
+		return;
+	}
+
+	auto* monitor = monitorForScreen(layout->screen);
+	const auto rects = monitorRects(monitor);
+	if (rects.valid) {
+		DwindleScene::snapshotClose(monitor, rects.work, window->hwnd());
+		DwindleScene::useCachedCloseFrame(monitor, rects.work, window->hwnd(), window->pid(), m.target, false);
+	}
+}
+
+void TilingManager::cacheNextCloseFrame() {
+	if (!startup::settled() || this->dragging != nullptr || this->edgeDragState.window != nullptr
+	    || this->barMoving || this->desktops->shownIndex() != this->desktops->currentIndex()) return;
+
+	const auto windows = this->tracker->windows();
+	for (qsizetype inspected = 0; inspected < windows.size(); ++inspected) {
+		this->nextCloseWindow %= windows.size();
+		auto* window = windows.at(this->nextCloseWindow++);
+		auto found = this->managed.find(window);
+		if (found == this->managed.end()) continue;
+		const auto& m = found->second;
+		auto* layout = m.layout;
+		if (layout == nullptr || layout->special || !this->layoutAlive(layout)
+		    || layout->tree->kind() != tiling::Kind::Dwindle
+		    || this->desktops->indexOf(layout->desktop) != this->desktops->shownIndex()
+		    || this->stateOf(m) != State::Tiled || m.fullscreen || m.offscreen || m.staged
+		    || m.popping || m.target.isEmpty() || this->moving.contains(window)) continue;
+
+		auto* monitor = monitorForScreen(layout->screen);
+		if (DwindleScene::presenting(monitor)) continue;
+		DwindleScene::cacheCloseFrame(window->hwnd(), m.target);
+		return;
+	}
+}
+
 void TilingManager::dropEmptyLayouts() {
 	for (auto iter = this->layouts.begin(); iter != this->layouts.end();) {
 		if (iter->second->tree->isEmpty()) {
-			this->dirtyLayouts.remove(iter->second.get());
+			auto* layout = iter->second.get();
+			if (DwindleScene::enabled() && !layout->special && this->layoutAlive(layout)
+			    && this->desktops->indexOf(layout->desktop) == this->desktops->currentIndex())
+			{
+				auto* monitor = monitorForScreen(layout->screen);
+				auto rects = monitorRects(monitor);
+				if (rects.valid && DwindleScene::hasClosingTile(monitor, rects.work)) this->apply(layout);
+			}
+			this->dirtyLayouts.remove(layout);
 			iter = this->layouts.erase(iter);
 		} else {
 			++iter;
@@ -1407,6 +1557,7 @@ void TilingManager::dropEmptyLayouts() {
 }
 
 void TilingManager::apply(Layout* layout) {
+	const auto animateRearrangement = std::exchange(layout->animateRearrangement, false);
 	if (!this->layoutAlive(layout)) return;
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
@@ -1456,9 +1607,14 @@ void TilingManager::apply(Layout* layout) {
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
 		if (m.popping) continue;
-		if (presenting && !m.fullscreen && !parked
-		    && (m.staged || (m.target.isNull() && isEarlyParked(window->hwnd()))))
-		{
+		const auto scenePlacement = presenting && !m.fullscreen && !parked;
+		if (scenePlacement && (animateRearrangement || m.contractionHeld) && this->holdContraction(m, tile))
+			continue;
+		if (m.contractionHeld) {
+			m.contractionHeld = false;
+			m.accepted = QRect();
+		}
+		if (scenePlacement && (m.staged || (m.target.isNull() && isEarlyParked(window->hwnd())))) {
 			this->stage(m, tile);
 			continue;
 		}
@@ -1466,31 +1622,73 @@ void TilingManager::apply(Layout* layout) {
 	}
 }
 
-void TilingManager::stage(Managed& m, const QRect& tile) {
+bool TilingManager::holdContraction(Managed& m, const QRect& tile) {
+	if (m.target.isEmpty() || (m.staged && !m.contractionHeld)) return false;
+	const auto actual = this->managedFrame(m);
+	if (tile.width() > actual.width() || tile.height() > actual.height() || tile.size() == actual.size())
+		return false;
+
+	if (!m.contractionHeld || m.target != tile)
+		qCDebug(logTiling) << "Holding Dwindle contraction" << m.window->hwnd() << actual << "to" << tile;
+	m.contractionHeld = true;
+	m.target = tile;
+	m.accepted = actual;
+	m.verifying = false;
+	m.corrections = 0;
+	m.fresh = false;
+	m.dropped = false;
+	return true;
+}
+
+void TilingManager::stage(Managed& m, const QRect& tile, bool untilHandoff) {
 	auto* hwnd = m.window->hwnd();
 	claimEarlyPark(hwnd);
+	const auto actual = this->managedFrame(m);
 	auto staged = parkedFrame(tile);
-	if (!m.staged) {
-		QTimer::singleShot(STAGED_POP_MS, this, [this, hwnd]() { this->releaseStaged({hwnd}); });
+	if (m.contractionHeld) staged.setSize(actual.size());
+	if (!m.staged && !untilHandoff) {
+		QTimer::singleShot(STAGED_POP_MS, this, [this, hwnd]() { this->releaseStaged({hwnd}, true); });
 	}
+	if (!m.staged) m.nativeFrameRefreshRequested = false;
 	m.staged = true;
+	m.stageUntilHandoff |= untilHandoff;
 	m.target = tile;
 	m.accepted = staged;
 	m.verifying = false;
 	m.corrections = 0;
-	if (this->managedFrame(m) != staged)
+	if (actual != staged)
 		setFrame(hwnd, staged, true, m.tinyCornersApplied ? &m.tinyFrameInsets : nullptr);
 }
 
-void TilingManager::releaseStaged(const QList<HWND>& windows) {
+bool TilingManager::stageOccluding(HWND hwnd) {
 	for (auto& [window, m]: this->managed) {
-		if (!m.staged || !windows.contains(window->hwnd())) continue;
-		m.staged = false;
+		if (window->hwnd() != hwnd) continue;
+		if (m.layout == nullptr || m.layout->special || m.fullscreen || m.offscreen
+		    || m.target.isEmpty() || this->stateOf(m) != State::Tiled || IsHungAppWindow(hwnd))
+			return false;
+		const auto target = m.target;
+		this->stage(m, target, true);
+		return true;
+	}
+	return false;
+}
+
+void TilingManager::releaseStaged(const QList<HWND>& windows, bool timer) {
+	for (auto& [window, m]: this->managed) {
+		if ((!m.staged && !m.contractionHeld) || (timer && (m.stageUntilHandoff || m.contractionHeld))
+		    || !windows.contains(window->hwnd())) continue;
+		const auto wasStaged = std::exchange(m.staged, false);
+		const auto wasHeld = std::exchange(m.contractionHeld, false);
+		m.stageUntilHandoff = false;
 		m.accepted = QRect();
 		if (m.target.isNull() || this->stateOf(m) != State::Tiled) continue;
-		SetWindowPos(window->hwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
-		             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-		this->send(m, this->managedFrame(m));
+		if (wasStaged)
+			SetWindowPos(window->hwnd(), HWND_NOTOPMOST, 0, 0, 0, 0,
+			             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+		if (wasHeld)
+			qCDebug(logTiling) << "Finishing Dwindle contraction" << window->hwnd() << m.target;
+		this->updateTinyCorners(m, m.target);
+		this->send(m, this->managedFrame(m), this->needsNativeFrameRefresh(m));
 	}
 }
 
@@ -1501,8 +1699,8 @@ bool TilingManager::dwindlePlan(
     bool& changed,
     bool still
 ) {
-	if (!this->mAnimateMoves || this->barMoving || this->dragging != nullptr || !startup::settled()
-	    || this->desktops->shownIndex() != this->desktops->currentIndex()
+	if (!this->mAnimateMoves || this->dragging != nullptr || this->edgeDragState.window != nullptr
+	    || !startup::settled() || this->desktops->shownIndex() != this->desktops->currentIndex()
 	    || layout->tree->kind() != tiling::Kind::Dwindle)
 		return false;
 	QSet<HWND> participants;
@@ -1520,11 +1718,11 @@ bool TilingManager::dwindlePlan(
 			if (m.target != tile) return false;
 			plan.append({window->hwnd(), tile, tile, true});
 		} else {
-			auto previous = m.target.isEmpty() ? QRect() : this->managedFrame(m);
-			auto settled = !previous.isEmpty() && std::abs(previous.left() - m.target.left()) <= 4
-			            && std::abs(previous.top() - m.target.top()) <= 4
-			            && std::abs(previous.right() - m.target.right()) <= 4
-			            && std::abs(previous.bottom() - m.target.bottom()) <= 4;
+			auto previous = m.target.isEmpty() && !m.dropped ? QRect() : this->managedFrame(m);
+			auto settled = m.dropped || (!previous.isEmpty() && std::abs(previous.left() - m.target.left()) <= 4
+			                             && std::abs(previous.top() - m.target.top()) <= 4
+			                             && std::abs(previous.right() - m.target.right()) <= 4
+			                             && std::abs(previous.bottom() - m.target.bottom()) <= 4);
 			changed |= tile != m.target;
 			plan.append({window->hwnd(), previous, tile, settled});
 		}
@@ -1597,6 +1795,15 @@ QRect TilingManager::managedFrame(const Managed& m) const {
 }
 
 void TilingManager::restoreTinyCorners(Managed& m) {
+	if (m.tinyChromiumCorners) {
+		auto* hwnd = m.window->hwnd();
+		if (IsWindow(hwnd)) {
+			auto keepRound = DecorationManager::instance()->corners() == QStringLiteral("round");
+			restoreChromiumCorners(hwnd, keepRound);
+		}
+		forgetTinyCorners(hwnd);
+		m.tinyChromiumCorners = false;
+	}
 	if (m.tinySmallCorners) {
 		auto* hwnd = m.window->hwnd();
 		if (IsWindow(hwnd)) {
@@ -1640,15 +1847,46 @@ void TilingManager::restoreTinyCorners(Managed& m) {
 }
 
 void TilingManager::updateTinyCorners(Managed& m, const QRect& frame) {
-	if (m.layout == nullptr || m.offscreen || frame.isEmpty()
-	    || (frame.width() >= TINY_CORNER_LIMIT && frame.height() >= TINY_CORNER_LIMIT))
-	{
+	if (m.layout == nullptr || m.offscreen || m.fullscreen || frame.isEmpty()) {
 		this->restoreTinyCorners(m);
 		return;
 	}
 
 	auto* hwnd = m.window->hwnd();
 	if (!IsWindow(hwnd) || IsHungAppWindow(hwnd)) return;
+	if (DwindleScene::enabled() && windowClass(hwnd) == QStringLiteral("Chrome_WidgetWin_1")) {
+		const auto dpi = GetDpiForWindow(hwnd);
+		const auto limit = dpi == 0 ? CHROMIUM_CORNER_LIMIT : MulDiv(CHROMIUM_CORNER_LIMIT, dpi, 96);
+		if (m.layout->special || m.layout->tree->kind() != tiling::Kind::Dwindle
+		    || (frame.width() >= limit && frame.height() >= limit)
+		    || DecorationManager::instance()->corners() != QStringLiteral("default"))
+		{
+			this->restoreTinyCorners(m);
+			return;
+		}
+
+		if (m.tinyChromiumCorners) return;
+		auto previous = DWM_WINDOW_CORNER_PREFERENCE {};
+		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous)))
+		    || previous != DWMWCP_DEFAULT)
+		{
+			return;
+		}
+		if (!SetPropW(hwnd, CHROMIUM_CORNER_PROP, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(1)))) return;
+		auto preference = DWMWCP_ROUND;
+		if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference)))) {
+			RemovePropW(hwnd, CHROMIUM_CORNER_PROP);
+			return;
+		}
+		m.tinyChromiumCorners = true;
+		rememberTinyCorners(hwnd, static_cast<int>(previous));
+		return;
+	}
+
+	if (frame.width() >= TINY_CORNER_LIMIT && frame.height() >= TINY_CORNER_LIMIT) {
+		this->restoreTinyCorners(m);
+		return;
+	}
 	if (!m.tinyCornersApplied && hasSystemCaption(hwnd)) {
 		if (m.tinySmallCorners) return;
 		auto previous = DWM_WINDOW_CORNER_PREFERENCE {};
@@ -1771,18 +2009,49 @@ void TilingManager::reassertTinyDecorations() {
 	}
 }
 
+bool TilingManager::needsNativeFrameRefresh(Managed& m) {
+	if (!DwindleScene::enabled() || m.layout == nullptr || m.layout->special || m.staged
+	    || m.offscreen || m.fullscreen || m.layout->tree->kind() != tiling::Kind::Dwindle)
+		return false;
+
+	auto* hwnd = m.window->hwnd();
+	if (windowClass(hwnd) != QStringLiteral("Chrome_WidgetWin_1")) return false;
+
+	QRect raw;
+	QRect visible;
+	if (!readFrame(hwnd, raw, visible) || raw.isEmpty()) return false;
+	if (raw != visible) {
+		m.nativeFrameRefreshRequested = false;
+		return false;
+	}
+
+	const auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	BOOL enabled = FALSE;
+	return !m.nativeFrameRefreshRequested && IsWindowVisible(hwnd) && !IsHungAppWindow(hwnd)
+	    && (style & (WS_CAPTION | WS_THICKFRAME)) == (WS_CAPTION | WS_THICKFRAME)
+	    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_NCRENDERING_ENABLED, &enabled, sizeof(enabled)))
+	    && enabled;
+}
+
 void TilingManager::place(Managed& m, const QRect& tile) {
+	if (m.contractionHeld) return;
 	claimEarlyPark(m.window->hwnd());
 	auto frame = this->managedFrame(m);
 	this->updateTinyCorners(m, frame);
+	const auto refreshNativeFrame = this->needsNativeFrameRefresh(m);
 
 	if (tile != m.target) {
 		m.target = tile;
 		m.accepted = QRect();
 		m.corrections = 0;
 
-		if (frame == tile) m.verifying = false;
-		else this->send(m, frame);
+		if (frame == tile && !refreshNativeFrame) m.verifying = false;
+		else this->send(m, frame, refreshNativeFrame);
+		return;
+	}
+
+	if (refreshNativeFrame) {
+		this->send(m, frame, true);
 		return;
 	}
 
@@ -1807,13 +2076,20 @@ void TilingManager::place(Managed& m, const QRect& tile) {
 	this->send(m, frame);
 }
 
-void TilingManager::send(Managed& m, const QRect& frame) {
+void TilingManager::send(Managed& m, const QRect& frame, bool refreshNativeFrame) {
 	m.before = frame;
 	m.verifying = true;
 	m.wasHung = false;
 	m.deadline = QDateTime::currentMSecsSinceEpoch() + DEADLINE_MS;
 	setFrame(m.window->hwnd(), m.target, true,
-	         m.tinyCornersApplied ? &m.tinyFrameInsets : nullptr);
+	         m.tinyCornersApplied ? &m.tinyFrameInsets : nullptr, false, refreshNativeFrame);
+	if (refreshNativeFrame) {
+		m.nativeFrameRefreshRequested = true;
+		auto window = QPointer<TrackedWindow>(m.window);
+		QTimer::singleShot(25, this, [this, window] {
+			if (window != nullptr) this->onRectChanged(window);
+		});
+	}
 	this->armDeadline();
 }
 
@@ -2088,6 +2364,7 @@ void TilingManager::restoreForCrash() {
 	for (auto& slot: gTinyCornerSlots) {
 		auto* hwnd = slot.hwnd.exchange(nullptr);
 		if (hwnd == nullptr || !IsWindow(hwnd)) continue;
+		if (restoreChromiumCorners(hwnd) || GetPropW(hwnd, TINY_CORNER_PROP) == nullptr) continue;
 		if (slot.borderSuppressed.load()) {
 			auto border = COLORREF(DWMWA_COLOR_DEFAULT);
 			DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
@@ -2323,17 +2600,18 @@ void TilingManager::onMoveSizeStarted(TrackedWindow* window) {
 	if (state != State::Tiled && !(state == State::Suspended && window->maximized())) return;
 
 	this->dragging = window;
+	this->dragOrigin = this->managedFrame(iter->second);
 	this->unverified.remove(window);
 }
 
 void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 	if (window != this->dragging) return;
 	this->dragging = nullptr;
+	const auto origin = std::exchange(this->dragOrigin, QRect());
 
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 	auto& m = iter->second;
-	m.dropped = true;
 
 	auto* hwnd = window->hwnd();
 	if (m.layout == nullptr || m.target.isNull() || IsIconic(hwnd) || IsZoomed(hwnd)) {
@@ -2343,6 +2621,10 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 
 		auto frame = this->managedFrame(m);
 	const auto target = m.accepted.isNull() ? m.target : m.accepted;
+	if (frame == origin) {
+		this->markLayout(m.layout);
+		return;
+	}
 
 	auto movedLeft = qAbs(frame.left() - target.left()) > EDGE_TOLERANCE;
 	auto movedTop = qAbs(frame.top() - target.top()) > EDGE_TOLERANCE;
@@ -2352,13 +2634,13 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 	auto resized = qAbs(frame.width() - target.width()) > EDGE_TOLERANCE
 	            || qAbs(frame.height() - target.height()) > EDGE_TOLERANCE;
 
-	m.target = QRect();
-
 	if (moved == 0) {
 		this->markLayout(m.layout);
 		return;
 	}
 
+	m.dropped = true;
+	m.target = QRect();
 	if (!resized || moved == 4) {
 		this->drop(m, cursorPos());
 		return;
@@ -2554,6 +2836,8 @@ void TilingManager::swapWindows(Managed& a, Managed& b) {
 		if (layoutB->lastFocused == b.window) layoutB->lastFocused = a.window;
 	}
 
+	layoutA->animateRearrangement = true;
+	layoutB->animateRearrangement = true;
 	this->markLayout(layoutA);
 	this->markLayout(layoutB);
 }
@@ -2571,6 +2855,7 @@ void TilingManager::moveToLayout(Managed& m, Layout* layout, TrackedWindow* targ
 	layout->tree->configure(this->options());
 	layout->tree->insert(idOf(m.window), target == nullptr ? 0 : idOf(target), nullptr);
 	layout->lastFocused = m.window;
+	layout->animateRearrangement = true;
 	m.layout = layout;
 	m.target = QRect();
 
@@ -2659,6 +2944,7 @@ void TilingManager::moveInDwindle(Managed& m, Edge direction) {
 	auto target = tiling::cursorInsertionTarget(*layout->tree, focal);
 	layout->tree->insert(id, target, &focal);
 	layout->lastFocused = m.window;
+	layout->animateRearrangement = true;
 	this->markLayout(layout);
 }
 

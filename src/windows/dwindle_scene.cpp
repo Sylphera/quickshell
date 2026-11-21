@@ -1,10 +1,15 @@
 #include "dwindle_scene.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <thread>
 
 #include <d3d11.h>
 #include <dcomp.h>
@@ -14,6 +19,7 @@
 
 #include <qimage.h>
 #include <qloggingcategory.h>
+#include <qset.h>
 #include <qtimer.h>
 
 #include "dwindle_scene_geometry.hpp"
@@ -28,12 +34,24 @@ using Microsoft::WRL::ComPtr;
 Q_LOGGING_CATEGORY(logDwindleScene, "quickshell.windows.dwindle.scene", QtWarningMsg);
 
 constexpr double Duration = 0.3;
-constexpr double PopInScale = 0.8;
+constexpr float PopInScale = 0.8f;
+constexpr float PopOutScale = 0.9f;
+constexpr double PopOutDuration = 0.2;
+constexpr double CloseFrameLifetime = 1.0;
+constexpr double CachedCloseLifetime = 4.0;
+constexpr qint64 CloseCacheBudget = 32 * 1024 * 1024;
 constexpr auto SettleMs = 55;
 constexpr double JoinGrace = 0.12;
 constexpr double CoverHold = 0.7;
 constexpr int ReleaseRetries = 12;
 constexpr int ArrivalRetries = 90;
+constexpr double OcclusionMoveGrace = 0.05;
+constexpr double OcclusionStageLimit = 0.33;
+
+std::function<bool(HWND)>& occlusionStager() {
+	static auto* stage = new std::function<bool(HWND)>();
+	return *stage;
+}
 
 std::function<void(const QList<HWND>&)>& releaser() {
 	static auto* release = new std::function<void(const QList<HWND>&)>();
@@ -87,6 +105,15 @@ bool cloaked(HWND window) {
 	    && value != 0;
 }
 
+QRect sceneViewport(HMONITOR monitor, const QRect& work) {
+	MONITORINFO info {};
+	info.cbSize = sizeof(info);
+	if (!GetMonitorInfoW(monitor, &info)) return work;
+	const auto& bounds = info.rcMonitor;
+	const QRect viewport(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+	return viewport.contains(work) ? viewport : work;
+}
+
 float windowRadius(HWND hwnd) {
 	auto region = CreateRectRgn(0, 0, 0, 0);
 	if (region != nullptr) {
@@ -114,7 +141,7 @@ float windowRadius(HWND hwnd) {
 	return dip * (dpi == 0 ? 1.0f : dpi / 96.0f);
 }
 
-QImage captureWorkspace(const QRect& work) {
+QImage captureWorkspace(const QRect& work, HWND window = nullptr) {
 	if (qint64(work.width()) * work.height() > 3840LL * 2160) return {};
 	auto* screen = GetDC(nullptr);
 	if (screen == nullptr) return {};
@@ -130,8 +157,12 @@ QImage captureWorkspace(const QRect& work) {
 	QImage image;
 	if (memory != nullptr && bitmap != nullptr) {
 		auto* previous = SelectObject(memory, bitmap);
-		if (previous != nullptr && BitBlt(memory, 0, 0, work.width(), work.height(), screen,
-		                                 work.x(), work.y(), SRCCOPY)) {
+		const auto copied = previous != nullptr
+		                 && (window != nullptr
+		                         ? PrintWindow(window, memory, PW_RENDERFULLCONTENT)
+		                         : BitBlt(memory, 0, 0, work.width(), work.height(), screen,
+		                                  work.x(), work.y(), SRCCOPY));
+		if (copied) {
 			GdiFlush();
 			image = QImage(static_cast<uchar*>(pixels), work.width(), work.height(), QImage::Format_RGB32)
 			            .copy();
@@ -144,6 +175,61 @@ QImage captureWorkspace(const QRect& work) {
 	return image;
 }
 
+std::atomic_bool& closeCaptureBusy() {
+	static auto* busy = new std::atomic_bool(false);
+	return *busy;
+}
+
+QImage captureWindowPixels(HWND window, const QRect& raw, const QRect& visible) {
+	auto image = captureWorkspace(raw, window);
+	if (image.isNull()) return {};
+
+	image = image.copy(visible.translated(-raw.topLeft()));
+	const auto sample = [&image](int x, int y) {
+		return image.pixel(image.width() * x / 8, image.height() * y / 8) & 0xffffff;
+	};
+	if (sample(4, 4) == 0 && sample(2, 2) == 0 && sample(6, 2) == 0
+	    && sample(2, 6) == 0 && sample(6, 6) == 0)
+		return {};
+	return image;
+}
+
+template<typename Work>
+bool startCloseCapture(Work work) {
+	if (closeCaptureBusy().exchange(true)) return false;
+	try {
+		std::thread([work = std::move(work)]() mutable {
+			work();
+			closeCaptureBusy().store(false);
+		}).detach();
+	} catch (const std::system_error&) {
+		closeCaptureBusy().store(false);
+		return false;
+	}
+	return true;
+}
+
+QImage captureWindowForClose(HWND window, const QSize& expectedSize) {
+	DWORD affinity = 0;
+	if (IsHungAppWindow(window) || (GetWindowDisplayAffinity(window, &affinity) && affinity != WDA_NONE))
+		return {};
+
+	RECT rect {};
+	const auto visible = frame(window);
+	if (visible.size() != expectedSize || !GetWindowRect(window, &rect)) return {};
+	const QRect raw(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+	if (!raw.contains(visible)) return {};
+
+	std::promise<QImage> result;
+	auto future = result.get_future();
+	if (!startCloseCapture([window, raw, visible, result = std::move(result)]() mutable {
+		    result.set_value(captureWindowPixels(window, raw, visible));
+	    })) return {};
+
+	if (future.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready) return {};
+	return future.get();
+}
+
 bool isUncovered(HWND window, const QRect& bounds, HWND host) {
 	DWORD affinity = 0;
 	if (GetWindowDisplayAffinity(window, &affinity) && affinity != WDA_NONE) return false;
@@ -153,6 +239,11 @@ bool isUncovered(HWND window, const QRect& bounds, HWND host) {
 			return false;
 	}
 	return true;
+}
+
+bool diagnosticsEnabled() {
+	static const auto enabled = qEnvironmentVariableIntValue("II_DWINDLE_DIAGNOSTICS") == 1;
+	return enabled;
 }
 
 qint64 counter() {
@@ -211,7 +302,51 @@ struct Thumbnail {
 	}
 };
 
-struct Tile {
+struct AnimatedFrame {
+	QRectF from;
+	QRect target;
+	qint64 start = 0;
+	qint64 popStart = 0;
+
+	[[nodiscard]] QRectF at(qint64 now) const {
+		auto elapsed = static_cast<double>(now - this->start) / frequency();
+		return dwindle::interpolate(this->from, this->target, std::clamp(elapsed / Duration, 0.0, 1.0));
+	}
+
+	[[nodiscard]] QRectF shownAt(qint64 now) const {
+		auto bounds = this->at(now);
+		if (this->popStart == 0) return bounds;
+		const auto elapsed = static_cast<double>(now - this->popStart) / frequency();
+		const auto scale = PopInScale + (1.0 - PopInScale) * dwindle::ease(elapsed / Duration);
+		const auto center = bounds.center();
+		bounds.setSize(bounds.size() * scale);
+		bounds.moveCenter(center);
+		return bounds;
+	}
+};
+
+struct DragTile {
+	HWND window;
+	AnimatedFrame frame;
+	int order;
+};
+
+struct DragScene {
+	QRect work;
+	QList<DragTile> tiles;
+};
+
+struct DragScenes {
+	std::mutex mutex;
+	std::map<HWND, DragScene> byHost;
+};
+
+DragScenes& dragScenes() {
+	static DragScenes scenes;
+	return scenes;
+}
+
+struct Tile: AnimatedFrame {
 	Thumbnail source;
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
@@ -225,17 +360,56 @@ struct Tile {
 	QSize retainedSize;
 	float radius = 0;
 	bool showingRetained = false;
-	QRectF from;
-	QRect target;
-	qint64 start = 0;
+	int order = 0;
 	bool waitingForSize = false;
 	ComPtr<IDCompositionScaleTransform> pop;
 	ComPtr<IDCompositionEffectGroup> fade;
 
-	[[nodiscard]] QRectF at(qint64 now) const {
-		auto elapsed = static_cast<double>(now - this->start) / frequency();
-		return dwindle::interpolate(this->from, this->target, std::clamp(elapsed / Duration, 0.0, 1.0));
+	ComPtr<IDCompositionVisual> diagnosticMarker;
+	qint64 occlusionRequested = 0;
+	int diagnosticState = -1;
+	QSize diagnosticSize;
+	QPoint diagnosticOffset;
+};
+
+struct CloseFrame {
+	QImage pixels;
+	QRect bounds;
+	float radius;
+	qint64 captured;
+	bool destroyedOnly = false;
+
+	[[nodiscard]] bool ready(HWND hwnd) const {
+		return !IsWindow(hwnd) || (!this->destroyedOnly && !IsWindowVisible(hwnd));
 	}
+};
+
+struct CachedCloseFrame {
+	DWORD pid;
+	CloseFrame frame;
+};
+
+struct CloseCache {
+	std::mutex mutex;
+	std::map<HWND, CachedCloseFrame> frames;
+	qint64 bytes = 0;
+	quint64 generation = 0;
+};
+
+CloseCache& closeCache() {
+	static auto* cache = new CloseCache;
+	return *cache;
+}
+
+void forgetCachedFrame(CloseCache& cache, std::map<HWND, CachedCloseFrame>::iterator it) {
+	cache.bytes -= it->second.frame.pixels.sizeInBytes();
+	cache.frames.erase(it);
+}
+
+struct ClosingTile {
+	ComPtr<IDCompositionVisual> visual;
+	QRect bounds;
+	qint64 end;
 };
 
 struct Graphics {
@@ -262,6 +436,10 @@ public:
 	explicit Scene(const QRect& work): work(work) {
 		this->idle.setSingleShot(true);
 		QObject::connect(&this->idle, &QTimer::timeout, &this->idle, [this] { this->settle(); });
+		this->closeExpiry.setSingleShot(true);
+		QObject::connect(&this->closeExpiry, &QTimer::timeout, &this->closeExpiry, [this] {
+			this->closeFrames.clear();
+		});
 		this->sample.setTimerType(Qt::PreciseTimer);
 		this->sample.setInterval(9);
 		QObject::connect(&this->sample, &QTimer::timeout, &this->sample, [this] { this->refresh(); });
@@ -269,17 +447,25 @@ public:
 
 	~Scene() { this->hide(); }
 
-	bool show(const QList<DwindleTile>& plan);
+	bool show(const QList<DwindleTile>& plan, const QRect& layoutWork);
+	void snapshotClose(HWND window);
+	void acceptCachedClose(HWND window, CloseFrame frame);
+	[[nodiscard]] bool hasClosingTile() const;
 	void hold();
 	void hide();
 	[[nodiscard]] bool visible() const { return this->host != nullptr; }
 	[[nodiscard]] bool matches(const QList<DwindleTile>& plan) const;
+	[[nodiscard]] QRect frameForDrag(HWND window) const;
 
 	QRect work;
 
 private:
+	QRect visibleWork;
 	bool prepare();
+	void publishDragScene() const;
 	bool makeTileColor();
+	bool addDiagnosticMarker(Tile& tile);
+	void inspectParticipants(qint64 now);
 	ComPtr<IDCompositionSurface> upload(const QImage& image);
 	bool addTile(Tile& tile, const DwindleTile& placement, const QImage& before);
 	bool awaitSize(Tile& tile, const QRect& target);
@@ -287,30 +473,41 @@ private:
 	bool retainedVisible(Tile& tile, bool visible);
 	bool resizeLiveClip(Tile& tile);
 	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now);
-	bool popIn(Tile& tile, const QRect& target, qint64 now, bool fadeIn);
+	bool pop(Tile& tile, const QRect& target, qint64 now, bool closing, bool fadeIn);
+	bool addClosingTiles(qint64 now);
+	bool removeFinishedClosingTiles(qint64 now);
 	bool addSource(Thumbnail& thumb, HWND window, const QRect& crop = {});
 	bool setNativeSize(Thumbnail& thumb, HWND window);
 	void refresh();
 	void settle();
 	bool raise();
 	[[nodiscard]] HWND coveringHost() const;
-	bool animate(float from, float to, qint64 time, auto setter);
+	[[nodiscard]] QList<HWND> occludingTiles() const;
+	bool parkOccluders(qint64 now);
+	bool animate(float from, float to, qint64 time, auto setter, double duration = Duration);
 
 	HWND host = nullptr;
 	HWND backdropWindow = nullptr;
+	HMONITOR barMonitor = nullptr;
 	ComPtr<IDCompositionDesktopDevice> desktopDevice;
 	ComPtr<IDCompositionDevice> device;
 	ComPtr<IDCompositionTarget> target;
 	ComPtr<IDCompositionVisual> root;
 	ComPtr<IDCompositionSurface> tileColor;
+	ComPtr<IDCompositionSurface> diagnosticColor;
 	Thumbnail backdrop;
 	std::map<HWND, std::unique_ptr<Tile>> tiles;
+	int lastTileOrder = 0;
+	std::map<HWND, CloseFrame> closeFrames;
+	QList<ClosingTile> closingTiles;
+	QTimer closeExpiry;
 	QTimer idle;
 	QTimer sample;
 	int retries = 0;
 	HWND stranger = nullptr;
 	qint64 strangerSince = 0;
 	qint64 holdUntil = 0;
+	qint64 occlusionStarted = 0;
 	QImage coverFrame;
 	bool released = false;
 	bool finishing = false;
@@ -461,7 +658,7 @@ bool Scene::setNativeSize(Thumbnail& thumb, HWND window) {
 	return true;
 }
 
-bool Scene::animate(float from, float to, qint64 time, auto setter) {
+bool Scene::animate(float from, float to, qint64 time, auto setter, double duration) {
 	if (from == to) return SUCCEEDED(setter(to));
 	ComPtr<IDCompositionAnimation> animation;
 	LARGE_INTEGER begin {};
@@ -469,14 +666,29 @@ bool Scene::animate(float from, float to, qint64 time, auto setter) {
 	if (FAILED(this->device->CreateAnimation(animation.GetAddressOf()))
 	    || FAILED(animation->SetAbsoluteBeginTime(begin)))
 		return false;
-	for (const auto& segment: dwindle::curveSegments(from, to, Duration)) {
+	for (const auto& segment: dwindle::curveSegments(from, to, duration)) {
 		if (FAILED(animation->AddCubic(
 		        segment.begin, static_cast<float>(segment.value), static_cast<float>(segment.linear),
 		        static_cast<float>(segment.quadratic), static_cast<float>(segment.cubic)
 		    )))
 			return false;
 	}
-	return SUCCEEDED(animation->End(Duration, to)) && SUCCEEDED(setter(animation.Get()));
+	return SUCCEEDED(animation->End(duration, to)) && SUCCEEDED(setter(animation.Get()));
+}
+
+bool Scene::addDiagnosticMarker(Tile& tile) {
+	if (!diagnosticsEnabled()) return true;
+	if (this->diagnosticColor == nullptr) {
+		auto color = QImage(12, 12, QImage::Format_RGB32);
+		color.fill(0xffff00ff);
+		this->diagnosticColor = this->upload(color);
+		if (this->diagnosticColor == nullptr) return false;
+	}
+	return SUCCEEDED(this->device->CreateVisual(tile.diagnosticMarker.GetAddressOf()))
+	    && SUCCEEDED(tile.diagnosticMarker->SetContent(this->diagnosticColor.Get()))
+	    && SUCCEEDED(tile.diagnosticMarker->SetOffsetX(24.0f))
+	    && SUCCEEDED(tile.diagnosticMarker->SetOffsetY(24.0f))
+	    && SUCCEEDED(tile.container->AddVisual(tile.diagnosticMarker.Get(), FALSE, nullptr));
 }
 
 bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& before) {
@@ -564,17 +776,18 @@ void Scene::retain(Tile& tile, const DwindleTile& placement, const QImage& befor
 
 bool Scene::retainedVisible(Tile& tile, bool visible) {
 	if (tile.showingRetained == visible || tile.retained == nullptr) return false;
-	const auto hr = visible ? tile.container->AddVisual(tile.retained.Get(), FALSE, nullptr)
+	const auto hr = visible ? tile.container->AddVisual(tile.retained.Get(), FALSE, tile.diagnosticMarker.Get())
 	                        : tile.container->RemoveVisual(tile.retained.Get());
 	if (FAILED(hr)) return false;
 	tile.showingRetained = visible;
 	return true;
 }
 
-bool Scene::popIn(Tile& tile, const QRect& target, qint64 now, bool fadeIn) {
+bool Scene::pop(Tile& tile, const QRect& target, qint64 now, bool closing, bool fadeIn) {
 	tile.from = target;
 	tile.target = target;
 	tile.start = now;
+	tile.popStart = closing ? 0 : now;
 	const auto local = target.translated(-this->work.topLeft());
 	const auto radius = static_cast<float>(
 	    std::min({double(tile.radius), target.width() / 2.0, target.height() / 2.0})
@@ -593,12 +806,15 @@ bool Scene::popIn(Tile& tile, const QRect& target, qint64 now, bool fadeIn) {
 	    || FAILED(tile.pop->SetCenterY(target.height() / 2.0f))
 	    || FAILED(this->device->CreateEffectGroup(tile.fade.GetAddressOf())))
 		return false;
-	return this->animate(static_cast<float>(PopInScale), 1.0f, now,
-	                     [&tile](auto value) { return tile.pop->SetScaleX(value); })
-	    && this->animate(static_cast<float>(PopInScale), 1.0f, now,
-	                     [&tile](auto value) { return tile.pop->SetScaleY(value); })
-	    && this->animate(fadeIn ? 0.0f : 1.0f, 1.0f, now,
-	                     [&tile](auto value) { return tile.fade->SetOpacity(value); })
+	const auto duration = closing ? PopOutDuration : Duration;
+	const auto fromScale = closing ? 1.0f : PopInScale;
+	const auto toScale = closing ? PopOutScale : 1.0f;
+	return this->animate(fromScale, toScale, now,
+	                     [&tile](auto value) { return tile.pop->SetScaleX(value); }, duration)
+	    && this->animate(fromScale, toScale, now,
+	                     [&tile](auto value) { return tile.pop->SetScaleY(value); }, duration)
+	    && this->animate(fadeIn ? 0.0f : 1.0f, closing ? 0.0f : 1.0f, now,
+	                     [&tile](auto value) { return tile.fade->SetOpacity(value); }, duration)
 	    && SUCCEEDED(tile.container->SetTransform(tile.pop.Get()))
 	    && SUCCEEDED(tile.container->SetEffect(tile.fade.Get()));
 }
@@ -647,6 +863,119 @@ bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64
 	    });
 }
 
+void Scene::snapshotClose(HWND window) {
+	if (!IsWindowVisible(window) || IsIconic(window) || cloaked(window)) return;
+
+	auto bounds = frame(window);
+	auto radius = windowRadius(window);
+	qCDebug(logDwindleScene) << "Dwindle close capture" << window << bounds << this->work;
+	const auto now = counter();
+	if (this->host != nullptr && IsWindowVisible(this->host)) {
+		if (this->coveringHost() != nullptr) return;
+		auto found = this->tiles.find(window);
+		if (found == this->tiles.end()) return;
+		const auto& tile = *found->second;
+		const auto box = tile.at(now);
+		const auto size = tile.showingRetained ? tile.retainedSize : tile.liveSize;
+		if (tile.waitingForSize || (tile.pop != nullptr && now - tile.start < Duration * frequency())
+		    || size.width() < box.width() - 1 || size.height() < box.height() - 1
+		    || std::ranges::any_of(this->tiles, [window, box, now](const auto& other) {
+			    return other.first != window && other.second->at(now).intersects(box);
+		    })
+		    || std::ranges::any_of(this->closingTiles, [box](const auto& other) {
+			    return box.intersects(QRectF(other.bounds));
+		    }))
+			return;
+		bounds = box.toRect();
+		radius = tile.radius;
+	}
+	if (bounds.isEmpty() || !this->work.contains(bounds)) return;
+	const auto uncovered = isUncovered(window, bounds, this->host);
+	auto pixels = uncovered ? captureWorkspace(bounds) : captureWindowForClose(window, bounds.size());
+	if (pixels.isNull()) {
+		qCDebug(logDwindleScene) << "Dwindle close capture failed" << window << "uncovered" << uncovered;
+		return;
+	}
+	qCDebug(logDwindleScene) << "Dwindle close captured" << window << "uncovered" << uncovered;
+
+	this->closeFrames.insert_or_assign(window, CloseFrame {std::move(pixels), bounds, radius, now});
+	this->closeExpiry.start(static_cast<int>(CloseFrameLifetime * 1000));
+}
+
+void Scene::acceptCachedClose(HWND window, CloseFrame frame) {
+	if (this->closeFrames.contains(window)) return;
+	this->closeFrames.emplace(window, std::move(frame));
+	this->closeExpiry.start(static_cast<int>(CloseFrameLifetime * 1000));
+}
+
+bool Scene::hasClosingTile() const {
+	const auto now = counter();
+	return std::ranges::any_of(this->closeFrames, [now](const auto& entry) {
+		return now - entry.second.captured <= CloseFrameLifetime * frequency()
+		    && entry.second.ready(entry.first);
+	});
+}
+
+bool Scene::addClosingTiles(qint64 now) {
+	bool added = false;
+	for (auto it = this->closeFrames.begin(); it != this->closeFrames.end();) {
+		const auto& [hwnd, close] = *it;
+		if (now - close.captured > CloseFrameLifetime * frequency()) {
+			it = this->closeFrames.erase(it);
+			continue;
+		}
+		if (!close.ready(hwnd)) {
+			++it;
+			continue;
+		}
+
+		auto content = this->upload(close.pixels);
+		const auto start = counter();
+		Tile tile;
+		tile.radius = close.radius;
+		if (content != nullptr && SUCCEEDED(this->device->CreateVisual(tile.container.GetAddressOf()))
+		    && SUCCEEDED(this->device->CreateRectangleClip(tile.clip.GetAddressOf()))
+		    && SUCCEEDED(tile.clip->SetLeft(0.0f)) && SUCCEEDED(tile.clip->SetTop(0.0f))
+		    && SUCCEEDED(tile.container->SetClip(tile.clip.Get()))
+		    && SUCCEEDED(tile.container->SetContent(content.Get()))
+		    && this->pop(tile, close.bounds, start, true, false)
+		    && SUCCEEDED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr))) {
+			const auto end = start + static_cast<qint64>(PopOutDuration * frequency());
+			this->closingTiles.append(ClosingTile {std::move(tile.container), close.bounds, end});
+			added = true;
+			qCDebug(logDwindleScene) << "Animating Dwindle close" << hwnd << close.bounds;
+		}
+		it = this->closeFrames.erase(it);
+	}
+	return added;
+}
+
+bool Scene::removeFinishedClosingTiles(qint64 now) {
+	const auto count = this->closingTiles.size();
+	this->closingTiles.removeIf([this, now](const ClosingTile& tile) {
+		return now >= tile.end && SUCCEEDED(this->root->RemoveVisual(tile.visual.Get()));
+	});
+	return count != this->closingTiles.size();
+}
+
+void Scene::publishDragScene() const {
+	DragScene scene {this->visibleWork, {}};
+	scene.tiles.reserve(static_cast<qsizetype>(this->tiles.size()));
+	for (const auto& [hwnd, tile]: this->tiles) {
+		scene.tiles.append(DragTile {hwnd, *tile, tile->order});
+	}
+	std::ranges::sort(scene.tiles, std::greater {}, &DragTile::order);
+	auto& registry = dragScenes();
+	auto lock = std::lock_guard(registry.mutex);
+	registry.byHost.insert_or_assign(this->host, std::move(scene));
+}
+
+QRect Scene::frameForDrag(HWND window) const {
+	const auto found = this->tiles.find(window);
+	if (this->host == nullptr || !IsWindowVisible(this->host) || found == this->tiles.end()) return {};
+	return found->second->shownAt(counter()).toRect();
+}
+
 bool Scene::matches(const QList<DwindleTile>& plan) const {
 	if (plan.size() != static_cast<qsizetype>(this->tiles.size())) return false;
 	return std::all_of(plan.begin(), plan.end(), [this](const auto& placement) {
@@ -655,7 +984,7 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 	});
 }
 
-bool Scene::show(const QList<DwindleTile>& plan) {
+bool Scene::show(const QList<DwindleTile>& plan, const QRect& layoutWork) {
 	if (!this->prepare()) return false;
 	for (auto it = this->tiles.begin(); it != this->tiles.end();) {
 		auto present = std::any_of(plan.begin(), plan.end(), [hwnd = it->first](const auto& tile) {
@@ -666,6 +995,7 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 			continue;
 		}
 		if (FAILED(this->root->RemoveVisual(it->second->container.Get()))) return false;
+		if (releaser()) releaser()({it->first});
 		it = this->tiles.erase(it);
 	}
 	const auto needFrame = this->tiles.empty() && std::ranges::any_of(plan, [](const auto& tile) {
@@ -685,12 +1015,23 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		auto [it, added] = this->tiles.try_emplace(placement.window);
 		if (!added) continue;
 		it->second = std::make_unique<Tile>();
-		if (!this->addTile(*it->second, placement, before)) {
+		it->second->order = ++this->lastTileOrder;
+		if (!this->addTile(*it->second, placement, before) || !this->addDiagnosticMarker(*it->second)) {
 			qCDebug(logDwindleScene) << "Could not attach tile" << placement.window;
 			return false;
 		}
 	}
 	const auto fresh = !IsWindowVisible(this->host);
+	this->visibleWork = fresh ? layoutWork : this->visibleWork.united(layoutWork);
+	for (const auto& placement: plan) {
+		this->visibleWork = this->visibleWork.united(placement.previous.intersected(this->work));
+	}
+	const auto clip = this->visibleWork.translated(-this->work.topLeft());
+	const D2D_RECT_F bounds {
+	    static_cast<float>(clip.x()), static_cast<float>(clip.y()),
+	    static_cast<float>(clip.x() + clip.width()), static_cast<float>(clip.y() + clip.height()),
+	};
+	if (FAILED(this->root->SetClip(bounds))) return false;
 	const auto start = counter();
 	QList<QRect> targets;
 	targets.reserve(plan.size());
@@ -717,25 +1058,41 @@ bool Scene::show(const QList<DwindleTile>& plan) {
 		auto& tile = *this->tiles.at(placement.window);
 		const auto scheduled = origins[i].has_value()
 		                         ? this->update(tile, *origins[i], placement.target, start)
-		                         : this->popIn(tile, placement.target, start, placement.previous.isEmpty());
+		                         : this->pop(tile, placement.target, start, false, placement.previous.isEmpty());
 		if (!scheduled) {
 			qCDebug(logDwindleScene) << "Could not schedule tile" << placement.window;
 			return false;
 		}
 	}
+	if (diagnosticsEnabled()) {
+		for (const auto& placement: plan) {
+			auto& tile = *this->tiles.at(placement.window);
+			tile.diagnosticState = -1;
+		}
+	}
+	const auto closing = this->addClosingTiles(start);
+	if (plan.isEmpty() && !closing && this->closingTiles.isEmpty()) {
+		this->hide();
+		return false;
+	}
 	if (!succeeded(this->device->Commit(), "Commit")) return false;
 	if (fresh && !this->raise()) return false;
+	this->publishDragScene();
 	this->retries = 0;
 	this->released = false;
 	this->finishing = false;
 	this->hurrying = false;
-	this->idle.start(static_cast<int>(Duration * 1000) + SettleMs);
+	this->idle.start(static_cast<int>((plan.isEmpty() ? PopOutDuration : Duration) * 1000) + SettleMs);
 	this->sample.start();
 	qCDebug(logDwindleScene) << "Animating" << plan.size() << "tiles in" << this->work;
 	return true;
 }
 
 bool Scene::raise() {
+	if (this->barMonitor == nullptr) {
+		this->barMonitor = MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL);
+		WinPanelWindow::setDwindleBarAbove(this->barMonitor, true);
+	}
 	auto panels = WinPanelWindow::aboveWindowHandles();
 	auto above = HWND_TOPMOST;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
@@ -753,10 +1110,72 @@ HWND Scene::coveringHost() const {
 	{
 		if (IsWindowVisible(above) && !cloaked(above)
 		    && (GetWindowLongPtrW(above, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0
-		    && frame(above).intersects(this->work))
+		    && frame(above).intersects(this->visibleWork))
 			return above;
 	}
 	return nullptr;
+}
+
+QList<HWND> Scene::occludingTiles() const {
+	QList<HWND> windows;
+	for (auto* above = GetWindow(this->host, GW_HWNDPREV); above != nullptr;
+	     above = GetWindow(above, GW_HWNDPREV))
+	{
+		if (this->tiles.contains(above) && IsWindowVisible(above) && !IsIconic(above)
+		    && !cloaked(above) && frame(above).intersects(this->visibleWork))
+			windows.append(above);
+	}
+	return windows;
+}
+
+bool Scene::parkOccluders(qint64 now) {
+	const auto windows = this->occludingTiles();
+	if (windows.isEmpty() || !occlusionStager()) return false;
+	for (auto* hwnd: windows) {
+		auto& tile = *this->tiles.at(hwnd);
+		if (tile.occlusionRequested == 0) {
+			if (!occlusionStager()(hwnd)) return false;
+			tile.occlusionRequested = now;
+			if (this->occlusionStarted == 0) this->occlusionStarted = now;
+			qCDebug(logDwindleScene) << "Dwindle parked covering tile" << hwnd;
+		} else if (static_cast<double>(now - tile.occlusionRequested) / frequency() > OcclusionMoveGrace) {
+			qCDebug(logDwindleScene) << "Dwindle covering tile did not park" << hwnd;
+			return false;
+		}
+	}
+	return true;
+}
+
+void Scene::inspectParticipants(qint64 now) {
+	QSet<HWND> inFront;
+	for (auto* above = GetWindow(this->host, GW_HWNDPREV); above != nullptr;
+	     above = GetWindow(above, GW_HWNDPREV))
+	{
+		if (this->tiles.contains(above)) inFront.insert(above);
+	}
+	for (auto& [hwnd, tile]: this->tiles) {
+		if (!IsWindow(hwnd)) continue;
+		const auto actual = frame(hwnd);
+		const auto onScreen = IsWindowVisible(hwnd) && !cloaked(hwnd) && actual.intersects(this->work);
+		const auto exposed = onScreen && inFront.contains(hwnd);
+		const auto state = (onScreen ? 1 : 0) | (exposed ? 2 : 0)
+		                 | (tile->waitingForSize ? 4 : 0) | (tile->showingRetained ? 8 : 0);
+		const auto size = tile->source.sourceCrop.size();
+		const auto offset = tile->source.contentOffset;
+		if (state == tile->diagnosticState && size == tile->diagnosticSize
+		    && offset == tile->diagnosticOffset)
+			continue;
+		tile->diagnosticState = state;
+		tile->diagnosticSize = size;
+		tile->diagnosticOffset = offset;
+		qCDebug(logDwindleScene) << "Dwindle participant" << hwnd << "visible" << onScreen
+		                         << "aboveScene" << exposed << "released" << this->released
+		                         << "ageMs" << (now - tile->start) * 1000 / frequency()
+		                         << "actual" << actual << "visual" << tile->at(now)
+		                         << "target" << tile->target << "source" << size
+		                         << "offset" << offset << "waiting" << tile->waitingForSize
+		                         << "retained" << tile->showingRetained;
+	}
 }
 
 void Scene::refresh() {
@@ -764,7 +1183,16 @@ void Scene::refresh() {
 		this->hide();
 		return;
 	}
-	if (cloaked(this->host) || this->coveringHost() != nullptr) {
+	const auto now = counter();
+	if (diagnosticsEnabled()) this->inspectParticipants(now);
+	if (!this->released && this->occlusionStarted != 0
+	    && static_cast<double>(now - this->occlusionStarted) / frequency() > OcclusionStageLimit) {
+		qCDebug(logDwindleScene) << "Dwindle ending after a covering tile was parked";
+		this->finish(true);
+		return;
+	}
+	if (!this->released
+	    && (cloaked(this->host) || this->coveringHost() != nullptr || !this->occludingTiles().isEmpty())) {
 		auto* over = this->coveringHost();
 		const auto wasCloaked = cloaked(this->host);
 		for (auto pass = 0; pass < 16; ++pass) {
@@ -774,7 +1202,13 @@ void Scene::refresh() {
 			             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 		}
 		const auto raised = this->raise();
-		if (!raised || cloaked(this->host) || this->coveringHost() != nullptr) {
+		auto* remaining = this->coveringHost();
+		const auto covered = !this->occludingTiles().isEmpty();
+		if (raised && !cloaked(this->host) && covered
+		    && (remaining == nullptr || this->tiles.contains(remaining)) && this->parkOccluders(now)) {
+			return;
+		}
+		if (!raised || cloaked(this->host) || remaining != nullptr || covered) {
 			wchar_t name[128] {};
 			if (over != nullptr && over != this->host) GetClassNameW(over, name, 128);
 			qCDebug(logDwindleScene) << "Scene host stays hidden: cloaked" << wasCloaked << "topmost"
@@ -792,9 +1226,8 @@ void Scene::refresh() {
 		this->finish();
 		return;
 	}
-	const auto now = counter();
 	const auto foreground = GetForegroundWindow();
-	const auto intersecting = this->work.intersects(frame(foreground));
+	const auto intersecting = this->visibleWork.intersects(frame(foreground));
 	if (foreground != nullptr && intersecting && !this->tiles.contains(foreground)) {
 		if (foreground != this->stranger) {
 			this->stranger = foreground;
@@ -807,7 +1240,7 @@ void Scene::refresh() {
 	} else {
 		this->stranger = nullptr;
 	}
-	bool changed = false;
+	bool changed = this->removeFinishedClosingTiles(now);
 	for (auto& [hwnd, tile]: this->tiles) {
 		if (!IsWindow(hwnd) || !this->setNativeSize(tile->source, hwnd)) continue;
 		if ((tile->liveSize != tile->source.sourceCrop.size()
@@ -819,7 +1252,7 @@ void Scene::refresh() {
 			if (std::abs(size.width() - tile->target.width()) > 4
 			    || std::abs(size.height() - tile->target.height()) > 4)
 				continue;
-			if (SUCCEEDED(tile->container->AddVisual(tile->liveFrame.Get(), FALSE, nullptr))) {
+			if (SUCCEEDED(tile->container->AddVisual(tile->liveFrame.Get(), FALSE, tile->diagnosticMarker.Get()))) {
 				tile->waitingForSize = false;
 				tile->container->RemoveVisual(tile->placeholder.Get());
 				tile->placeholder.Reset();
@@ -839,6 +1272,9 @@ void Scene::refresh() {
 void Scene::release() {
 	if (this->released) return;
 	this->released = true;
+	this->occlusionStarted = 0;
+	for (auto& [hwnd, tile]: this->tiles) tile->occlusionRequested = 0;
+	if (diagnosticsEnabled()) qCDebug(logDwindleScene) << "Dwindle handoff" << this->tiles.size();
 	QList<HWND> windows;
 	for (const auto& [hwnd, tile]: this->tiles) windows.append(hwnd);
 	if (!windows.isEmpty() && releaser()) releaser()(windows);
@@ -896,6 +1332,11 @@ void Scene::settle() {
 }
 
 void Scene::hide() {
+	{
+		auto& registry = dragScenes();
+		auto lock = std::lock_guard(registry.mutex);
+		registry.byHost.erase(this->host);
+	}
 	this->idle.stop();
 	this->sample.stop();
 	this->release();
@@ -905,9 +1346,13 @@ void Scene::hide() {
 	this->holdUntil = 0;
 	this->coverFrame = {};
 	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
+	if (this->barMonitor != nullptr)
+		WinPanelWindow::setDwindleBarAbove(std::exchange(this->barMonitor, nullptr), false);
 	if (this->target != nullptr) this->target->SetRoot(nullptr);
 	if (this->device != nullptr) this->device->Commit();
 	this->tiles.clear();
+	this->lastTileOrder = 0;
+	this->closingTiles.clear();
 	if (this->backdrop.handle != nullptr) {
 		DwmUnregisterThumbnail(this->backdrop.handle);
 		this->backdrop.handle = nullptr;
@@ -915,6 +1360,7 @@ void Scene::hide() {
 	this->backdrop.visual.Reset();
 	this->root.Reset();
 	this->tileColor.Reset();
+	this->diagnosticColor.Reset();
 	this->target.Reset();
 	this->device.Reset();
 	this->desktopDevice.Reset();
@@ -937,18 +1383,108 @@ bool DwindleScene::enabled() {
 
 void DwindleScene::warmUp() { (void)graphics(); }
 
+void DwindleScene::snapshotClose(HMONITOR monitor, const QRect& work, HWND window) {
+	if (work.isEmpty()) return;
+	auto& scene = scenes()[monitor];
+	const auto viewport = sceneViewport(monitor, work);
+	if (scene == nullptr || scene->work != viewport) scene = std::make_unique<Scene>(viewport);
+	scene->snapshotClose(window);
+}
+
+void DwindleScene::cacheCloseFrame(HWND window, const QRect& bounds) {
+	if (!IsWindowVisible(window) || IsIconic(window) || cloaked(window)
+	    || IsHungAppWindow(window) || frame(window) != bounds) return;
+
+	DWORD pid = 0;
+	DWORD affinity = 0;
+	RECT rect {};
+	if (!GetWindowThreadProcessId(window, &pid) || !GetWindowRect(window, &rect)
+	    || (GetWindowDisplayAffinity(window, &affinity) && affinity != WDA_NONE)) return;
+
+	const QRect raw(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+	if (!raw.contains(bounds)) return;
+	const auto radius = windowRadius(window);
+	const auto captured = counter();
+	quint64 generation = 0;
+	{
+		auto& cache = closeCache();
+		auto lock = std::lock_guard(cache.mutex);
+		generation = cache.generation;
+	}
+
+	startCloseCapture([window, raw, bounds, radius, captured, pid, generation] {
+		auto pixels = captureWindowPixels(window, raw, bounds);
+		DWORD currentPid = 0;
+		if (pixels.isNull() || !GetWindowThreadProcessId(window, &currentPid)
+		    || pid != currentPid || frame(window) != bounds) return;
+
+		auto& cache = closeCache();
+		auto lock = std::lock_guard(cache.mutex);
+		if (cache.generation != generation) return;
+		if (auto it = cache.frames.find(window); it != cache.frames.end()) forgetCachedFrame(cache, it);
+		while (!cache.frames.empty() && cache.bytes + pixels.sizeInBytes() > CloseCacheBudget) {
+			auto oldest = std::ranges::min_element(cache.frames, {}, [](const auto& entry) {
+				return entry.second.frame.captured;
+			});
+			forgetCachedFrame(cache, oldest);
+		}
+		if (pixels.sizeInBytes() > CloseCacheBudget) return;
+		cache.bytes += pixels.sizeInBytes();
+		cache.frames.emplace(window, CachedCloseFrame {pid, {std::move(pixels), bounds, radius, captured}});
+	});
+}
+
+void DwindleScene::useCachedCloseFrame(HMONITOR monitor, const QRect& work, HWND window, quint32 pid,
+                                      const QRect& bounds, bool destroyedOnly) {
+	CloseFrame snapshot;
+	{
+		auto& cache = closeCache();
+		auto lock = std::lock_guard(cache.mutex);
+		auto found = cache.frames.find(window);
+		if (found == cache.frames.end()) return;
+		const auto& stored = found->second;
+		if (stored.pid == pid && stored.frame.bounds == bounds
+		    && counter() - stored.frame.captured <= CachedCloseLifetime * frequency())
+			snapshot = stored.frame;
+		if (destroyedOnly) forgetCachedFrame(cache, found);
+	}
+	if (snapshot.pixels.isNull()) return;
+
+	auto& scene = scenes()[monitor];
+	const auto viewport = sceneViewport(monitor, work);
+	if (scene == nullptr || scene->work != viewport) scene = std::make_unique<Scene>(viewport);
+	snapshot.captured = counter();
+	snapshot.destroyedOnly = destroyedOnly;
+	scene->acceptCachedClose(window, std::move(snapshot));
+}
+
+void DwindleScene::clearCloseCache() {
+	auto& cache = closeCache();
+	auto lock = std::lock_guard(cache.mutex);
+	cache.frames.clear();
+	cache.bytes = 0;
+	++cache.generation;
+}
+
+bool DwindleScene::hasClosingTile(HMONITOR monitor, const QRect& work) {
+	auto found = scenes().find(monitor);
+	return found != scenes().end() && found->second->work == sceneViewport(monitor, work) && found->second->hasClosingTile();
+}
+
 void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed) {
-	if (tiles.isEmpty() || work.isEmpty()) {
+	auto found = scenes().find(monitor);
+	const auto closing = DwindleScene::hasClosingTile(monitor, work);
+	if (work.isEmpty() || (tiles.isEmpty() && !closing)) {
 		DwindleScene::dismiss(monitor);
 		return;
 	}
-	auto found = scenes().find(monitor);
-	if (!changed && (found == scenes().end() || !found->second->visible())) return;
-	if (found != scenes().end() && found->second->visible()
-	    && found->second->work == work && found->second->matches(tiles)) return;
+	if (!changed && !closing && (found == scenes().end() || !found->second->visible())) return;
+	const auto viewport = sceneViewport(monitor, work);
+	if (!closing && found != scenes().end() && found->second->visible()
+	    && found->second->work == viewport && found->second->matches(tiles)) return;
 	auto& scene = scenes()[monitor];
-	if (scene == nullptr || scene->work != work) scene = std::make_unique<Scene>(work);
-	if (!scene->show(tiles)) {
+	if (scene == nullptr || scene->work != viewport) scene = std::make_unique<Scene>(viewport);
+	if (!scene->show(tiles, work)) {
 		qCDebug(logDwindleScene) << "Using immediate placement";
 		DwindleScene::dismiss(monitor);
 	}
@@ -957,12 +1493,13 @@ void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<Dwin
 void DwindleScene::cover(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles) {
 	if (work.isEmpty()) return;
 	auto& scene = scenes()[monitor];
-	if (scene != nullptr && scene->visible() && scene->work == work) {
+	const auto viewport = sceneViewport(monitor, work);
+	if (scene != nullptr && scene->visible() && scene->work == viewport) {
 		scene->hold();
 		return;
 	}
-	if (scene == nullptr || scene->work != work) scene = std::make_unique<Scene>(work);
-	if (!scene->show(tiles)) {
+	if (scene == nullptr || scene->work != viewport) scene = std::make_unique<Scene>(viewport);
+	if (!scene->show(tiles, work)) {
 		qCDebug(logDwindleScene) << "Could not cover" << tiles.size() << "tiles";
 		DwindleScene::dismiss(monitor);
 		return;
@@ -985,6 +1522,39 @@ void DwindleScene::dismiss(HMONITOR monitor) {
 bool DwindleScene::presenting(HMONITOR monitor) {
 	auto found = scenes().find(monitor);
 	return found != scenes().end() && found->second->visible();
+}
+
+std::optional<HWND> DwindleScene::windowAt(POINT point, HWND nativeHit) {
+	if (!DwindleScene::enabled()) return std::nullopt;
+	const QPoint cursor(point.x, point.y);
+	auto& registry = dragScenes();
+	auto lock = std::lock_guard(registry.mutex);
+	const auto now = counter();
+	for (const auto& [host, scene]: registry.byHost) {
+		if (!scene.work.contains(cursor)) continue;
+		for (auto* hwnd = GetWindow(host, GW_HWNDPREV); nativeHit != nullptr && hwnd != nullptr;
+		     hwnd = GetWindow(hwnd, GW_HWNDPREV))
+		{
+			if (hwnd == nativeHit) return std::nullopt;
+		}
+		for (const auto& tile: scene.tiles) {
+			if (tile.frame.shownAt(now).contains(cursor)) return tile.window;
+		}
+		return static_cast<HWND>(nullptr);
+	}
+	return std::nullopt;
+}
+
+QRect DwindleScene::frameForDrag(HWND window) {
+	for (const auto& [monitor, scene]: scenes()) {
+		const auto frame = scene->frameForDrag(window);
+		if (!frame.isEmpty()) return frame;
+	}
+	return {};
+}
+
+void DwindleScene::onOcclusion(std::function<bool(HWND)> stage) {
+	occlusionStager() = std::move(stage);
 }
 
 void DwindleScene::onRelease(std::function<void(const QList<HWND>&)> release) {
