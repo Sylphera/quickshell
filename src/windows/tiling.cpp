@@ -2038,9 +2038,9 @@ void TilingManager::coverNewWindow(HWND hwnd) {
 		DwindleScene::cover(monitor, rects.work, plan);
 }
 
-QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window) const {
-	auto box = layout->tree->box(idOf(window));
+QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout) const {
 	auto area = layout->tree->area();
+	auto box = fillLayout ? area : layout->tree->box(idOf(window));
 	auto dpr = layout->screen->devicePixelRatio();
 	auto in = toPhysical(this->mGapsIn, dpr);
 	auto out = toPhysical(layout->special ? SPECIAL_GAPS_OUT : this->mGapsOut, dpr);
@@ -2527,7 +2527,8 @@ QHash<HWND, QRect> TilingManager::specialFrames() const {
 			if (found == this->managed.end() || this->stateOf(found->second) != State::Tiled) continue;
 			auto frame = found->second.fullscreen
 			               ? fullscreenFrame(window->hwnd(), monitor)
-			               : this->tileRect(layout.get(), window).translated(0, -this->mSpecialOffset);
+			               : this->tileRect(layout.get(), window, found->second.focusMaximized)
+			                     .translated(0, -this->mSpecialOffset);
 			frames.insert(window->hwnd(), frame);
 		}
 	}
@@ -3257,7 +3258,7 @@ bool TilingManager::moveDirection(Edge direction) {
 	auto* m = this->tiledActive();
 	if (m == nullptr) return false;
 
-	if (m->layout->special) {
+	if (m->layout->special && m->layout->tree->kind() != tiling::Kind::Dwindle) {
 		auto* next = this->neighbour(*m, direction);
 		if (next != nullptr && next->layout == m->layout) this->swapWindows(*m, *next);
 		return true;
@@ -3281,8 +3282,9 @@ bool TilingManager::moveDirection(Edge direction) {
 		this->swapWindows(*m, *next);
 	} else if (next != nullptr) {
 		this->moveToLayout(*m, next->layout, next->window);
-	} else if (auto* screen = this->screenInDirection(m->layout->screen, direction)) {
-		this->moveToLayout(*m, this->layoutAt(m->layout->desktop, screen, true), nullptr);
+	} else if (!m->layout->special) {
+		if (auto* screen = this->screenInDirection(m->layout->screen, direction))
+			this->moveToLayout(*m, this->layoutAt(m->layout->desktop, screen, true), nullptr);
 	}
 
 	return true;
@@ -3484,7 +3486,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	if (iter == this->managed.end()) return false;
 	this->warnFullscreenConflict(window);
 	auto& m = iter->second;
-	if (m.fullscreen && m.layout != nullptr && !m.layout->special && !window->minimized()
+	if (m.fullscreen && m.layout != nullptr && !window->minimized()
 	    && this->stateOf(m) == State::Tiled && !m.elevated
 	    && m.layout->tree->kind() == tiling::Kind::Dwindle && DwindleScene::enabled()
 	    && this->mAnimateMoves && this->sceneShows(m.layout, this->desktops->currentIndex())) {
@@ -3501,7 +3503,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 		window->activate();
 		return true;
 	}
-	if (m.layout == nullptr || m.layout->special || m.fullscreen || m.elevated || window->minimized()
+	if (m.layout == nullptr || m.fullscreen || m.elevated || window->minimized()
 	    || this->stateOf(m) != State::Tiled)
 		return false;
 	if (DwindleScene::enabled() && m.layout->tree->kind() == tiling::Kind::Dwindle
@@ -3518,6 +3520,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 		return true;
 	}
 
+	if (m.layout->special) return false;
 	auto* hwnd = window->hwnd();
 	m.maximizedTile = !m.maximizedTile;
 	m.maximizePending = false;
@@ -3718,6 +3721,14 @@ void TilingManager::updateFullscreenLook(Managed& m) {
 TrackedWindow* TilingManager::specialFullscreenWindow() const {
 	for (const auto& [window, m]: this->managed) {
 		if (m.fullscreen && Scratchpad::holds(window) && !window->minimized()) return window;
+	}
+	return nullptr;
+}
+
+TrackedWindow* TilingManager::specialMaximizedWindow() const {
+	for (const auto& [window, m]: this->managed) {
+		if (m.focusMaximized && m.layout != nullptr && m.layout->special && !window->minimized())
+			return window;
 	}
 	return nullptr;
 }

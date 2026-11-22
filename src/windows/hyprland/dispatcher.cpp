@@ -682,7 +682,7 @@ void Dispatcher::fullscreen(const QString& selector, int mode) {
 			return;
 	}
 
-	if (!special || mode == 1) window->setMaximized(!window->maximized());
+	if (!special) window->setMaximized(!window->maximized());
 }
 
 void Dispatcher::pin(TrackedWindow* window) {

@@ -286,6 +286,10 @@ bool Scratchpad::contains(const TrackedWindow* window) const {
 	return false;
 }
 
+bool Scratchpad::containsWindow(HWND hwnd) const {
+	return std::ranges::any_of(this->entries, [hwnd](const Entry& entry) { return entry.hwnd == hwnd; });
+}
+
 void Scratchpad::toggle() {
 	this->prune();
 	this->setShown(!this->mShown || this->hiding);
@@ -445,7 +449,7 @@ void Scratchpad::slide(bool in) {
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return;
 	this->slideGeneration++;
-	DwindleScene::drop(this->mMonitor);
+	if (in) DwindleScene::drop(this->mMonitor);
 
 	if (this->cover == nullptr) {
 		if (in) {
@@ -480,6 +484,7 @@ void Scratchpad::openCover(bool show) {
 	if (!rects.valid) return;
 	auto* tiling = TilingManager::active();
 	auto frames = tiling != nullptr ? tiling->specialFrames() : QHash<HWND, QRect>();
+	auto* maximized = tiling != nullptr ? tiling->specialMaximizedWindow() : nullptr;
 
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);
@@ -520,16 +525,16 @@ void Scratchpad::openCover(bool show) {
 
 	QList<HWND> stack;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-		for (const auto& entry: this->entries) {
-			if (entry.hwnd == hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd)) stack.prepend(hwnd);
-		}
+		if (this->containsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd)) stack.prepend(hwnd);
 	}
 	QList<CoverThumb> thumbs;
 	for (auto* hwnd: stack) {
+		if (maximized != nullptr && hwnd != maximized->hwnd() && frames.contains(hwnd)) continue;
 		QRect frame;
-		if (frames.contains(hwnd)) {
-			frame = frames.value(hwnd);
-		} else {
+		if (!show && maximized != nullptr && hwnd == maximized->hwnd())
+			frame = DwindleScene::frameForDrag(hwnd);
+		if (frame.isEmpty()) frame = frames.value(hwnd);
+		if (frame.isEmpty()) {
 			RECT bounds {};
 			if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
 				continue;
@@ -686,6 +691,13 @@ void Scratchpad::closeCover() {
 void Scratchpad::finishHide() {
 	this->hiding = false;
 	this->closeCover();
+	this->dimTimer.stop();
+	this->dimTarget = 0;
+	this->dimAlpha = 0;
+	if (this->dim != nullptr) {
+		SetLayeredWindowAttributes(this->dim, 0, 0, LWA_ALPHA);
+		ShowWindow(this->dim, SW_HIDE);
+	}
 	this->mShown = false;
 	this->openedDesktop = -1;
 	for (auto& entry: this->entries) this->park(entry);
@@ -725,6 +737,7 @@ void Scratchpad::relayout() {
 	if (tiling != nullptr) {
 		if (this->mShown && !this->preparing) {
 			if (auto* fullscreen = tiling->specialFullscreenWindow()) raise(fullscreen->hwnd());
+			else if (auto* maximized = tiling->specialMaximizedWindow()) raise(maximized->hwnd());
 		}
 		return;
 	}
@@ -742,6 +755,7 @@ void Scratchpad::relayout() {
 HWND Scratchpad::focusCandidate() const {
 	if (auto* tiling = TilingManager::active()) {
 		if (auto* fullscreen = tiling->specialFullscreenWindow()) return fullscreen->hwnd();
+		if (auto* maximized = tiling->specialMaximizedWindow()) return maximized->hwnd();
 	}
 	return this->entries.isEmpty() ? nullptr : this->entries.last().hwnd;
 }

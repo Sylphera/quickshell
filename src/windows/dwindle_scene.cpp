@@ -139,7 +139,26 @@ float windowRadius(HWND hwnd) {
 	const auto radius = qEnvironmentVariableIntValue(
 	    smallCorner ? "II_DWINDLE_SMALL_CORNER_RADIUS" : "II_DWINDLE_CORNER_RADIUS", &configured
 	);
-	const auto dip = configured && radius >= 0 && radius <= 64 ? radius : (smallCorner ? 4 : 8);
+	auto dip = configured && radius >= 0 && radius <= 64 ? radius : (smallCorner ? 4 : 8);
+	if (!configured) {
+		// Windhawk's custom-corner-radius hooks DWM itself: DWMWA_WINDOW_CORNER_PREFERENCE
+		// still reports the *style*, not the radius displayed by the compositor.
+		// Mirror the enabled mod's settings instead of assuming Windows' 4/8 DIP defaults.
+		constexpr auto* mod = L"SOFTWARE\\Windhawk\\Engine\\Mods\\custom-corner-radius";
+		DWORD disabled = 1;
+		DWORD size = sizeof(disabled);
+		if (RegGetValueW(HKEY_LOCAL_MACHINE, mod, L"Disabled", RRF_RT_REG_DWORD,
+		                 nullptr, &disabled, &size) == ERROR_SUCCESS && disabled == 0) {
+			constexpr auto* settings =
+			    L"SOFTWARE\\Windhawk\\Engine\\Mods\\custom-corner-radius\\Settings";
+			DWORD value = 0;
+			size = sizeof(value);
+			if (RegGetValueW(HKEY_LOCAL_MACHINE, settings,
+			                 smallCorner ? L"smallRadius" : L"radius", RRF_RT_REG_DWORD,
+			                 nullptr, &value, &size) == ERROR_SUCCESS && value <= 64)
+				dip = static_cast<int>(value);
+		}
+	}
 	const auto dpi = GetDpiForWindow(hwnd);
 	return dip * (dpi == 0 ? 1.0f : dpi / 96.0f);
 }
@@ -381,6 +400,13 @@ struct Tile: AnimatedFrame {
 	float opacityTarget = 1.0f;
 	qint64 opacityStart = 0;
 
+	[[nodiscard]] float opacityAt(qint64 now) const {
+		if (this->opacityStart == 0) return this->opacityTarget;
+		const auto elapsed = static_cast<double>(now - this->opacityStart) / (Duration * frequency());
+		return std::lerp(this->opacityFrom, this->opacityTarget,
+		                 static_cast<float>(dwindle::ease(elapsed)));
+	}
+
 	ComPtr<IDCompositionVisual> diagnosticMarker;
 	qint64 occlusionRequested = 0;
 	int diagnosticState = -1;
@@ -529,7 +555,7 @@ private:
 	ComPtr<IDCompositionVisual> handoffFrame;
 	Thumbnail backdrop;
 	std::unique_ptr<Thumbnail> fullscreenBar;
-	std::vector<std::unique_ptr<Thumbnail>> underlay;
+	std::map<HWND, std::unique_ptr<Thumbnail>> underlay;
 	ComPtr<IDCompositionVisual> dimVisual;
 	ComPtr<IDCompositionEffectGroup> dimFade;
 	ComPtr<IDCompositionSurface> dimColor;
@@ -629,6 +655,7 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 			continue;
 		}
 		if (hwnd == this->host || !IsWindowVisible(hwnd) || IsIconic(hwnd) || cloaked(hwnd)) continue;
+		if (Scratchpad::instance()->containsWindow(hwnd)) continue;
 		if (std::ranges::any_of(plan, [hwnd](const auto& tile) { return tile.window == hwnd; })) continue;
 		DWORD pid = 0;
 		GetWindowThreadProcessId(hwnd, &pid);
@@ -653,7 +680,7 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 		    || FAILED(thumb->visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y())))
 		    || FAILED(this->root->AddVisual(thumb->visual.Get(), FALSE, nullptr)))
 			return false;
-		this->underlay.push_back(std::move(thumb));
+		this->underlay.emplace(hwnd, std::move(thumb));
 	}
 	return true;
 }
@@ -1091,10 +1118,14 @@ void Scene::closeVisibleTile(HWND window, const Tile& tile) {
 	const auto bounds = tile.shownAt(now).toRect();
 	if (bounds.isEmpty() || !this->work.contains(bounds)) return;
 
-	auto opacity = 1.0f;
-	if (tile.fadingIn) {
+	auto opacity = tile.opacityAt(now);
+	if (tile.fadingIn && tile.opacityStart == 0) {
 		const auto progress = static_cast<double>(now - tile.popStart) / (Duration * frequency());
 		opacity = static_cast<float>(dwindle::ease(progress));
+	}
+	if (opacity <= 0.0f) {
+		this->closeFrames.erase(window);
+		return;
 	}
 	if (auto close = this->closeFrames.find(window); close != this->closeFrames.end()) {
 		close->second.bounds = bounds;
@@ -1196,6 +1227,17 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 
 bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused) {
 	if (!this->prepare(plan)) return false;
+	if (this->dim != nullptr) {
+		auto* scratchpad = Scratchpad::instance();
+		for (auto it = this->underlay.begin(); it != this->underlay.end();) {
+			if (IsWindowVisible(it->first) && !scratchpad->containsWindow(it->first)) {
+				++it;
+				continue;
+			}
+			if (FAILED(this->root->RemoveVisual(it->second->visual.Get()))) return false;
+			it = this->underlay.erase(it);
+		}
+	}
 	const auto continuing = !this->tiles.empty();
 	if (this->focused != focused) {
 		if (this->focused != nullptr) {
@@ -1341,10 +1383,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 		if (!continuing && tile->opacityTarget == 0.0f && target == 0.0f
 		    && FAILED(tile->fade->SetOpacity(0.0f))) return false;
 		if (tile->opacityTarget == target) continue;
-		const auto elapsed = static_cast<double>(start - tile->opacityStart) / (Duration * frequency());
-		const auto opacity = tile->opacityStart == 0 ? tile->opacityTarget
-		                   : std::lerp(tile->opacityFrom, tile->opacityTarget,
-		                               static_cast<float>(dwindle::ease(elapsed)));
+		const auto opacity = tile->opacityAt(start);
 		if (!this->animate(opacity, target, start, [&tile](auto value) {
 		        return tile->fade->SetOpacity(value);
 		    })) return false;
@@ -1480,11 +1519,18 @@ void Scene::refresh() {
 		this->hide();
 		return;
 	}
-	if (!this->released && this->occlusionStarted != 0
-	    && static_cast<double>(now - this->occlusionStarted) / frequency() > OcclusionStageLimit) {
-		qCDebug(logDwindleScene) << "Dwindle ending after a covering tile was parked";
-		this->finish(true);
-		return;
+	if (!this->released && this->occlusionStarted != 0) {
+		if (this->occludingTiles().isEmpty()) {
+			// The covering windows have finished parking. Don't abort the scene
+			// after the grace period: let the normal reflow/close animation settle.
+			// This matters for special, whose windows start in the topmost band.
+			this->occlusionStarted = 0;
+			for (auto& [hwnd, tile]: this->tiles) tile->occlusionRequested = 0;
+		} else if (static_cast<double>(now - this->occlusionStarted) / frequency() > OcclusionStageLimit) {
+			qCDebug(logDwindleScene) << "Dwindle ending with covering tiles still in front";
+			this->finish(true);
+			return;
+		}
 	}
 	if (!this->released
 	    && (cloaked(this->host) || this->coveringHost() != nullptr || !this->occludingTiles().isEmpty())) {

@@ -128,6 +128,7 @@ public:
 	bool toggleMaximize(TrackedWindow* window);
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
+	[[nodiscard]] TrackedWindow* specialMaximizedWindow() const;
 	void updateShellFullscreen();
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
@@ -279,7 +280,7 @@ private:
 	void leaveFullscreen(Managed& m);
 	void updateFullscreenLook(Managed& m);
 	void yieldFullscreenTo(Managed& m);
-	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
+	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout = false) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
 	void cacheNextCloseFrame();

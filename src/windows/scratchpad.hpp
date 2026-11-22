@@ -32,6 +32,7 @@ public:
 	[[nodiscard]] HWND dimWindow() const { return this->dim; }
 	[[nodiscard]] int dimLevel() const { return this->dimAlpha; }
 	[[nodiscard]] bool contains(const TrackedWindow* window) const;
+	[[nodiscard]] bool containsWindow(HWND hwnd) const;
 	[[nodiscard]] static bool holds(const TrackedWindow* window);
 	static void raiseWindow(HWND hwnd);
 
