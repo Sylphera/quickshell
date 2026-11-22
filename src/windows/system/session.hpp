@@ -15,9 +15,13 @@ class Session: public QObject {
 	Q_PROPERTY(bool canHibernate READ canHibernate CONSTANT);
 
 public:
-	explicit Session(QObject* parent = nullptr): QObject(parent) {}
+	explicit Session(QObject* parent = nullptr);
+	~Session() override;
 
 	Q_INVOKABLE static void lock();
+	// Request the Windows lock only when session notifications are available.
+	// nativeSessionLocked confirms the desktop actually switched to Winlogon.
+	Q_INVOKABLE bool requestNativeLock();
 	Q_INVOKABLE static void logout();
 	Q_INVOKABLE static void shutdown();
 	Q_INVOKABLE static void reboot();
@@ -43,9 +47,16 @@ public:
 	[[nodiscard]] static bool canHibernate();
 
 signals:
+	void nativeSessionLocked();
 	// `result` is UserConsentVerificationResult (0 = verified), or -1 when the
 	// verifier couldn't be asked at all.
 	void userVerified(bool verified, int result);
+
+private:
+	void registerNativeNotifications();
+	quintptr notificationWindow = 0;
+	bool nativeNotificationsReady = false;
+	int nativeNotificationAttempts = 0;
 };
 
 } // namespace qs::windows::sys
