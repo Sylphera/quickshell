@@ -13,9 +13,13 @@
 
 #include <qcoreapplication.h>
 #include <qdatetime.h>
+#include <qdir.h>
+#include <qfile.h>
 #include <qfileinfo.h>
 #include <qguiapplication.h>
 #include <qhash.h>
+#include <qjsonarray.h>
+#include <qjsondocument.h>
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -23,6 +27,7 @@
 #include <qpoint.h>
 #include <qrect.h>
 #include <qregularexpression.h>
+#include <qsavefile.h>
 #include <qscreen.h>
 #include <qset.h>
 #include <qstring.h>
@@ -1369,6 +1374,58 @@ void TilingManager::sync() {
 	this->updateShellFullscreen();
 }
 
+namespace {
+
+QString fullscreenAppsPath() {
+	return qEnvironmentVariable("LocalAppData") + QStringLiteral("/quickshell/State/user/fullscreen_apps.json");
+}
+
+QSet<QString>& fullscreenApps() {
+	static auto* apps = [] {
+		auto* set = new QSet<QString>();
+		QFile file(fullscreenAppsPath());
+		if (file.open(QIODevice::ReadOnly)) {
+			for (const auto& value: QJsonDocument::fromJson(file.readAll()).array()) {
+				if (value.isString() && !value.toString().isEmpty()) set->insert(value.toString().toLower());
+			}
+		}
+		return set;
+	}();
+	return *apps;
+}
+
+QString fullscreenKey(const TrackedWindow* window) {
+	const auto exe = window->exePath().toLower();
+	const auto appId = window->appId().toLower();
+	if (appId.isEmpty() || appId == QFileInfo(exe).completeBaseName()) return exe;
+	return appId;
+}
+
+bool remembersFullscreen(const TrackedWindow* window) {
+	const auto key = fullscreenKey(window);
+	return !key.isEmpty() && fullscreenApps().contains(key);
+}
+
+void rememberFullscreen(const TrackedWindow* window, bool fullscreen) {
+	const auto key = fullscreenKey(window);
+	if (key.isEmpty()) return;
+	auto& apps = fullscreenApps();
+	if (fullscreen == apps.contains(key)) return;
+	if (fullscreen) apps.insert(key);
+	else apps.remove(key);
+
+	auto sorted = QStringList(apps.begin(), apps.end());
+	sorted.sort();
+	const auto path = fullscreenAppsPath();
+	QDir().mkpath(QFileInfo(path).absolutePath());
+	QSaveFile file(path);
+	if (!file.open(QIODevice::WriteOnly)
+	    || file.write(QJsonDocument(QJsonArray::fromStringList(sorted)).toJson()) < 0 || !file.commit())
+		qCWarning(logTiling) << "Could not save remembered fullscreen apps to" << path;
+}
+
+}
+
 void TilingManager::syncWindow(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
@@ -1468,6 +1525,17 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 		const QPoint cursor(pointer.x, pointer.y);
 		const auto firstOpening = want->tree->isEmpty();
 		this->insertInto(m, want, nullptr, hasPointer ? &cursor : nullptr);
+		if (!transferred && m.fresh && remembersFullscreen(window)) {
+			QTimer::singleShot(0, this, [this, tracked = QPointer(window)] {
+				if (tracked == nullptr) return;
+				auto found = this->managed.find(tracked.data());
+				if (found == this->managed.end() || found->second.fullscreen
+				    || this->stateOf(found->second) != State::Tiled)
+					return;
+				qCDebug(logTiling) << "Restoring remembered fullscreen for" << fullscreenKey(tracked.data());
+				this->toggleFullscreen(tracked.data());
+			});
+		}
 		if (pacedOpening) {
 			const auto interval = firstOpening ? DWINDLE_FIRST_OPENING_INTERVAL_MS : DWINDLE_OPENING_INTERVAL_MS;
 			want->nextOpening.setRemainingTime(interval, Qt::PreciseTimer);
@@ -3362,8 +3430,10 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		setFullscreenLook(hwnd, true);
 		this->markLayout(m.layout);
 		window->activate();
+		rememberFullscreen(window, true);
 	} else {
 		this->leaveFullscreen(m);
+		rememberFullscreen(window, false);
 	}
 
 	qCWarning(logTiling) << "Window" << window->addressHex() << window->appId()
