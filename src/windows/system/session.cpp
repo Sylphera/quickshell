@@ -6,6 +6,7 @@
 #include <powrprof.h>
 #include <winbase.h>
 #include <winreg.h>
+#include <wtsapi32.h>
 
 #include <thread>
 
@@ -32,6 +33,16 @@ namespace qs::windows::sys {
 
 namespace {
 QS_LOGGING_CATEGORY(logSession, "quickshell.windows.session", QtWarningMsg);
+
+constexpr auto SESSION_WINDOW_CLASS = L"QuickshellSessionNotifications";
+
+LRESULT CALLBACK sessionWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+	if (message == WM_WTSSESSION_CHANGE && wparam == WTS_SESSION_LOCK) {
+		auto* session = reinterpret_cast<Session*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)); // NOLINT
+		if (session != nullptr) emit session->nativeSessionLocked();
+	}
+	return DefWindowProcW(hwnd, message, wparam, lparam);
+}
 
 bool enablePrivilege(LPCWSTR name) {
 	HANDLE token = nullptr;
@@ -87,9 +98,6 @@ QByteArray pbkdf2(const QString& password, const QByteArray& salt, ULONGLONG ite
 	return status == 0 ? hash : QByteArray();
 }
 
-// Windows Hello's prompt can open behind the lock screen, which sits in the
-// topmost band, and only come up after a click. Its window is found as it
-// shows and put over everything, with the keyboard.
 HWND credentialPrompt() {
 	HWND found = nullptr;
 	EnumWindows(
@@ -238,6 +246,58 @@ void Session::verifyUser(const QString& message) {
 		    Qt::QueuedConnection
 		);
 	}).detach();
+}
+
+Session::Session(QObject* parent): QObject(parent) {
+	auto* instance = GetModuleHandleW(nullptr);
+	WNDCLASSW cls {};
+	cls.lpfnWndProc = sessionWindowProc;
+	cls.hInstance = instance;
+	cls.lpszClassName = SESSION_WINDOW_CLASS;
+	if (RegisterClassW(&cls) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+		qCWarning(logSession) << "Could not register Windows session notification class:" << GetLastError();
+		return;
+	}
+	auto* window = CreateWindowExW(
+	    0, SESSION_WINDOW_CLASS, L"", 0, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr
+	);
+	if (window == nullptr) {
+		qCWarning(logSession) << "Could not create Windows session notification window:" << GetLastError();
+		return;
+	}
+	this->notificationWindow = reinterpret_cast<quintptr>(window); // NOLINT
+	SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this)); // NOLINT
+	this->registerNativeNotifications();
+}
+
+void Session::registerNativeNotifications() {
+	if (this->nativeNotificationsReady || this->notificationWindow == 0) return;
+	auto* window = reinterpret_cast<HWND>(this->notificationWindow); // NOLINT
+	this->nativeNotificationsReady = WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
+	if (this->nativeNotificationsReady) return;
+	auto error = GetLastError();
+	qCWarning(logSession) << "Could not subscribe to Windows lock confirmation:" << error;
+	if (++this->nativeNotificationAttempts < 10) {
+		QTimer::singleShot(3000, this, [this]() { this->registerNativeNotifications(); });
+	}
+}
+
+Session::~Session() {
+	auto* window = reinterpret_cast<HWND>(this->notificationWindow); // NOLINT
+	if (window == nullptr) return;
+	if (this->nativeNotificationsReady) WTSUnRegisterSessionNotification(window);
+	SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+	DestroyWindow(window);
+}
+
+bool Session::requestNativeLock() {
+	if (!this->nativeNotificationsReady) this->registerNativeNotifications();
+	if (!this->nativeNotificationsReady) return false;
+	if (!LockWorkStation()) {
+		qCWarning(logSession) << "LockWorkStation failed:" << GetLastError();
+		return false;
+	}
+	return true;
 }
 
 void Session::lock() {

@@ -93,14 +93,6 @@ MonitorRects monitorRects(HMONITOR monitor) {
 	rects.valid = true;
 
 	auto lock = std::lock_guard(gExpectedMutex);
-	auto found = gExpectedWork.find(monitor);
-	if (found != gExpectedWork.end()) {
-		if (rects.work == found->second.work || static_cast<qint64>(GetTickCount64()) > found->second.until) {
-			gExpectedWork.erase(found);
-		} else {
-			rects.work = found->second.work;
-		}
-	}
 	for (const auto& [hwnd, own]: gOwnReservations) {
 		if (own.monitor != rects.monitor || !rects.work.intersects(own.reserved)) continue;
 		switch (own.edge) {
@@ -109,6 +101,14 @@ MonitorRects monitorRects(HMONITOR monitor) {
 		case ABE_LEFT: rects.work.setLeft(std::max(rects.work.left(), own.reserved.right() + 1)); break;
 		case ABE_RIGHT: rects.work.setRight(std::min(rects.work.right(), own.reserved.left() - 1)); break;
 		default: break;
+		}
+	}
+	auto found = gExpectedWork.find(monitor);
+	if (found != gExpectedWork.end()) {
+		if (rects.work == found->second.work || static_cast<qint64>(GetTickCount64()) > found->second.until) {
+			gExpectedWork.erase(found);
+		} else {
+			rects.work = found->second.work;
 		}
 	}
 	return rects;

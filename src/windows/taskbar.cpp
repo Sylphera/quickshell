@@ -4,7 +4,9 @@
 #include <cwchar>
 
 #include <qt_windows.h>
+#include <servprov.h>
 #include <shellapi.h>
+#include <wrl/client.h>
 
 #include <qcoreapplication.h>
 #include <qdatetime.h>
@@ -42,6 +44,91 @@ constexpr int DISPLAY_SETTLE_MS = 1000;
 
 constexpr auto STATE_KEY = L"Software\\Quickshell";
 constexpr auto AUTOHIDE_OWNED_VALUE = L"TaskbarAutoHideOwned";
+constexpr auto EXPLORER_ADVANCED = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+constexpr auto SNAP_BAR_VALUE = L"EnableSnapBar";
+constexpr auto SNAP_BAR_BACKUP = L"SnapBarBackup";
+constexpr auto SNAP_BAR_MUTEX = L"Local\\QuickshellSnapBar";
+std::atomic<bool> gSnapBarOwned = false;
+
+struct SnapBarSetting {
+	DWORD present = 0;
+	DWORD value = 0;
+};
+
+bool readSnapBar(SnapBarSetting& setting) {
+	DWORD size = sizeof(setting.value);
+	const auto status = RegGetValueW(
+	    HKEY_CURRENT_USER, EXPLORER_ADVANCED, SNAP_BAR_VALUE, RRF_RT_REG_DWORD,
+	    nullptr, &setting.value, &size
+	);
+	setting.present = status == ERROR_SUCCESS;
+	return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+}
+
+bool writeSnapBar(const SnapBarSetting& setting) {
+	if (!setting.present) {
+		const auto status = RegDeleteKeyValueW(HKEY_CURRENT_USER, EXPLORER_ADVANCED, SNAP_BAR_VALUE);
+		return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+	}
+	return RegSetKeyValueW(HKEY_CURRENT_USER, EXPLORER_ADVANCED, SNAP_BAR_VALUE, REG_DWORD,
+	                       &setting.value, sizeof(setting.value)) == ERROR_SUCCESS;
+}
+
+bool supportsSnapBarCache() {
+	const auto build = windowsBuild();
+	return build == 26100 || build == 26200;
+}
+
+struct __declspec(uuid("4214f6fa-eb36-4e2f-9ca2-23fdc1832df7")) ImmersiveSettingsCache:
+    IUnknown {
+	virtual HRESULT STDMETHODCALLTYPE OnSettingChanged(int setting) = 0;
+	virtual HRESULT STDMETHODCALLTYPE GetBOOL(int setting, BOOL* enabled) = 0;
+};
+
+bool syncSnapBarSetting(bool enabled) {
+	constexpr CLSID immersiveShell =
+	    {0xc2f03a33, 0x21f5, 0x47fa, {0xb4, 0xbb, 0x15, 0x63, 0x62, 0xa2, 0xf2, 0x39}};
+	constexpr GUID cacheService =
+	    {0x53660488, 0x8855, 0x460b, {0xa9, 0xab, 0x5c, 0xfc, 0x6b, 0x50, 0x12, 0xca}};
+	constexpr int snapBarSetting = 12;
+	const auto apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return false;
+
+	bool synced = false;
+	{
+		Microsoft::WRL::ComPtr<IServiceProvider> shell;
+		Microsoft::WRL::ComPtr<ImmersiveSettingsCache> cache;
+		BOOL cached = FALSE;
+		synced = SUCCEEDED(CoCreateInstance(immersiveShell, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&shell)))
+		    && SUCCEEDED(shell->QueryService(cacheService, IID_PPV_ARGS(&cache)))
+		    && SUCCEEDED(cache->OnSettingChanged(snapBarSetting))
+		    && SUCCEEDED(cache->GetBOOL(snapBarSetting, &cached)) && (cached != FALSE) == enabled;
+	}
+	if (SUCCEEDED(apartment)) CoUninitialize();
+	return synced;
+}
+
+bool restoreSnapBar(bool sync = true) {
+	SnapBarSetting previous;
+	DWORD size = sizeof(previous);
+	const auto status = RegGetValueW(
+	    HKEY_CURRENT_USER, STATE_KEY, SNAP_BAR_BACKUP, RRF_RT_REG_BINARY, nullptr, &previous, &size
+	);
+	if (status == ERROR_FILE_NOT_FOUND) return true;
+	if (status != ERROR_SUCCESS || size != sizeof(previous) || previous.present > 1) return false;
+
+	SnapBarSetting current;
+	if (!readSnapBar(current)) return false;
+	if (current.present && current.value == 0) {
+		if (!writeSnapBar(previous)) return false;
+		current = previous;
+	}
+	if (!sync) return true;
+	if (supportsSnapBarCache() && !syncSnapBarSetting(!current.present || current.value != 0)) return false;
+
+	const auto removed = RegDeleteKeyValueW(HKEY_CURRENT_USER, STATE_KEY, SNAP_BAR_BACKUP);
+	return removed == ERROR_SUCCESS || removed == ERROR_FILE_NOT_FOUND;
+}
 
 bool autoHideOwned() {
 	DWORD value = 0;
@@ -163,6 +250,9 @@ TaskbarManager* TaskbarManager::instance() {
 TaskbarManager::TaskbarManager(QObject* parent): QObject(parent) {
 	QObject::connect(&this->checkTimer, &QTimer::timeout, this, &TaskbarManager::onCheck);
 
+	this->snapBarRetry.setSingleShot(true);
+	this->snapBarRetry.setInterval(1000);
+	QObject::connect(&this->snapBarRetry, &QTimer::timeout, this, &TaskbarManager::acquireSnapBar);
 	this->displayTimer.setSingleShot(true);
 	this->displayTimer.setInterval(DISPLAY_SETTLE_MS);
 	QObject::connect(&this->displayTimer, &QTimer::timeout, this, &TaskbarManager::onDisplayChanged);
@@ -190,6 +280,7 @@ TaskbarManager::TaskbarManager(QObject* parent): QObject(parent) {
 	}
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
+		this->setSuppressSnapBar(false);
 		this->disable(false);
 	});
 
@@ -198,7 +289,71 @@ TaskbarManager::TaskbarManager(QObject* parent): QObject(parent) {
 	});
 }
 
-TaskbarManager::~TaskbarManager() { this->disable(false); }
+TaskbarManager::~TaskbarManager() {
+	this->setSuppressSnapBar(false);
+	this->disable(false);
+}
+
+void TaskbarManager::setSuppressSnapBar(bool enabled) {
+	if (this->snapBarRequested == enabled) return;
+	this->snapBarRequested = enabled;
+	if (enabled) {
+		this->acquireSnapBar();
+	} else {
+		this->snapBarRetry.stop();
+		if (gSnapBarOwned.exchange(false) && !restoreSnapBar())
+			qCWarning(logTaskbar) << "Could not restore the Windows Snap bar preference.";
+		if (this->snapBarMutex != nullptr) {
+			ReleaseMutex(this->snapBarMutex);
+			CloseHandle(this->snapBarMutex);
+			this->snapBarMutex = nullptr;
+		}
+	}
+	emit this->suppressSnapBarChanged();
+}
+
+void TaskbarManager::acquireSnapBar() {
+	if (!this->snapBarRequested || this->snapBarMutex != nullptr) return;
+
+	auto* mutex = CreateMutexW(nullptr, FALSE, SNAP_BAR_MUTEX);
+	if (mutex == nullptr) return;
+	const auto ownership = WaitForSingleObject(mutex, 0);
+	if (ownership != WAIT_OBJECT_0 && ownership != WAIT_ABANDONED) {
+		CloseHandle(mutex);
+		if (ownership == WAIT_TIMEOUT) this->snapBarRetry.start();
+		return;
+	}
+	this->snapBarMutex = mutex;
+
+	SnapBarSetting previous;
+	if (!restoreSnapBar() || !readSnapBar(previous)) {
+		qCWarning(logTaskbar) << "Could not read the Windows Snap bar preference.";
+		return;
+	}
+	if (!supportsSnapBarCache()) return;
+	if (previous.present && previous.value == 0) {
+		if (!syncSnapBarSetting(false))
+			qCWarning(logTaskbar) << "Could not refresh the Windows Snap bar preference.";
+		return;
+	}
+
+	if (RegSetKeyValueW(HKEY_CURRENT_USER, STATE_KEY, SNAP_BAR_BACKUP, REG_BINARY,
+	                    &previous, sizeof(previous)) != ERROR_SUCCESS) {
+		qCWarning(logTaskbar) << "Could not save the Windows Snap bar preference.";
+		return;
+	}
+	gSnapBarOwned.store(true);
+	if (!writeSnapBar({1, 0})) {
+		gSnapBarOwned.store(false);
+		RegDeleteKeyValueW(HKEY_CURRENT_USER, STATE_KEY, SNAP_BAR_BACKUP);
+		qCWarning(logTaskbar) << "Could not suppress the Windows Snap bar.";
+		return;
+	}
+	if (!syncSnapBarSetting(false)) {
+		qCWarning(logTaskbar) << "Explorer did not apply the Windows Snap bar preference.";
+		if (restoreSnapBar()) gSnapBarOwned.store(false);
+	}
+}
 
 void TaskbarManager::setHoverOnly(bool hoverOnly) {
 	if (hoverOnly == this->mHoverOnly) return;
@@ -247,6 +402,7 @@ void TaskbarManager::turnOffAutoHide() {
 }
 
 void TaskbarManager::restoreForCrash() {
+	if (gSnapBarOwned.exchange(false)) restoreSnapBar(false);
 	if (gConcealing.load()) showAllTaskbars();
 }
 
@@ -613,12 +769,20 @@ Taskbar::Taskbar(QObject* parent): QObject(parent) {
 	    this,
 	    &Taskbar::alwaysHiddenChanged
 	);
+	QObject::connect(
+	    TaskbarManager::instance(),
+	    &TaskbarManager::suppressSnapBarChanged,
+	    this,
+	    &Taskbar::suppressSnapBarChanged
+	);
 }
 
 bool Taskbar::hoverOnly() const { return TaskbarManager::instance()->hoverOnly(); }
 void Taskbar::setHoverOnly(bool hoverOnly) { TaskbarManager::instance()->setHoverOnly(hoverOnly); }
 bool Taskbar::alwaysHidden() const { return TaskbarManager::instance()->alwaysHidden(); }
 void Taskbar::setAlwaysHidden(bool alwaysHidden) { TaskbarManager::instance()->setAlwaysHidden(alwaysHidden); }
+bool Taskbar::suppressSnapBar() const { return TaskbarManager::instance()->suppressSnapBar(); }
+void Taskbar::setSuppressSnapBar(bool enabled) { TaskbarManager::instance()->setSuppressSnapBar(enabled); }
 void Taskbar::turnOffAutoHide() { TaskbarManager::instance()->turnOffAutoHide(); }
 
 } // namespace qs::windows

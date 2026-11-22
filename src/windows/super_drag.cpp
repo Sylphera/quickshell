@@ -1,4 +1,6 @@
 #include "super_drag.hpp"
+
+#include "dwindle_scene.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -170,11 +172,11 @@ bool isElevatedCached(HWND hwnd) {
 }
 
 HWND dragTarget(POINT point) {
-	auto* hit = WindowMotion::instance()->windowAt(point);
-	if (hit == nullptr) hit = WindowFromPhysicalPoint(point);
-	if (hit == nullptr) return nullptr;
-
-	auto* hwnd = GetAncestor(hit, GA_ROOT);
+	auto* hit = WindowFromPhysicalPoint(point);
+	auto* nativeWindow = hit == nullptr ? nullptr : GetAncestor(hit, GA_ROOT);
+	const auto sceneWindow = DwindleScene::windowAt(point, nativeWindow);
+	auto* hwnd = sceneWindow.has_value() ? *sceneWindow : WindowMotion::instance()->windowAt(point);
+	if (!sceneWindow.has_value() && hwnd == nullptr) hwnd = nativeWindow;
 	if (hwnd == nullptr || isOwnProcessWindow(hwnd)) return nullptr;
 	if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return nullptr;
 
@@ -916,7 +918,7 @@ LRESULT SuperDragManager::onStarted(HWND hwnd, LPARAM flags) {
 
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return 0;
-	tiling->haltMotion(hwnd);
+	tiling->haltMotion(hwnd, (flags & FLAG_RESIZE) != 0);
 
 	auto* tracker = WindowTracker::instance();
 	this->guiDrag.hwnd = hwnd;

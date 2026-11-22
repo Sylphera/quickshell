@@ -157,6 +157,7 @@ signals:
 	void moveSizeStarted(TrackedWindow* window);
 	void moveSizeEnded(TrackedWindow* window);
 	void foregroundChanged(HWND hwnd, quint32 time);
+	void windowCreated(HWND hwnd);
 
 private:
 	explicit WindowTracker();
@@ -209,6 +210,7 @@ private:
 
 void setParkNewWindows(bool park);
 void claimEarlyPark(HWND hwnd);
+bool isEarlyParked(HWND hwnd);
 void releaseEarlyPark(HWND hwnd);
 
 } // namespace qs::windows

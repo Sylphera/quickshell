@@ -662,7 +662,9 @@ void Dispatcher::fullscreen(const QString& selector, int mode) {
 	if (special && !Scratchpad::instance()->shown()) return;
 
 	if (auto* tiling = TilingManager::active()) {
-		if (mode == 1 ? tiling->toggleFullWidth(window) : tiling->toggleFullscreen(window)) return;
+		if (mode == 1 ? tiling->toggleFullWidth(window) || tiling->toggleMaximize(window)
+		              : tiling->toggleFullscreen(window))
+			return;
 	}
 
 	if (!special || mode == 1) window->setMaximized(!window->maximized());

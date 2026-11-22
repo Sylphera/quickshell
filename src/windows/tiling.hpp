@@ -7,6 +7,7 @@
 
 #include <qt_windows.h>
 
+#include <qdeadlinetimer.h>
 #include <qlist.h>
 #include <qmargins.h>
 #include <qhash.h>
@@ -24,6 +25,7 @@
 #include <qtmetamacros.h>
 #include <qtypes.h>
 
+#include "dwindle_scene.hpp"
 #include "tiling_layout.hpp"
 
 namespace qs::windows {
@@ -41,6 +43,7 @@ public:
 	static TilingManager* instance();
 	static TilingManager* active();
 	void markWindow(TrackedWindow* window);
+	void prepareClose(TrackedWindow* window);
 	void workAreaChanged() { this->markAll(); }
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
 	void setSpecialOffset(int offset);
@@ -60,6 +63,7 @@ public:
 	[[nodiscard]] bool preserveSplit() const { return this->mPreserveSplit; }
 	void setPreserveSplit(bool preserve);
 	[[nodiscard]] QStringList excluded() const { return this->mExcluded; }
+	[[nodiscard]] QStringList fullscreenScreens() const { return this->mFullscreenScreens; }
 	void setExcluded(const QStringList& excluded);
 	[[nodiscard]] QString layout() const { return this->mLayout; }
 	void setLayout(const QString& layout);
@@ -90,6 +94,7 @@ public:
 	void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
+	[[nodiscard]] bool occupiesDwindleTile(HWND hwnd) const;
 	[[nodiscard]] TrackedWindow* focusedWindow() const;
 
 	bool focusDirection(Edge direction);
@@ -118,13 +123,14 @@ public:
 	bool centerColumn(TrackedWindow* window);
 	bool toggleFit(TrackedWindow* window);
 	bool toggleFullWidth(TrackedWindow* window);
+	bool toggleMaximize(TrackedWindow* window);
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	void updateShellFullscreen();
 	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
-	void haltMotion(HWND hwnd);
+	void haltMotion(HWND hwnd, bool resize);
 	void edgeDrag(const QPoint& delta);
 	void endEdgeDrag();
 
@@ -140,6 +146,7 @@ signals:
 	void gapsOutChanged();
 	void preserveSplitChanged();
 	void excludedChanged();
+	void fullscreenScreensChanged();
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();
@@ -164,6 +171,8 @@ private:
 		std::unique_ptr<tiling::LayoutEngine> tree;
 		TrackedWindow* lastFocused = nullptr;
 		bool special = false;
+		bool animateRearrangement = false;
+		QDeadlineTimer nextOpening;
 	};
 
 	enum class State : quint8 {
@@ -190,6 +199,7 @@ private:
 		bool elevated = false;
 		bool autoFloat = false;
 		QRect target;
+		QRect openingFrame;
 		QRect before;
 		QRect accepted;
 		qint32 corrections = 0;
@@ -204,8 +214,15 @@ private:
 		QRect restore;
 		bool tinyCornersApplied = false;
 		bool fresh = false;
+		bool staged = false;
+		bool maximizedTile = false;
+		bool focusMaximized = false;
+		QRect maximizeFrom;
+		bool contractionHeld = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
+		bool tinyChromiumCorners = false;
+		bool nativeFrameRefreshRequested = false;
 		bool tinyBorderSuppressed = false;
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
@@ -229,6 +246,7 @@ private:
 	[[nodiscard]] Layout* layoutFor(TrackedWindow* window, bool create);
 	[[nodiscard]] Layout* layoutAt(const GUID& desktop, QScreen* screen, bool create);
 	[[nodiscard]] bool layoutAlive(const Layout* layout) const;
+	[[nodiscard]] bool sceneShows(const Layout* layout, int index) const;
 	[[nodiscard]] static tiling::LayoutEngine::Id idOf(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* windowOf(tiling::LayoutEngine::Id id) const;
 	[[nodiscard]] tiling::Kind layoutKind() const;
@@ -237,22 +255,32 @@ private:
 
 	void markLayout(Layout* layout);
 	void schedule();
+	void updateEarlyParking();
 	void sync();
 	void syncWindow(TrackedWindow* window);
 	void insertInto(Managed& m, Layout* layout, TrackedWindow* target, const QPoint* cursor);
 	void takeOut(Managed& m);
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
+	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
+	void coverNewWindow(HWND hwnd);
+	void stage(Managed& m, const QRect& tile);
+	bool holdContraction(Managed& m, const QRect& tile);
+	bool stageOccluding(HWND hwnd);
+	void releaseStaged(const QList<HWND>& windows);
 	void leaveFullscreen(Managed& m);
+	void yieldFullscreenTo(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
+	void cacheNextCloseFrame();
 	bool popIn(Managed& m, const QRect& tile);
 	void updateTinyCorners(Managed& m, const QRect& frame);
 	void restoreTinyCorners(Managed& m);
 	void reassertTinyDecorations();
 	[[nodiscard]] QRect managedFrame(const Managed& m) const;
-	void send(Managed& m, const QRect& frame);
+	bool needsNativeFrameRefresh(Managed& m);
+	void send(Managed& m, const QRect& frame, bool refreshNativeFrame = false);
 	void armDeadline();
 	void restoreFloating(Managed& m);
 
@@ -293,12 +321,15 @@ private:
 	bool mSuppressWindowShadows = false;
 	bool mAnimateMoves = true;
 	bool barMoving = false;
+	bool barRelayoutPending = false;
 	QHash<TrackedWindow*, QRect> moving;
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
 	int mSpecialOffset = 0;
+	bool mSpecialShifting = false;
 	bool mPreserveSplit = true;
 	QStringList mExcluded;
+	QStringList mFullscreenScreens;
 	QString mLayout = QStringLiteral("dwindle");
 	bool mSmartSplit = false;
 	qint32 mForceSplit = 0;
@@ -320,6 +351,7 @@ private:
 	QSet<Layout*> dirtyLayouts;
 	QSet<TrackedWindow*> unverified;
 	TrackedWindow* dragging = nullptr;
+	QRect dragOrigin;
 	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
 	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
 	[[nodiscard]] bool canPop(const Managed& m, const Layout* layout, const QRect& tile) const;
@@ -331,6 +363,8 @@ private:
 	QTimer syncTimer;
 	QTimer verifyTimer;
 	QTimer deadlineTimer;
+	QTimer closeCacheTimer;
+	qsizetype nextCloseWindow = 0;
 	QList<QMetaObject::Connection> connections;
 };
 
@@ -346,6 +380,7 @@ class Tiling: public QObject {
 	Q_PROPERTY(qint32 gapsOut READ gapsOut WRITE setGapsOut NOTIFY gapsOutChanged);
 	Q_PROPERTY(bool preserveSplit READ preserveSplit WRITE setPreserveSplit NOTIFY preserveSplitChanged);
 	Q_PROPERTY(QStringList excluded READ excluded WRITE setExcluded NOTIFY excludedChanged);
+	Q_PROPERTY(QStringList fullscreenScreens READ fullscreenScreens NOTIFY fullscreenScreensChanged);
 	Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY layoutChanged);
 	Q_PROPERTY(bool smartSplit READ smartSplit WRITE setSmartSplit NOTIFY smartSplitChanged);
 	Q_PROPERTY(qint32 forceSplit READ forceSplit WRITE setForceSplit NOTIFY forceSplitChanged);
@@ -378,6 +413,7 @@ public:
 	[[nodiscard]] bool preserveSplit() const;
 	void setPreserveSplit(bool preserve);
 	[[nodiscard]] QStringList excluded() const;
+	[[nodiscard]] QStringList fullscreenScreens() const;
 	void setExcluded(const QStringList& excluded);
 	[[nodiscard]] QString layout() const;
 	void setLayout(const QString& layout);
@@ -410,6 +446,7 @@ signals:
 	void gapsOutChanged();
 	void preserveSplitChanged();
 	void excludedChanged();
+	void fullscreenScreensChanged();
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();

@@ -140,6 +140,7 @@ target_link_libraries(quickshell-windows PRIVATE
 	bcrypt
 	powrprof
 	winmm
+	wtsapi32
 	dxva2
 	pdh
 	wbemuuid
@@ -192,9 +193,3 @@ foreach(exe quickshell quickshell-gui)
 		endforeach()
 	endif()
 endforeach()
-
-# Loaded into apps by the shell to park new windows (see park_hook.cpp).
-add_library(qs-window-park SHARED park_hook/park_hook.cpp)
-set_target_properties(qs-window-park PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-target_link_libraries(qs-window-park PRIVATE user32)
-add_dependencies(quickshell qs-window-park)

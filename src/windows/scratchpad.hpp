@@ -29,8 +29,11 @@ public:
 
 	[[nodiscard]] bool shown() const { return this->mShown; }
 	[[nodiscard]] HMONITOR monitor() const { return this->mMonitor; }
+	[[nodiscard]] HWND dimWindow() const { return this->dim; }
+	[[nodiscard]] int dimLevel() const { return this->dimAlpha; }
 	[[nodiscard]] bool contains(const TrackedWindow* window) const;
 	[[nodiscard]] static bool holds(const TrackedWindow* window);
+	static void raiseWindow(HWND hwnd);
 
 	void toggle();
 	void add(TrackedWindow* window, bool follow);

@@ -91,6 +91,7 @@ class WinPanelWindow: public ProxyWindowBase {
 
 public:
 	static QList<HWND> aboveWindowHandles();
+	static void setDwindleBarAbove(HMONITOR monitor, bool above);
 	static QList<HWND> raiseDemoted();
 	static void restack(const QList<HWND>& hwnds);
 	static void setCoverActive(bool active);
