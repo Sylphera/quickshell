@@ -15,9 +15,11 @@ class Session: public QObject {
 	Q_PROPERTY(bool canHibernate READ canHibernate CONSTANT);
 
 public:
-	explicit Session(QObject* parent = nullptr): QObject(parent) {}
+	explicit Session(QObject* parent = nullptr);
+	~Session() override;
 
 	Q_INVOKABLE static void lock();
+	Q_INVOKABLE bool requestNativeLock();
 	Q_INVOKABLE static void logout();
 	Q_INVOKABLE static void shutdown();
 	Q_INVOKABLE static void reboot();
@@ -36,7 +38,14 @@ public:
 	[[nodiscard]] static bool canHibernate();
 
 signals:
+	void nativeSessionLocked();
 	void userVerified(bool verified, int result);
+
+private:
+	void registerNativeNotifications();
+	quintptr notificationWindow = 0;
+	bool nativeNotificationsReady = false;
+	int nativeNotificationAttempts = 0;
 };
 
 } // namespace qs::windows::sys

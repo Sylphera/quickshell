@@ -140,6 +140,7 @@ target_link_libraries(quickshell-windows PRIVATE
 	bcrypt
 	powrprof
 	winmm
+	wtsapi32
 	dxva2
 	pdh
 	wbemuuid
