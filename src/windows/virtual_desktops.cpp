@@ -55,7 +55,6 @@ constexpr const wchar_t* SESSION_KEY_FORMAT =
 constexpr UINT ACCESSOR_MESSAGE = WM_APP + 0x100;
 constexpr const wchar_t* LISTENER_CLASS = L"QuickshellVirtualDesktops";
 
-constexpr qsizetype MAX_DESKTOPS = 20;
 constexpr int CREATION_POLL_MS = 25;
 constexpr int CREATION_POLLS = 40;
 constexpr int CLOAK_REFRESH_DELAY_MS = 250;

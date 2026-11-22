@@ -149,7 +149,7 @@ HyprlandIpc::HyprlandIpc()
 	qs::windows::SuperDragManager::instance()->setWorkspaceWheel([this](int steps, WheelBind bind) {
 		auto amount = QString(steps > 0 ? "+%1" : "-%1").arg(qAbs(steps));
 		switch (bind) {
-		case WheelBind::Workspace: this->dispatch("workspace " + amount); break;
+case WheelBind::Workspace: this->dispatcher->focusWorkspaceFromWheel(steps); break;
 		case WheelBind::OccupiedWorkspace: this->dispatch("workspace r" + amount); break;
 		case WheelBind::MoveWindow: this->dispatch("movetoworkspace r" + amount); break;
 		}

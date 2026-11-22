@@ -579,6 +579,19 @@ TrackedWindow* Dispatcher::resolveWindow(const QString& arg) const {
 	return nullptr;
 }
 
+void Dispatcher::focusWorkspaceFromWheel(int steps) {
+	auto* desktops = this->ipc->desktops();
+	auto count = desktops->count();
+	if (steps > 0 && count > 0 && count < qs::windows::VirtualDesktops::MAX_DESKTOPS
+	    && desktops->shownIndex() == count - 1)
+	{
+		this->focusWorkspace(QString::number(count + 1));
+		return;
+	}
+
+	this->focusWorkspace(QString(steps > 0 ? "+%1" : "-%1").arg(qAbs(steps)));
+}
+
 void Dispatcher::focusWorkspace(const QString& arg) {
 	auto create = false;
 	auto index = this->resolveWorkspace(arg, create);

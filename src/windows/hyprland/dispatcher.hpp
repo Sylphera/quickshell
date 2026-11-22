@@ -17,6 +17,7 @@ public:
 	explicit Dispatcher(HyprlandIpc* ipc): ipc(ipc) {}
 
 	void dispatch(const QString& request);
+	void focusWorkspaceFromWheel(int steps);
 
 private:
 	struct LuaCall {
