@@ -87,9 +87,6 @@ QByteArray pbkdf2(const QString& password, const QByteArray& salt, ULONGLONG ite
 	return status == 0 ? hash : QByteArray();
 }
 
-// Windows Hello's prompt can open behind the lock screen, which sits in the
-// topmost band, and only come up after a click. Its window is found as it
-// shows and put over everything, with the keyboard.
 HWND credentialPrompt() {
 	HWND found = nullptr;
 	EnumWindows(
