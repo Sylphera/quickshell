@@ -63,6 +63,7 @@ public:
 	[[nodiscard]] bool preserveSplit() const { return this->mPreserveSplit; }
 	void setPreserveSplit(bool preserve);
 	[[nodiscard]] QStringList excluded() const { return this->mExcluded; }
+	[[nodiscard]] QStringList fullscreenScreens() const { return this->mFullscreenScreens; }
 	void setExcluded(const QStringList& excluded);
 	[[nodiscard]] QString layout() const { return this->mLayout; }
 	void setLayout(const QString& layout);
@@ -145,6 +146,7 @@ signals:
 	void gapsOutChanged();
 	void preserveSplitChanged();
 	void excludedChanged();
+	void fullscreenScreensChanged();
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();
@@ -214,6 +216,7 @@ private:
 		bool fresh = false;
 		bool staged = false;
 		bool maximizedTile = false;
+		bool focusMaximized = false;
 		bool maximizePending = false;
 		bool contractionHeld = false;
 		qint64 managedAt = 0;
@@ -326,6 +329,7 @@ private:
 	bool mSpecialShifting = false;
 	bool mPreserveSplit = true;
 	QStringList mExcluded;
+	QStringList mFullscreenScreens;
 	QString mLayout = QStringLiteral("dwindle");
 	bool mSmartSplit = false;
 	qint32 mForceSplit = 0;
@@ -376,6 +380,7 @@ class Tiling: public QObject {
 	Q_PROPERTY(qint32 gapsOut READ gapsOut WRITE setGapsOut NOTIFY gapsOutChanged);
 	Q_PROPERTY(bool preserveSplit READ preserveSplit WRITE setPreserveSplit NOTIFY preserveSplitChanged);
 	Q_PROPERTY(QStringList excluded READ excluded WRITE setExcluded NOTIFY excludedChanged);
+	Q_PROPERTY(QStringList fullscreenScreens READ fullscreenScreens NOTIFY fullscreenScreensChanged);
 	Q_PROPERTY(QString layout READ layout WRITE setLayout NOTIFY layoutChanged);
 	Q_PROPERTY(bool smartSplit READ smartSplit WRITE setSmartSplit NOTIFY smartSplitChanged);
 	Q_PROPERTY(qint32 forceSplit READ forceSplit WRITE setForceSplit NOTIFY forceSplitChanged);
@@ -408,6 +413,7 @@ public:
 	[[nodiscard]] bool preserveSplit() const;
 	void setPreserveSplit(bool preserve);
 	[[nodiscard]] QStringList excluded() const;
+	[[nodiscard]] QStringList fullscreenScreens() const;
 	void setExcluded(const QStringList& excluded);
 	[[nodiscard]] QString layout() const;
 	void setLayout(const QString& layout);
@@ -440,6 +446,7 @@ signals:
 	void gapsOutChanged();
 	void preserveSplitChanged();
 	void excludedChanged();
+	void fullscreenScreensChanged();
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();

@@ -29,7 +29,8 @@ public:
 	static void holdCloseSource(HMONITOR monitor, HWND window);
 	static void clearCloseCache();
 	static bool hasClosingTile(HMONITOR monitor, const QRect& work);
-	static void present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed);
+	static void present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed,
+	                    HWND focused = nullptr);
 	static void cover(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles);
 	static void dismiss(HMONITOR monitor);
 	static bool presenting(HMONITOR monitor);

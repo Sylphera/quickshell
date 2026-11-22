@@ -25,6 +25,7 @@
 #include <qcursor.h>
 #include <qeasingcurve.h>
 #include <qguiapplication.h>
+#include <qhash.h>
 #include <qscreen.h>
 #include <qsgrendererinterface.h>
 #include <qtenvironmentvariables.h>
@@ -371,6 +372,11 @@ public:
 	[[nodiscard]] bool shellFullscreen(HWND hwnd) const {
 		return this->mShellFullscreen.contains(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
 	}
+
+		[[nodiscard]] bool barLeavingScreen(const WinPanelWindow& panel) const {
+			return panel.bNamespace.value() == QStringLiteral("quickshell:bar")
+			    && this->mFullscreenBarTransition.contains(MonitorFromWindow(panel.hwnd(), MONITOR_DEFAULTTONULL));
+		}
 	[[nodiscard]] const QList<WinPanelWindow*>& panels() const { return this->mPanels; }
 
 	[[nodiscard]] bool dwindleBarAbove(const WinPanelWindow& panel) const {
@@ -398,6 +404,21 @@ public:
 
 	void setShellFullscreen(const QSet<HMONITOR>& monitors) {
 		if (monitors == this->mShellFullscreen) return;
+			for (auto* monitor: monitors) {
+				if (this->mShellFullscreen.contains(monitor)) continue;
+				this->mFullscreenBarTransition.insert(monitor);
+				auto generation = ++this->mBarTransitionGeneration[monitor];
+				QTimer::singleShot(190, VirtualDesktops::instance(), [this, monitor, generation]() {
+					if (this->mBarTransitionGeneration.value(monitor) != generation) return;
+					this->mFullscreenBarTransition.remove(monitor);
+					this->restackTop();
+				});
+			}
+			for (auto* monitor: this->mShellFullscreen) {
+				if (monitors.contains(monitor)) continue;
+				this->mFullscreenBarTransition.remove(monitor);
+				++this->mBarTransitionGeneration[monitor];
+			}
 		this->mShellFullscreen = monitors;
 		this->restackTop();
 	}
@@ -412,6 +433,8 @@ private:
 	QList<WinPanelWindow*> mPanels;
 	bool mFullscreenApp = false;
 	QSet<HMONITOR> mShellFullscreen;
+		QSet<HMONITOR> mFullscreenBarTransition;
+		QHash<HMONITOR, quint64> mBarTransitionGeneration;
 	QSet<HMONITOR> dwindleBarMonitors;
 };
 
@@ -1026,8 +1049,10 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Top:
 	{
 		auto* stack = WinPanelStack::instance();
-		auto behind = (stack->fullscreenAppActive() && !gCoverActive && !stack->dwindleBarAbove(*this))
-		           || stack->shellFullscreen(hwnd) || gCoverOverPanels;
+			auto delayingBar = stack->barLeavingScreen(*this);
+			auto behind = ((stack->fullscreenAppActive() && !gCoverActive && !stack->dwindleBarAbove(*this))
+			               || stack->shellFullscreen(hwnd)) && !delayingBar;
+			behind = behind || gCoverOverPanels;
 		insertAfter = behind ? HWND_BOTTOM : HWND_TOPMOST;
 	}
 		break;

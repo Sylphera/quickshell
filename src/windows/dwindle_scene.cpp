@@ -267,7 +267,7 @@ qint64 frequency() {
 LRESULT CALLBACK overlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
 	switch (message) {
 	case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
-	case WM_NCHITTEST: return HTTRANSPARENT;
+		case WM_NCHITTEST: return HTTRANSPARENT;
 	default: return DefWindowProcW(hwnd, message, wParam, lParam);
 	}
 }
@@ -371,6 +371,9 @@ struct Tile: AnimatedFrame {
 	bool waitingForSize = false;
 	ComPtr<IDCompositionScaleTransform> pop;
 	ComPtr<IDCompositionEffectGroup> fade;
+	float opacityFrom = 1.0f;
+	float opacityTarget = 1.0f;
+	qint64 opacityStart = 0;
 
 	ComPtr<IDCompositionVisual> diagnosticMarker;
 	qint64 occlusionRequested = 0;
@@ -451,7 +454,7 @@ public:
 
 	~Scene() { this->hide(); }
 
-	bool show(QList<DwindleTile> plan, const QRect& layoutWork);
+	bool show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused);
 	void snapshotClose(HWND window);
 	void holdCloseSource(HWND window);
 	void acceptCachedClose(HWND window, CloseFrame frame);
@@ -465,6 +468,7 @@ public:
 	[[nodiscard]] bool matches(const QList<DwindleTile>& plan) const;
 	[[nodiscard]] QRect frameForDrag(HWND window) const;
 	[[nodiscard]] HWND hostWindow() const { return this->host; }
+	[[nodiscard]] HWND focusedWindow() const { return this->focused; }
 
 	QRect work;
 	HWND dim = nullptr;
@@ -505,6 +509,7 @@ private:
 	bool animate(float from, float to, qint64 time, auto setter, double duration = Duration);
 
 	HWND host = nullptr;
+	HWND focused = nullptr;
 	HWND backdropWindow = nullptr;
 	HMONITOR barMonitor = nullptr;
 	ComPtr<IDCompositionDesktopDevice> desktopDevice;
@@ -787,6 +792,9 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 	    || FAILED(tile.clip->SetLeft(0.0f))
 	    || FAILED(tile.clip->SetTop(0.0f))
 	    || FAILED(tile.container->SetClip(tile.clip.Get()))
+	    || FAILED(this->device->CreateEffectGroup(tile.fade.GetAddressOf()))
+	    || FAILED(tile.fade->SetOpacity(1.0f))
+	    || FAILED(tile.container->SetEffect(tile.fade.Get()))
 	    || FAILED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr)))
 		return false;
 
@@ -1146,8 +1154,14 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 	});
 }
 
-bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork) {
+bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused) {
 	if (!this->prepare(plan)) return false;
+	if (this->focused != focused) {
+		if (this->focused != nullptr) {
+			if (!this->raise()) return false;
+		}
+		this->focused = focused;
+	}
 	if (this->handoffFrame != nullptr) {
 		if (FAILED(this->root->RemoveVisual(this->handoffFrame.Get()))) return false;
 		this->handoffFrame.Reset();
@@ -1202,6 +1216,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork) {
 	this->visibleWork = fresh ? layoutWork : this->visibleWork.united(layoutWork);
 	for (const auto& placement: plan) {
 		this->visibleWork = this->visibleWork.united(placement.previous.intersected(this->work));
+		this->visibleWork = this->visibleWork.united(placement.target.intersected(this->work));
 	}
 	const auto clip = this->visibleWork.translated(-this->work.topLeft());
 	const D2D_RECT_F bounds {
@@ -1256,6 +1271,27 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork) {
 			return false;
 		}
 	}
+	if (this->focused != nullptr) {
+		auto found = this->tiles.find(this->focused);
+		if (found == this->tiles.end()) return false;
+		if (FAILED(this->root->RemoveVisual(found->second->container.Get()))
+		    || FAILED(this->root->AddVisual(found->second->container.Get(), FALSE, nullptr)))
+			return false;
+	}
+	for (auto& [hwnd, tile]: this->tiles) {
+		const auto target = this->focused != nullptr && hwnd != this->focused ? 0.0f : 1.0f;
+		if (tile->opacityTarget == target) continue;
+		const auto elapsed = static_cast<double>(start - tile->opacityStart) / (Duration * frequency());
+		const auto opacity = tile->opacityStart == 0 ? tile->opacityTarget
+		                   : std::lerp(tile->opacityFrom, tile->opacityTarget,
+		                               static_cast<float>(dwindle::ease(elapsed)));
+		if (!this->animate(opacity, target, start, [&tile](auto value) {
+		        return tile->fade->SetOpacity(value);
+		    })) return false;
+		tile->opacityFrom = opacity;
+		tile->opacityTarget = target;
+		tile->opacityStart = start;
+	}
 	if (diagnosticsEnabled()) {
 		for (const auto& placement: plan) {
 			auto& tile = *this->tiles.at(placement.window);
@@ -1299,6 +1335,7 @@ HWND Scene::coveringHost() const {
 	for (auto* above = GetWindow(this->host, GW_HWNDPREV); above != nullptr;
 	     above = GetWindow(above, GW_HWNDPREV))
 	{
+		if (above == this->focused) continue;
 		if (IsWindowVisible(above) && !cloaked(above)
 		    && (GetWindowLongPtrW(above, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0
 		    && frame(above).intersects(this->visibleWork))
@@ -1312,6 +1349,7 @@ QList<HWND> Scene::occludingTiles() const {
 	for (auto* above = GetWindow(this->host, GW_HWNDPREV); above != nullptr;
 	     above = GetWindow(above, GW_HWNDPREV))
 	{
+		if (above == this->focused) continue;
 		if (this->tiles.contains(above) && IsWindowVisible(above) && !IsIconic(above)
 		    && !cloaked(above) && frame(above).intersects(this->visibleWork))
 			windows.append(above);
@@ -1417,8 +1455,8 @@ void Scene::refresh() {
 		}
 		qCDebug(logDwindleScene) << "Scene host raised again; put back in the normal band" << over;
 	}
-	if (GetAsyncKeyState(VK_LBUTTON) < 0 || GetAsyncKeyState(VK_RBUTTON) < 0
-	    || GetAsyncKeyState(VK_MBUTTON) < 0)
+	if (this->focused == nullptr && (GetAsyncKeyState(VK_LBUTTON) < 0 || GetAsyncKeyState(VK_RBUTTON) < 0
+	    || GetAsyncKeyState(VK_MBUTTON) < 0))
 	{
 		this->finish();
 		return;
@@ -1549,6 +1587,16 @@ void Scene::settle() {
 		return;
 	}
 	if (!arrived) qCDebug(logDwindleScene) << "Handing over before every window arrived";
+	if (this->focused != nullptr && !this->finishing && IsWindow(this->focused)) {
+		constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+		if ((GetWindowLongPtrW(this->host, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+			SetWindowPos(this->host, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+		if (GetWindow(this->focused, GW_HWNDNEXT) != this->host)
+			SetWindowPos(this->host, this->focused, 0, 0, 0, 0, flags);
+		this->sample.stop();
+		this->idle.start(250);
+		return;
+	}
 	this->hide();
 }
 
@@ -1560,6 +1608,7 @@ void Scene::hide() {
 	}
 	this->idle.stop();
 	this->sample.stop();
+	this->focused = nullptr;
 	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
 	this->release();
 	this->finishing = false;
@@ -1720,22 +1769,24 @@ bool DwindleScene::hasClosingTile(HMONITOR monitor, const QRect& work) {
 	return found != scenes().end() && found->second->work == sceneViewport(monitor, work) && found->second->hasClosingTile();
 }
 
-void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed) {
+void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed,
+                          HWND focused) {
 	auto found = scenes().find(monitor);
 	const auto closing = DwindleScene::hasClosingTile(monitor, work);
 	if (work.isEmpty() || (tiles.isEmpty() && !closing)) {
 		DwindleScene::dismiss(monitor);
 		return;
 	}
-	if (!changed && !closing && (found == scenes().end() || !found->second->visible())) return;
+	if (!changed && !closing && focused == nullptr
+	    && (found == scenes().end() || !found->second->visible())) return;
 	const auto viewport = sceneViewport(monitor, work);
 	if (!closing && found != scenes().end() && found->second->visible()
 	    && found->second->work == viewport && found->second->dim == underlayDim(monitor)
-	    && found->second->matches(tiles)) return;
+	    && found->second->matches(tiles) && found->second->focusedWindow() == focused) return;
 	auto& scene = scenes()[monitor];
 	if (scene == nullptr || scene->work != viewport || scene->dim != underlayDim(monitor))
 		scene = std::make_unique<Scene>(viewport, underlayDim(monitor));
-	if (!scene->show(tiles, work)) {
+	if (!scene->show(tiles, work, focused)) {
 		qCDebug(logDwindleScene) << "Using immediate placement";
 		DwindleScene::dismiss(monitor);
 	}
@@ -1751,7 +1802,7 @@ void DwindleScene::cover(HMONITOR monitor, const QRect& work, const QList<Dwindl
 	}
 	if (scene == nullptr || scene->work != viewport || scene->dim != underlayDim(monitor))
 		scene = std::make_unique<Scene>(viewport, underlayDim(monitor));
-	if (!scene->show(tiles, work)) {
+	if (!scene->show(tiles, work, scene->focusedWindow())) {
 		qCDebug(logDwindleScene) << "Could not cover" << tiles.size() << "tiles";
 		DwindleScene::dismiss(monitor);
 		return;
