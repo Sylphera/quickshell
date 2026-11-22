@@ -191,7 +191,7 @@ QRect WinAppBar::reserve(HWND hwnd, UINT edge, const QRect& monitor, qint32 size
 
 		for (auto delay: {1500, 5000}) {
 			QTimer::singleShot(delay, QCoreApplication::instance(), [hwnd, data]() mutable {
-				if (!IsWindow(hwnd)) return;
+				if (!IsWindow(hwnd) || !ownReservationMatches(hwnd, data.uEdge, toQRect(data.rc))) return;
 				MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
 				if (!GetMonitorInfoW(MonitorFromRect(&data.rc, MONITOR_DEFAULTTONEAREST), &info)) return;
 				RECT overlap {};
@@ -221,7 +221,6 @@ void WinAppBar::remove() {
 
 	auto data = appBarData(this->mHwnd);
 	SHAppBarMessage(ABM_REMOVE, &data);
-	clearOwnReservation(this->mHwnd);
 	QTimer::singleShot(0, QCoreApplication::instance(), []() {
 		TilingManager::instance()->workAreaChanged();
 	});
@@ -230,6 +229,7 @@ void WinAppBar::remove() {
 }
 
 void WinAppBar::invalidate() {
+	if (this->mHwnd != nullptr) clearOwnReservation(this->mHwnd);
 	this->mRegistered = false;
 	this->mHwnd = nullptr;
 	this->mEdge = 0;
@@ -250,6 +250,7 @@ void WinAppBar::adopt(WinAppBar& other) {
 	this->mMonitor = other.mMonitor;
 	this->mSize = other.mSize;
 	this->mPositionValid = other.mPositionValid;
+	other.mHwnd = nullptr;
 	other.invalidate();
 }
 

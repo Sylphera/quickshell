@@ -25,6 +25,7 @@ void prioritizeInputThread(int priority);
 void optOutOfProcessPowerThrottling();
 [[nodiscard]] MonitorRects monitorRects(HMONITOR monitor);
 bool setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& reserved);
+bool ownReservationMatches(HWND hwnd, UINT edge, const QRect& reserved);
 void clearOwnReservation(HWND hwnd);
 void expectWorkArea(HMONITOR monitor, const QRect& work, int ms);
 

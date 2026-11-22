@@ -75,6 +75,12 @@ bool setOwnReservation(HWND hwnd, const QRect& monitor, UINT edge, const QRect& 
 	return changed;
 }
 
+bool ownReservationMatches(HWND hwnd, UINT edge, const QRect& reserved) {
+	auto lock = std::lock_guard(gExpectedMutex);
+	auto found = gOwnReservations.find(hwnd);
+	return found != gOwnReservations.end() && found->second.edge == edge && found->second.reserved == reserved;
+}
+
 void clearOwnReservation(HWND hwnd) {
 	auto lock = std::lock_guard(gExpectedMutex);
 	gOwnReservations.erase(hwnd);
