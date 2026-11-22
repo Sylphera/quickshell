@@ -10,17 +10,22 @@
 
 namespace qs::windows {
 
+enum class DwindleFullscreen : quint8 { None, Active, Leaving };
+
 struct DwindleTile {
 	HWND window;
 	QRect previous;
 	QRect target;
 	bool settled = false;
 	QRect openingFrame;
+	DwindleFullscreen fullscreen = DwindleFullscreen::None;
+	std::optional<float> cornerRadius;
 };
 
 class DwindleScene {
 public:
 	static bool enabled();
+	static float cornerRadius(HWND window);
 	static void warmUp();
 	static void snapshotClose(HMONITOR monitor, const QRect& work, HWND window);
 	static bool cacheCloseFrame(HWND window, const QRect& bounds);

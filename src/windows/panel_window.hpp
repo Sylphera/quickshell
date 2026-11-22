@@ -8,6 +8,7 @@
 
 #include <qbytearray.h>
 #include <qevent.h>
+#include <qhash.h>
 #include <qnamespace.h>
 #include <qobject.h>
 #include <qpointer.h>
@@ -91,12 +92,16 @@ class WinPanelWindow: public ProxyWindowBase {
 
 public:
 	static QList<HWND> aboveWindowHandles();
+	static HWND fullscreenBarHandle(HMONITOR monitor);
+	static void prepareFullscreenBarHandoff(HMONITOR monitor);
+	static void finishFullscreenBarHandoff(HMONITOR monitor, bool presenting);
 	static void setDwindleBarAbove(HMONITOR monitor, bool above);
 	static QList<HWND> raiseDemoted();
 	static void restack(const QList<HWND>& hwnds);
 	static void setCoverActive(bool active);
 	static void setCoverOverPanels(bool active);
-	static void setShellFullscreen(const QSet<HMONITOR>& monitors);
+	static void setShellFullscreen(const QSet<HMONITOR>& monitors,
+	                               const QHash<HMONITOR, HWND>& managed = {});
 
 	explicit WinPanelWindow(QObject* parent = nullptr);
 	~WinPanelWindow() override;

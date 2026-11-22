@@ -364,9 +364,15 @@ struct Tile: AnimatedFrame {
 	ComPtr<IDCompositionVisual> retained;
 	QSize retainedSize;
 	float radius = 0;
+	float radiusFrom = 0;
+	[[nodiscard]] float radiusAt(qint64 now) const {
+		const auto progress = static_cast<double>(now - this->start) / (Duration * frequency());
+		return std::lerp(this->radiusFrom, this->radius, static_cast<float>(dwindle::ease(progress)));
+	}
 	IDCompositionVisual* visibleContent = nullptr;
 	bool fadingIn = false;
 	bool closingReflow = false;
+	DwindleFullscreen fullscreen = DwindleFullscreen::None;
 	int order = 0;
 	bool waitingForSize = false;
 	ComPtr<IDCompositionScaleTransform> pop;
@@ -477,6 +483,7 @@ private:
 	QRect visibleWork;
 	bool prepare(const QList<DwindleTile>& plan);
 	bool addUnderlay(const QList<DwindleTile>& plan);
+	bool updateFullscreenBar(HWND window);
 	void publishDragScene() const;
 	bool makeTileColor();
 	bool addDiagnosticMarker(Tile& tile);
@@ -491,7 +498,8 @@ private:
 	bool retainedVisible(Tile& tile, bool visible);
 	bool resizeLiveClip(Tile& tile);
 	bool alignLiveReflow(Tile& tile);
-	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now);
+	bool update(Tile& tile, const QRectF& from, const QRect& target, qint64 now,
+	            std::optional<float> cornerRadius);
 	bool pop(Tile& tile, const QRect& target, qint64 now, bool closing, float initialOpacity);
 	bool startCloseVisual(HWND window, std::unique_ptr<Tile> tile, const QRect& bounds,
 	                      qint64 now, float opacity);
@@ -520,6 +528,7 @@ private:
 	ComPtr<IDCompositionSurface> diagnosticColor;
 	ComPtr<IDCompositionVisual> handoffFrame;
 	Thumbnail backdrop;
+	std::unique_ptr<Thumbnail> fullscreenBar;
 	std::vector<std::unique_ptr<Thumbnail>> underlay;
 	ComPtr<IDCompositionVisual> dimVisual;
 	ComPtr<IDCompositionEffectGroup> dimFade;
@@ -775,7 +784,7 @@ bool Scene::addDiagnosticMarker(Tile& tile) {
 }
 
 bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& before) {
-	tile.radius = windowRadius(placement.window);
+	tile.radius = tile.radiusFrom = windowRadius(placement.window);
 	tile.waitingForSize = placement.previous.isEmpty();
 	if (!this->addSource(tile.source, placement.window)
 	    || FAILED(this->device->CreateVisual(tile.container.GetAddressOf()))
@@ -893,6 +902,7 @@ bool Scene::retainedVisible(Tile& tile, bool visible) {
 bool Scene::pop(Tile& tile, const QRect& target, qint64 now, bool closing, float initialOpacity) {
 	tile.from = target;
 	tile.target = target;
+	tile.radiusFrom = tile.radius;
 	tile.start = now;
 	tile.popStart = closing ? 0 : now;
 	tile.fadingIn = !closing && initialOpacity < 1.0f;
@@ -927,13 +937,18 @@ bool Scene::pop(Tile& tile, const QRect& target, qint64 now, bool closing, float
 	    && SUCCEEDED(tile.container->SetEffect(tile.fade.Get()));
 }
 
-bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64 now) {
+bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64 now,
+                   std::optional<float> cornerRadius) {
 	if (tile.pop != nullptr
 	    && (!this->animate(origin.width() / 2.0f, target.width() / 2.0f, now,
 	                       [&tile](auto value) { return tile.pop->SetCenterX(value); })
 	        || !this->animate(origin.height() / 2.0f, target.height() / 2.0f, now,
 	                          [&tile](auto value) { return tile.pop->SetCenterY(value); })))
 		return false;
+	tile.radiusFrom = cornerRadius == 0.0f ? 0.0f : tile.radiusAt(now);
+	tile.radius = cornerRadius.value_or(tile.radius);
+	if (cornerRadius && tile.radiusFrom != tile.radius)
+		qCDebug(logDwindleScene) << "Dwindle fullscreen corner radius" << tile.radiusFrom << "to" << tile.radius;
 	tile.from = origin;
 	tile.target = target;
 	tile.start = now;
@@ -943,10 +958,11 @@ bool Scene::update(Tile& tile, const QRectF& origin, const QRect& target, qint64
 		this->retainedVisible(tile, true);
 	const auto from = tile.from.translated(-this->work.topLeft());
 	const auto to = tile.target.translated(-this->work.topLeft());
-	const auto radius = [&tile](const QRectF& box) {
-		return static_cast<float>(std::min({double(tile.radius), box.width() / 2, box.height() / 2}));
+	const auto radius = [](float limit, const QRectF& box) {
+		return static_cast<float>(std::min({double(limit), box.width() / 2, box.height() / 2}));
 	};
-	const auto corner = [this, fromRadius = radius(from), toRadius = radius(to), now](auto setter) {
+	const auto corner = [this, fromRadius = radius(tile.radiusFrom, from),
+	                     toRadius = radius(tile.radius, to), now](auto setter) {
 		return this->animate(fromRadius, toRadius, now, setter);
 	};
 	return this->alignLiveReflow(tile)
@@ -997,7 +1013,7 @@ void Scene::snapshotClose(HWND window) {
 		    }))
 			return;
 		bounds = box.toRect();
-		radius = tile.radius;
+		radius = tile.radiusAt(now);
 	}
 	if (bounds.isEmpty() || !this->work.contains(bounds)) return;
 	const auto uncovered = isUncovered(window, bounds, this->host);
@@ -1146,16 +1162,41 @@ QRect Scene::frameForDrag(HWND window) const {
 	return found->second->shownAt(counter()).toRect();
 }
 
+bool Scene::updateFullscreenBar(HWND window) {
+	if (this->fullscreenBar != nullptr) {
+		if (FAILED(this->root->RemoveVisual(this->fullscreenBar->visual.Get()))) return false;
+	}
+	if (window == nullptr) {
+		this->fullscreenBar.reset();
+		return true;
+	}
+	if (this->fullscreenBar == nullptr) {
+		const auto bounds = frame(window);
+		const auto shown = bounds.intersected(this->work);
+		if (shown.isEmpty()) return true;
+		auto bar = std::make_unique<Thumbnail>();
+		if (!this->addSource(*bar, window, shown.translated(-bounds.topLeft()))) return true;
+		if (FAILED(bar->visual->SetOffsetX(static_cast<float>(shown.x() - this->work.x())))
+		    || FAILED(bar->visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y()))))
+			return false;
+		this->fullscreenBar = std::move(bar);
+	}
+	return SUCCEEDED(this->root->AddVisual(this->fullscreenBar->visual.Get(), FALSE, nullptr));
+}
+
 bool Scene::matches(const QList<DwindleTile>& plan) const {
 	if (plan.size() != static_cast<qsizetype>(this->tiles.size())) return false;
 	return std::all_of(plan.begin(), plan.end(), [this](const auto& placement) {
 		auto it = this->tiles.find(placement.window);
-		return it != this->tiles.end() && it->second->target == placement.target;
+		return it != this->tiles.end() && it->second->target == placement.target
+		    && it->second->fullscreen == placement.fullscreen
+		    && (!placement.cornerRadius || it->second->radius == *placement.cornerRadius);
 	});
 }
 
 bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused) {
 	if (!this->prepare(plan)) return false;
+	const auto continuing = !this->tiles.empty();
 	if (this->focused != focused) {
 		if (this->focused != nullptr) {
 			if (!this->raise()) return false;
@@ -1247,21 +1288,28 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 		if (!movable[i] || origins[i].has_value()) continue;
 		if (!this->awaitSize(*this->tiles.at(plan[i].window))) return false;
 	}
+	HWND fullscreen = nullptr;
+	HWND leavingFullscreen = nullptr;
 	for (qsizetype i = 0; i < plan.size(); ++i) {
 		const auto& placement = plan[i];
 		auto& tile = *this->tiles.at(placement.window);
-		if (!tile.target.isEmpty() && tile.target == placement.target) continue;
+		tile.fullscreen = placement.fullscreen;
+		if (tile.fullscreen == DwindleFullscreen::Active) fullscreen = placement.window;
+		if (tile.fullscreen == DwindleFullscreen::Leaving) leavingFullscreen = placement.window;
+		if (!tile.target.isEmpty() && tile.target == placement.target
+		    && (!placement.cornerRadius || tile.radius == *placement.cornerRadius))
+			continue;
 		auto scheduled = false;
 		if (origins[i].has_value()) {
 			tile.closingReflow |= closingReflow;
-			scheduled = this->update(tile, *origins[i], placement.target, start);
+			scheduled = this->update(tile, *origins[i], placement.target, start, placement.cornerRadius);
 		} else {
 			const auto opening = placement.previous.isEmpty();
 			const auto from = opening && layoutWork.contains(placement.openingFrame)
 			                ? placement.openingFrame : placement.target;
 			scheduled = this->pop(tile, from, start, false, opening ? 0.0f : 1.0f);
 			if (scheduled && from != placement.target) {
-				scheduled = this->update(tile, QRectF(from), placement.target, start);
+				scheduled = this->update(tile, QRectF(from), placement.target, start, placement.cornerRadius);
 				qCDebug(logDwindleScene) << "Dwindle opening" << placement.window << from
 				                         << "to" << placement.target;
 			}
@@ -1271,15 +1319,27 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 			return false;
 		}
 	}
-	if (this->focused != nullptr) {
-		auto found = this->tiles.find(this->focused);
+	auto* bar = fullscreen != nullptr
+	          ? WinPanelWindow::fullscreenBarHandle(MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL))
+	          : nullptr;
+	if (!this->updateFullscreenBar(bar)) return false;
+	auto* front = fullscreen != nullptr ? fullscreen
+	              : this->focused != nullptr ? this->focused : leavingFullscreen;
+	if (front != nullptr) {
+		auto found = this->tiles.find(front);
 		if (found == this->tiles.end()) return false;
 		if (FAILED(this->root->RemoveVisual(found->second->container.Get()))
 		    || FAILED(this->root->AddVisual(found->second->container.Get(), FALSE, nullptr)))
 			return false;
+		found->second->order = ++this->lastTileOrder;
 	}
+	auto* fadeAround = fullscreen != nullptr ? fullscreen : this->focused;
 	for (auto& [hwnd, tile]: this->tiles) {
-		const auto target = this->focused != nullptr && hwnd != this->focused ? 0.0f : 1.0f;
+		if (!continuing && leavingFullscreen != nullptr && hwnd != leavingFullscreen)
+			tile->opacityTarget = 0.0f;
+		const auto target = fadeAround != nullptr && hwnd != fadeAround ? 0.0f : 1.0f;
+		if (!continuing && tile->opacityTarget == 0.0f && target == 0.0f
+		    && FAILED(tile->fade->SetOpacity(0.0f))) return false;
 		if (tile->opacityTarget == target) continue;
 		const auto elapsed = static_cast<double>(start - tile->opacityStart) / (Duration * frequency());
 		const auto opacity = tile->opacityStart == 0 ? tile->opacityTarget
@@ -1628,6 +1688,7 @@ void Scene::hide() {
 		this->backdrop.handle = nullptr;
 	}
 	this->backdrop.visual.Reset();
+	this->fullscreenBar.reset();
 	this->underlay.clear();
 	this->dimVisual.Reset();
 	this->dimFade.Reset();
@@ -1657,6 +1718,8 @@ auto& scenes() {
 }
 
 }
+
+float DwindleScene::cornerRadius(HWND window) { return windowRadius(window); }
 
 bool DwindleScene::enabled() {
 	static const auto enabled = qEnvironmentVariableIntValue("II_DWINDLE_SCENE") == 1;

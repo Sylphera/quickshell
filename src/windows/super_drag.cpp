@@ -688,6 +688,7 @@ void SuperDragManager::onHover(POINT point, bool byLayout) {
 
 	auto* window = WindowTracker::instance()->windowFor(root);
 	if (window == nullptr || window->minimized() || !IsWindowVisible(root)) return;
+	if (tiling != nullptr && !tiling->allowsHoverFocus(window)) return;
 
 	auto floating = [tiling](TrackedWindow* w) { return tiling == nullptr || !tiling->isTiled(w); };
 	auto* focused = WindowTracker::instance()->windowFor(foreground);

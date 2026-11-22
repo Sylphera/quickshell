@@ -669,12 +669,14 @@ void Dispatcher::fullscreen(const QString& selector, int mode) {
 	if (target.isEmpty() || target == "activewindow") this->ipc->tracker()->syncActive();
 
 	auto* window = this->resolveWindow(target);
+	auto* tiling = TilingManager::active();
+	if (tiling != nullptr && target.isEmpty()) window = tiling->fullscreenShortcutTarget(window);
 	if (window == nullptr || window->minimized()) return;
 
 	auto special = Scratchpad::holds(window);
 	if (special && !Scratchpad::instance()->shown()) return;
 
-	if (auto* tiling = TilingManager::active()) {
+	if (tiling != nullptr) {
 		if (mode == 1 ? tiling->toggleFullWidth(window) || tiling->toggleMaximize(window)
 		              : tiling->toggleFullscreen(window))
 			return;

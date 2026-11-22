@@ -94,8 +94,10 @@ public:
 	void expectBarSpace(const QString& screenName, bool top, int reserved);
 
 	[[nodiscard]] bool isTiled(TrackedWindow* window) const;
+	[[nodiscard]] bool allowsHoverFocus(TrackedWindow* window) const;
 	[[nodiscard]] bool occupiesDwindleTile(HWND hwnd) const;
 	[[nodiscard]] TrackedWindow* focusedWindow() const;
+	[[nodiscard]] TrackedWindow* fullscreenShortcutTarget(TrackedWindow* focused) const;
 
 	bool focusDirection(Edge direction);
 	bool moveDirection(Edge direction);
@@ -233,6 +235,8 @@ private:
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
 		bool fullscreenToggled = false;
+		bool fullscreenLookPending = false;
+		std::optional<float> fullscreenTileRadius;
 	};
 
 	bool start();
@@ -270,6 +274,7 @@ private:
 	bool stageOccluding(HWND hwnd);
 	void releaseStaged(const QList<HWND>& windows);
 	void leaveFullscreen(Managed& m);
+	void updateFullscreenLook(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);

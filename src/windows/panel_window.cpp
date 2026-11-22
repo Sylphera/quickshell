@@ -379,6 +379,23 @@ public:
 		}
 	[[nodiscard]] const QList<WinPanelWindow*>& panels() const { return this->mPanels; }
 
+	[[nodiscard]] HWND managedFullscreenForBar(const WinPanelWindow& panel) const {
+		if (panel.bNamespace.value() != QStringLiteral("quickshell:bar")) return nullptr;
+		return this->mManagedFullscreen.value(MonitorFromWindow(panel.hwnd(), MONITOR_DEFAULTTONULL));
+	}
+
+	[[nodiscard]] bool holdingFullscreenBar(HWND hwnd) const {
+		return this->mFullscreenBarHandoffs.contains(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL));
+	}
+
+	void prepareFullscreenBarHandoff(HMONITOR monitor) { this->mFullscreenBarHandoffs.insert(monitor); }
+
+	void finishFullscreenBarHandoff(HMONITOR monitor, bool presenting) {
+		if (!this->mFullscreenBarHandoffs.remove(monitor)) return;
+		if (presenting) DwmFlush();
+		this->restackTop();
+	}
+
 	[[nodiscard]] bool dwindleBarAbove(const WinPanelWindow& panel) const {
 		return panel.bNamespace.value() == QStringLiteral("quickshell:bar")
 		    && this->dwindleBarMonitors.contains(MonitorFromWindow(panel.hwnd(), MONITOR_DEFAULTTONULL));
@@ -402,24 +419,31 @@ public:
 		this->restackTop();
 	}
 
-	void setShellFullscreen(const QSet<HMONITOR>& monitors) {
-		if (monitors == this->mShellFullscreen) return;
-			for (auto* monitor: monitors) {
-				if (this->mShellFullscreen.contains(monitor)) continue;
-				this->mFullscreenBarTransition.insert(monitor);
-				auto generation = ++this->mBarTransitionGeneration[monitor];
-				QTimer::singleShot(190, VirtualDesktops::instance(), [this, monitor, generation]() {
-					if (this->mBarTransitionGeneration.value(monitor) != generation) return;
-					this->mFullscreenBarTransition.remove(monitor);
-					this->restackTop();
-				});
+	void setShellFullscreen(const QSet<HMONITOR>& monitors, const QHash<HMONITOR, HWND>& managed) {
+		if (monitors == this->mShellFullscreen && managed == this->mManagedFullscreen) return;
+		for (auto* monitor: monitors) {
+			if (managed.contains(monitor)) {
+				if (this->mFullscreenBarTransition.remove(monitor))
+					++this->mBarTransitionGeneration[monitor];
+				continue;
 			}
-			for (auto* monitor: this->mShellFullscreen) {
-				if (monitors.contains(monitor)) continue;
+			if (this->mShellFullscreen.contains(monitor)) continue;
+			this->mFullscreenBarTransition.insert(monitor);
+			auto generation = ++this->mBarTransitionGeneration[monitor];
+			QTimer::singleShot(190, VirtualDesktops::instance(), [this, monitor, generation]() {
+				if (this->mBarTransitionGeneration.value(monitor) != generation) return;
 				this->mFullscreenBarTransition.remove(monitor);
-				++this->mBarTransitionGeneration[monitor];
-			}
+				this->restackTop();
+			});
+		}
+		for (auto* monitor: this->mShellFullscreen) {
+			if (monitors.contains(monitor)) continue;
+			this->mFullscreenBarHandoffs.remove(monitor);
+			this->mFullscreenBarTransition.remove(monitor);
+			++this->mBarTransitionGeneration[monitor];
+		}
 		this->mShellFullscreen = monitors;
+		this->mManagedFullscreen = managed;
 		this->restackTop();
 	}
 
@@ -433,6 +457,8 @@ private:
 	QList<WinPanelWindow*> mPanels;
 	bool mFullscreenApp = false;
 	QSet<HMONITOR> mShellFullscreen;
+	QHash<HMONITOR, HWND> mManagedFullscreen;
+	QSet<HMONITOR> mFullscreenBarHandoffs;
 		QSet<HMONITOR> mFullscreenBarTransition;
 		QHash<HMONITOR, quint64> mBarTransitionGeneration;
 	QSet<HMONITOR> dwindleBarMonitors;
@@ -1049,10 +1075,22 @@ void WinPanelWindow::updateLayer() {
 	case PanelLayer::Top:
 	{
 		auto* stack = WinPanelStack::instance();
-			auto delayingBar = stack->barLeavingScreen(*this);
-			auto behind = ((stack->fullscreenAppActive() && !gCoverActive && !stack->dwindleBarAbove(*this))
-			               || stack->shellFullscreen(hwnd)) && !delayingBar;
-			behind = behind || gCoverOverPanels;
+		auto* fullscreen = stack->managedFullscreenForBar(*this);
+		const auto holdingBar = fullscreen != nullptr && stack->holdingFullscreenBar(hwnd);
+		if (!gCoverOverPanels && !holdingBar && IsWindow(fullscreen)) {
+			constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+			if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+				SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+			if ((GetWindowLongPtrW(fullscreen, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0
+			    && GetWindow(fullscreen, GW_HWNDNEXT) != hwnd)
+				SetWindowPos(hwnd, fullscreen, 0, 0, 0, 0, flags);
+			InputMaskTracker::instance()->refresh();
+			return;
+		}
+		auto delayingBar = stack->barLeavingScreen(*this);
+		auto behind = ((stack->fullscreenAppActive() && !gCoverActive && !stack->dwindleBarAbove(*this))
+		               || stack->shellFullscreen(hwnd)) && !delayingBar && !holdingBar;
+		behind = behind || gCoverOverPanels;
 		insertAfter = behind ? HWND_BOTTOM : HWND_TOPMOST;
 	}
 		break;
@@ -1080,6 +1118,26 @@ void WinPanelWindow::setDwindleBarAbove(HMONITOR monitor, bool above) {
 	WinPanelStack::instance()->setDwindleBarAbove(monitor, above);
 }
 
+HWND WinPanelWindow::fullscreenBarHandle(HMONITOR monitor) {
+	auto* stack = WinPanelStack::instance();
+	for (auto* panel: stack->panels()) {
+		auto* hwnd = panel->hwnd();
+		if (hwnd != nullptr && IsWindowVisible(hwnd)
+		    && MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) == monitor
+		    && stack->managedFullscreenForBar(*panel) != nullptr)
+			return hwnd;
+	}
+	return nullptr;
+}
+
+void WinPanelWindow::prepareFullscreenBarHandoff(HMONITOR monitor) {
+	WinPanelStack::instance()->prepareFullscreenBarHandoff(monitor);
+}
+
+void WinPanelWindow::finishFullscreenBarHandoff(HMONITOR monitor, bool presenting) {
+	WinPanelStack::instance()->finishFullscreenBarHandoff(monitor, presenting);
+}
+
 void WinPanelWindow::setCoverActive(bool active) { gCoverActive = active; }
 
 void WinPanelWindow::setCoverOverPanels(bool active) {
@@ -1093,8 +1151,9 @@ void WinPanelWindow::setCoverOverPanels(bool active) {
 	}
 }
 
-void WinPanelWindow::setShellFullscreen(const QSet<HMONITOR>& monitors) {
-	WinPanelStack::instance()->setShellFullscreen(monitors);
+void WinPanelWindow::setShellFullscreen(const QSet<HMONITOR>& monitors,
+                                       const QHash<HMONITOR, HWND>& managed) {
+	WinPanelStack::instance()->setShellFullscreen(monitors, managed);
 }
 
 QList<HWND> WinPanelWindow::raiseDemoted() {
