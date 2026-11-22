@@ -129,6 +129,7 @@ public:
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	void updateShellFullscreen();
+	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
@@ -149,6 +150,7 @@ signals:
 	void preserveSplitChanged();
 	void excludedChanged();
 	void fullscreenScreensChanged();
+	void fullscreenConflict(const QString& appId, const QString& title, bool exclusive);
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();
@@ -216,6 +218,7 @@ private:
 		QRect restore;
 		bool tinyCornersApplied = false;
 		bool fresh = false;
+		bool appFullscreen = false;
 		bool staged = false;
 		bool maximizedTile = false;
 		bool focusMaximized = false;
@@ -335,6 +338,7 @@ private:
 	bool mPreserveSplit = true;
 	QStringList mExcluded;
 	QStringList mFullscreenScreens;
+	QSet<HWND> mNativeFullscreen;
 	QString mLayout = QStringLiteral("dwindle");
 	bool mSmartSplit = false;
 	qint32 mForceSplit = 0;
@@ -452,6 +456,7 @@ signals:
 	void preserveSplitChanged();
 	void excludedChanged();
 	void fullscreenScreensChanged();
+	void fullscreenConflict(const QString& appId, const QString& title, bool exclusive);
 	void layoutChanged();
 	void smartSplitChanged();
 	void forceSplitChanged();

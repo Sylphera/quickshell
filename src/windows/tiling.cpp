@@ -1,4 +1,5 @@
 #include "tiling.hpp"
+#include <shellapi.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -81,6 +82,25 @@ void setWindowShadowsSuppressed(bool suppress) {
 using tiling::Edge;
 
 void setFullscreenLook(HWND hwnd, bool fullscreen);
+
+bool framelessWindow(HWND hwnd) {
+	RECT window {};
+	RECT client {};
+	return GetWindowRect(hwnd, &window) && GetClientRect(hwnd, &client) && client.right > 0
+	    && client.right == window.right - window.left && client.bottom == window.bottom - window.top;
+}
+
+bool framelessCover(HWND hwnd) {
+	if (IsZoomed(hwnd) || !framelessWindow(hwnd)) return false;
+	RECT window {};
+	MONITORINFO info {.cbSize = sizeof(MONITORINFO)};
+	if (!GetWindowRect(hwnd, &window)
+	    || !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info))
+		return false;
+	const auto& screen = info.rcMonitor;
+	return window.left <= screen.left && window.top <= screen.top && window.right >= screen.right
+	    && window.bottom >= screen.bottom;
+}
 
 constexpr int SYNC_DELAY_MS = 30;
 constexpr int DWINDLE_FIRST_OPENING_INTERVAL_MS = 72;
@@ -1042,7 +1062,10 @@ bool TilingManager::start() {
 		this->markAll();
 	}));
 	c.append(QObject::connect(Scratchpad::instance(), &Scratchpad::shownChanged, this, [this]() {
-		if (Scratchpad::instance()->shown()) return;
+		if (Scratchpad::instance()->shown()) {
+			this->warnFullscreenConflict(nullptr, this->desktops->shownIndex());
+			return;
+		}
 		for (auto& [window, m]: this->managed) {
 			if (m.focusMaximized && m.layout != nullptr) this->markLayout(m.layout);
 		}
@@ -1139,6 +1162,7 @@ void TilingManager::manage(TrackedWindow* window) {
 	m.fresh = startup::settled();
 	m.managedAt = QDateTime::currentMSecsSinceEpoch();
 	m.elevated = isMoreElevated(window->hwnd());
+	m.appFullscreen = framelessCover(window->hwnd());
 
 	if (m.elevated) {
 		qCDebug(logTiling) << "Window" << window->addressHex() << window->appId()
@@ -1155,6 +1179,11 @@ void TilingManager::manage(TrackedWindow* window) {
 	m.fresh = startup::settled();
 
 	auto mark = [this, window]() { this->markWindow(window); };
+	if (m.fresh && !m.appFullscreen) {
+		QTimer::singleShot(0, this, [this, tracked = QPointer(window)] {
+			if (tracked != nullptr && this->managed.contains(tracked.data())) this->warnFullscreenConflict(tracked.data());
+		});
+	}
 	QObject::connect(window, &TrackedWindow::minimizedChanged, this, mark);
 	QObject::connect(window, &TrackedWindow::maximizedChanged, this, mark);
 	QObject::connect(window, &TrackedWindow::fullscreenChanged, this, mark);
@@ -3427,6 +3456,7 @@ bool TilingManager::toggleFit(TrackedWindow* window) {
 bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return false;
+	this->warnFullscreenConflict(window);
 	auto& m = iter->second;
 	if (m.fullscreen && m.layout != nullptr && !m.layout->special && !window->minimized()
 	    && this->stateOf(m) == State::Tiled && !m.elevated
@@ -3612,7 +3642,23 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 	                   << (m.fullscreen ? "goes fullscreen" : "leaves fullscreen") << "state" << static_cast<int>(this->stateOf(m))
 	                   << "layout" << (m.layout != nullptr);
 	this->updateShellFullscreen();
+	this->warnFullscreenConflict(window);
 	return true;
+}
+
+void TilingManager::warnFullscreenConflict(TrackedWindow* source, qsizetype desktop) {
+	if (!startup::settled()) return;
+	if (source != nullptr) desktop = source->desktop();
+	if (desktop < 0) return;
+	for (const auto& [window, m]: this->managed) {
+		if (window->minimized() || window->desktop() != desktop) continue;
+		if (!this->mNativeFullscreen.contains(window->hwnd()) && !(m.appFullscreen && !m.fullscreen)) continue;
+		if (window == source && this->mNativeFullscreen.contains(window->hwnd()) && !m.appFullscreen) continue;
+		auto state = QUERY_USER_NOTIFICATION_STATE {};
+		const auto exclusive = SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN;
+		emit this->fullscreenConflict(window->appId(), window->title(), exclusive);
+		return;
+	}
 }
 
 void TilingManager::leaveFullscreen(Managed& m) {
@@ -3656,8 +3702,17 @@ void TilingManager::updateShellFullscreen() {
 	auto* specialMonitor = scratchpad->shown() ? scratchpad->monitor() : nullptr;
 	QSet<HMONITOR> fullscreenMonitors;
 	QHash<HMONITOR, HWND> managedFullscreenWindows;
+	QSet<HWND> nativeFullscreen;
+	for (auto& [window, m]: this->managed) {
+		if (m.appFullscreen && !framelessWindow(window->hwnd())) m.appFullscreen = false;
+	}
 	for (const auto& [window, m]: this->managed) {
 		if (window->minimized()) continue;
+		if (!m.fullscreen && !m.fullscreenLookPending && !m.fullscreenTileRadius.has_value()
+		    && (window->borderlessFullscreen() || (window->fullscreen() && framelessCover(window->hwnd()))))
+		{
+			nativeFullscreen.insert(window->hwnd());
+		}
 		if (!m.fullscreen && (m.fullscreenLookPending || m.fullscreenTileRadius.has_value()
 		                      || !window->borderlessFullscreen()))
 			continue;
@@ -3676,6 +3731,7 @@ void TilingManager::updateShellFullscreen() {
 		this->mFullscreenScreens = fullscreenScreens;
 		emit this->fullscreenScreensChanged();
 	}
+	this->mNativeFullscreen = nativeFullscreen;
 	WinPanelWindow::setShellFullscreen(fullscreenMonitors, managedFullscreenWindows);
 }
 
@@ -3918,6 +3974,7 @@ Tiling::Tiling(QObject* parent): QObject(parent) {
 	// clang-format on
 	QObject::connect(manager, &TilingManager::excludedChanged, this, &Tiling::excludedChanged);
 	QObject::connect(manager, &TilingManager::fullscreenScreensChanged, this, &Tiling::fullscreenScreensChanged);
+	QObject::connect(manager, &TilingManager::fullscreenConflict, this, &Tiling::fullscreenConflict);
 	QObject::connect(manager, &TilingManager::layoutChanged, this, &Tiling::layoutChanged);
 	QObject::connect(manager, &TilingManager::smartSplitChanged, this, &Tiling::smartSplitChanged);
 	QObject::connect(manager, &TilingManager::forceSplitChanged, this, &Tiling::forceSplitChanged);
