@@ -244,6 +244,7 @@ private:
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
 	void leaveFullscreen(Managed& m);
+	void yieldFullscreenTo(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
