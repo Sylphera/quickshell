@@ -2750,6 +2750,31 @@ void TilingManager::onScreensChanged() {
 	this->markAll();
 }
 
+void TilingManager::yieldFullscreenTo(Managed& m) {
+	auto* window = m.window;
+	if (m.fullscreen || window->borderlessFullscreen() || window->minimized()) return;
+	if (this->stateOf(m) != State::Tiled) return;
+	auto special = Scratchpad::holds(window);
+	auto fresh = QDateTime::currentMSecsSinceEpoch() - m.managedAt < 3000;
+	auto changed = false;
+	for (auto& [other, o]: this->managed) {
+		if (other == window || other->minimized() || Scratchpad::holds(other) != special) continue;
+		if (!special && (other->desktop() != window->desktop() || other->screen() != window->screen())) continue;
+		if (o.fullscreen) {
+			this->leaveFullscreen(o);
+			changed = true;
+			continue;
+		}
+		if (fresh && other->borderlessFullscreen()) {
+			constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+			SetWindowPos(window->hwnd(), other->hwnd(), 0, 0, 0, 0, flags);
+			other->activate();
+			return;
+		}
+	}
+	if (changed) this->updateShellFullscreen();
+}
+
 void TilingManager::onActiveWindowChanged() {
 	this->reassertTinyDecorations();
 	QTimer::singleShot(40, this, [this]() { this->reassertTinyDecorations(); });
@@ -2760,6 +2785,7 @@ void TilingManager::onActiveWindowChanged() {
 
 	auto& m = iter->second;
 	m.focusStamp = ++this->focusCounter;
+	this->yieldFullscreenTo(m);
 	if (m.layout == nullptr) return;
 	for (auto& [other, existing]: this->managed) {
 		if (other == window || existing.layout != m.layout || !existing.focusMaximized) continue;
