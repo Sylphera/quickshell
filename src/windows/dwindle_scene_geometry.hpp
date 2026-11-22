@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -59,19 +60,33 @@ struct CurveSegment {
 };
 
 inline QList<CurveSegment> curveSegments(double from, double to, double duration) {
+	struct Sample {
+		double time;
+		double value;
+		double slope;
+	};
+	static const auto samples = [] {
+		std::array<Sample, CurveSegments + 1> result {};
+		for (auto i = 0; i <= CurveSegments; ++i) {
+			const auto position = static_cast<double>(i) / CurveSegments;
+			const auto time = position * position;
+			result[i] = {time, ease(time), easeSlope(time)};
+		}
+		return result;
+	}();
+
 	QList<CurveSegment> segments;
 	segments.reserve(CurveSegments);
 	const auto distance = to - from;
 	for (auto i = 0; i < CurveSegments; ++i) {
-		const auto a = static_cast<double>(i) / CurveSegments;
-		const auto b = static_cast<double>(i + 1) / CurveSegments;
-		const auto t0 = duration * a * a;
-		const auto t1 = duration * b * b;
-		const auto span = t1 - t0;
-		const auto y0 = from + distance * ease(t0 / duration);
-		const auto y1 = from + distance * ease(t1 / duration);
-		const auto m0 = distance * easeSlope(t0 / duration) / duration;
-		const auto m1 = distance * easeSlope(t1 / duration) / duration;
+		const auto& first = samples[i];
+		const auto& last = samples[i + 1];
+		const auto t0 = duration * first.time;
+		const auto span = duration * last.time - t0;
+		const auto y0 = from + distance * first.value;
+		const auto y1 = from + distance * last.value;
+		const auto m0 = distance * first.slope / duration;
+		const auto m1 = distance * last.slope / duration;
 		const auto rise = (y1 - y0) / span;
 		segments.append({
 		    t0,

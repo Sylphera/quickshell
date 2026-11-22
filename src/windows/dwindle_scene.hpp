@@ -15,6 +15,7 @@ struct DwindleTile {
 	QRect previous;
 	QRect target;
 	bool settled = false;
+	QRect openingFrame;
 };
 
 class DwindleScene {
@@ -22,9 +23,10 @@ public:
 	static bool enabled();
 	static void warmUp();
 	static void snapshotClose(HMONITOR monitor, const QRect& work, HWND window);
-	static void cacheCloseFrame(HWND window, const QRect& bounds);
-	static void useCachedCloseFrame(HMONITOR monitor, const QRect& work, HWND window, quint32 pid,
-	                               const QRect& bounds, bool destroyedOnly);
+	static bool cacheCloseFrame(HWND window, const QRect& bounds);
+	static void prepareClose(HMONITOR monitor, const QRect& work, HWND window, quint32 pid,
+	                         const QRect& bounds, bool removed);
+	static void holdCloseSource(HMONITOR monitor, HWND window);
 	static void clearCloseCache();
 	static bool hasClosingTile(HMONITOR monitor, const QRect& work);
 	static void present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed);
@@ -36,6 +38,8 @@ public:
 	static void onOcclusion(std::function<bool(HWND)> stage);
 	static void onRelease(std::function<void(const QList<HWND>&)> release);
 	static void dismissAll();
+	static void drop(HMONITOR monitor);
+	static HWND specialHost();
 };
 
 }

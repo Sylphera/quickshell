@@ -7,6 +7,7 @@
 
 #include <qt_windows.h>
 
+#include <qdeadlinetimer.h>
 #include <qlist.h>
 #include <qmargins.h>
 #include <qhash.h>
@@ -169,6 +170,7 @@ private:
 		TrackedWindow* lastFocused = nullptr;
 		bool special = false;
 		bool animateRearrangement = false;
+		QDeadlineTimer nextOpening;
 	};
 
 	enum class State : quint8 {
@@ -195,6 +197,7 @@ private:
 		bool elevated = false;
 		bool autoFloat = false;
 		QRect target;
+		QRect openingFrame;
 		QRect before;
 		QRect accepted;
 		qint32 corrections = 0;
@@ -213,7 +216,6 @@ private:
 		bool maximizedTile = false;
 		bool maximizePending = false;
 		bool contractionHeld = false;
-		bool stageUntilHandoff = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
 		bool tinyChromiumCorners = false;
@@ -241,6 +243,7 @@ private:
 	[[nodiscard]] Layout* layoutFor(TrackedWindow* window, bool create);
 	[[nodiscard]] Layout* layoutAt(const GUID& desktop, QScreen* screen, bool create);
 	[[nodiscard]] bool layoutAlive(const Layout* layout) const;
+	[[nodiscard]] bool sceneShows(const Layout* layout, int index) const;
 	[[nodiscard]] static tiling::LayoutEngine::Id idOf(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* windowOf(tiling::LayoutEngine::Id id) const;
 	[[nodiscard]] tiling::Kind layoutKind() const;
@@ -249,6 +252,7 @@ private:
 
 	void markLayout(Layout* layout);
 	void schedule();
+	void updateEarlyParking();
 	void sync();
 	void syncWindow(TrackedWindow* window);
 	void insertInto(Managed& m, Layout* layout, TrackedWindow* target, const QPoint* cursor);
@@ -257,11 +261,11 @@ private:
 	void apply(Layout* layout);
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
 	void coverNewWindow(HWND hwnd);
-	void stage(Managed& m, const QRect& tile, bool untilHandoff = false);
+	void stage(Managed& m, const QRect& tile);
 	void finishMaximize(Managed& m);
 	bool holdContraction(Managed& m, const QRect& tile);
 	bool stageOccluding(HWND hwnd);
-	void releaseStaged(const QList<HWND>& windows, bool timer = false);
+	void releaseStaged(const QList<HWND>& windows);
 	void leaveFullscreen(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
@@ -319,6 +323,7 @@ private:
 	qint32 mGapsIn = 4;
 	qint32 mGapsOut = 5;
 	int mSpecialOffset = 0;
+	bool mSpecialShifting = false;
 	bool mPreserveSplit = true;
 	QStringList mExcluded;
 	QString mLayout = QStringLiteral("dwindle");

@@ -28,12 +28,15 @@ public:
 	[[nodiscard]] bool alwaysHidden() const { return this->mAlwaysHidden; }
 	void setAlwaysHidden(bool alwaysHidden);
 	void turnOffAutoHide();
+	[[nodiscard]] bool suppressSnapBar() const { return this->snapBarRequested; }
+	void setSuppressSnapBar(bool enabled);
 
 	static void restoreForCrash();
 
 signals:
 	void hoverOnlyChanged();
 	void alwaysHiddenChanged();
+	void suppressSnapBarChanged();
 
 private:
 	explicit TaskbarManager(QObject* parent);
@@ -49,6 +52,7 @@ private:
 	void disable(bool restoreAutoHide);
 	void refreshMode();
 	void releaseStaleAutoHide();
+	void acquireSnapBar();
 	void findBars();
 	void onCursorMoved(QPoint position);
 	void onCheck();
@@ -79,6 +83,9 @@ private:
 	QList<Bar> bars;
 	QTimer checkTimer;
 	QTimer displayTimer;
+	QTimer snapBarRetry;
+	HANDLE snapBarMutex = nullptr;
+	bool snapBarRequested = false;
 	HWINEVENTHOOK showHook = nullptr;
 	DWORD watchedPid = 0;
 	qint64 burstStart = 0;
@@ -92,6 +99,7 @@ class Taskbar: public QObject {
 	// clang-format off
 	Q_PROPERTY(bool hoverOnly READ hoverOnly WRITE setHoverOnly NOTIFY hoverOnlyChanged);
 	Q_PROPERTY(bool alwaysHidden READ alwaysHidden WRITE setAlwaysHidden NOTIFY alwaysHiddenChanged);
+	Q_PROPERTY(bool suppressSnapBar READ suppressSnapBar WRITE setSuppressSnapBar NOTIFY suppressSnapBarChanged);
 	// clang-format on
 
 public:
@@ -102,10 +110,13 @@ public:
 	[[nodiscard]] bool alwaysHidden() const;
 	void setAlwaysHidden(bool alwaysHidden);
 	Q_INVOKABLE void turnOffAutoHide();
+	[[nodiscard]] bool suppressSnapBar() const;
+	void setSuppressSnapBar(bool enabled);
 
 signals:
 	void hoverOnlyChanged();
 	void alwaysHiddenChanged();
+	void suppressSnapBarChanged();
 };
 
 } // namespace qs::windows

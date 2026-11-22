@@ -14,6 +14,7 @@
 #include <qtypes.h>
 
 #include "desktop_slide.hpp"
+#include "dwindle_scene.hpp"
 #include "panel_window.hpp"
 #include "tiling.hpp"
 #include "util.hpp"
@@ -135,10 +136,12 @@ void raise(HWND hwnd) {
 	    0,
 	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
 	);
-	if (auto* panel = lowestTopPanel()) {
+	auto* anchor = DwindleScene::specialHost();
+	if (anchor == nullptr) anchor = lowestTopPanel();
+	if (anchor != nullptr) {
 		SetWindowPos(
 		    hwnd,
-		    panel,
+		    anchor,
 		    0,
 		    0,
 		    0,
@@ -218,6 +221,8 @@ Scratchpad* Scratchpad::instance() {
 	if (SCRATCHPAD.isNull()) SCRATCHPAD = new Scratchpad(QCoreApplication::instance());
 	return SCRATCHPAD.data();
 }
+
+void Scratchpad::raiseWindow(HWND hwnd) { raise(hwnd); }
 
 bool Scratchpad::holds(const TrackedWindow* window) {
 	return !SCRATCHPAD.isNull() && SCRATCHPAD->contains(window);
@@ -440,6 +445,7 @@ void Scratchpad::slide(bool in) {
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return;
 	this->slideGeneration++;
+	DwindleScene::drop(this->mMonitor);
 
 	if (this->cover == nullptr) {
 		if (in) {
@@ -778,10 +784,18 @@ void Scratchpad::showDim() {
 	auto work = monitorRects(this->mMonitor).work;
 	if (work.isEmpty()) return;
 
-	SetWindowPos(this->dim, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	auto* desktops = VirtualDesktops::instance();
+	desktops->moveWindow(this->dim, desktops->currentIndex());
+	auto* anchor = lowestTopPanel();
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
+		if (std::ranges::any_of(this->entries, [hwnd](const Entry& entry) { return entry.hwnd == hwnd; }))
+			anchor = hwnd;
+	}
+	SetWindowPos(this->dim, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	SetWindowPos(
 	    this->dim,
-	    HWND_TOP,
+	    anchor != nullptr ? anchor : HWND_TOPMOST,
 	    work.x(),
 	    work.y(),
 	    work.width(),

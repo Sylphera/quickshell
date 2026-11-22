@@ -22,6 +22,8 @@ constexpr double MAX_RATIO = 0.95;
 
 double clampRatio(double ratio) { return qBound(MIN_RATIO, ratio, MAX_RATIO); }
 
+int splitExtent(int extent, double ratio) { return static_cast<int>(std::lround(extent * ratio)); }
+
 bool isVerticalEdge(Edge edge) { return edge == Edge::Left || edge == Edge::Right; }
 
 int rightOf(const QRect& rect) { return rect.left() + rect.width(); }
@@ -123,25 +125,24 @@ void DwindleLayout::insert(Id id, Id target, const QPoint* cursor) {
 	const auto box = split->box;
 	const auto ideal = split->idealBox.isValid() ? split->idealBox : QRectF(box);
 	split->id = 0;
-	split->splitTop = ideal.height() >= ideal.width();
+	split->splitTop = ideal.height() > ideal.width()
+	    || (this->preserveSplit && ideal.height() == ideal.width());
 	split->splitPinned = false;
 	split->ratio = this->defaultRatio;
 
-	auto newFirst = false;
+	const auto followPointer = cursor != nullptr && (this->smartSplit || this->forceSplit == 0);
 	if (this->smartSplit && cursor != nullptr) {
 		auto delta = QPointF(*cursor) - ideal.center();
 		auto across = qAbs(delta.y()) * ideal.width();
 		auto along = qAbs(delta.x()) * ideal.height();
 		split->splitTop = across >= along;
-		newFirst = split->splitTop ? delta.y() <= 0 : delta.x() <= 0;
-	} else if (this->forceSplit == 1) {
-		newFirst = true;
-	} else if (this->forceSplit == 2) {
-		newFirst = false;
-	} else if (cursor != nullptr) {
-		auto mid = split->splitTop ? ideal.top() + ideal.height() / 2.0
-		                           : ideal.left() + ideal.width() / 2.0;
-		newFirst = split->splitTop ? cursor->y() < mid : cursor->x() < mid;
+	}
+
+	auto newFirst = this->forceSplit == 1;
+	if (followPointer) {
+		newFirst = split->splitTop
+		         ? cursor->y() < box.top() + splitExtent(box.height(), split->ratio)
+		         : cursor->x() < box.left() + splitExtent(box.width(), split->ratio);
 	}
 
 	if (newFirst) {
@@ -281,8 +282,8 @@ bool DwindleLayout::resize(Id id, int dx, int dy) {
 
 		auto divider = [](const Node* node) {
 			const auto& box = node->box;
-			return node->splitTop ? box.top() + static_cast<int>(std::lround(box.height() * node->ratio))
-			                      : box.left() + static_cast<int>(std::lround(box.width() * node->ratio));
+			return node->splitTop ? box.top() + splitExtent(box.height(), node->ratio)
+			                      : box.left() + splitExtent(box.width(), node->ratio);
 		};
 
 		if (auto* node = this->dividerAncestor(leaf, trailing)) {
@@ -342,7 +343,7 @@ void DwindleLayout::computeNode(Node* node, const QRect& box, const QRectF& idea
 	}
 
 	if (node->splitTop) {
-		auto firstHeight = static_cast<int>(std::lround(box.height() * node->ratio));
+		auto firstHeight = splitExtent(box.height(), node->ratio);
 		auto idealFirstHeight = ideal.height() * node->ratio;
 		this->computeNode(
 		    node->first.get(),
@@ -360,7 +361,7 @@ void DwindleLayout::computeNode(Node* node, const QRect& box, const QRectF& idea
 		    )
 		);
 	} else {
-		auto firstWidth = static_cast<int>(std::lround(box.width() * node->ratio));
+		auto firstWidth = splitExtent(box.width(), node->ratio);
 		auto idealFirstWidth = ideal.width() * node->ratio;
 		this->computeNode(
 		    node->first.get(),

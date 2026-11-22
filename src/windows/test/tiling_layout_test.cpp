@@ -105,6 +105,7 @@ private slots:
 	void mouseSkipsHiddenLeaves();
 	void squareDwindleMatchesHyprland();
 	void dwindleUsesHyprlandHalfCellBoundary();
+	void dwindlePointerStaysInNewTile();
 	void discoveryQueuePreservesWinEventOrder();
 	void closingNestedDwindleBranchesMatchesHyprland();
 	void dwindleSplitCommandsPreserveTreeStructure();
@@ -919,6 +920,30 @@ void TestTilingLayout::dwindleUsesHyprlandHalfCellBoundary() {
 	layout.compute(QRect(0, 0, 1000, 800));
 	QCOMPARE(layout.box(C), QRect(0, 0, 500, 800));
 	QCOMPARE(layout.box(A), QRect(500, 0, 500, 800));
+}
+
+void TestTilingLayout::dwindlePointerStaysInNewTile() {
+	const auto check = [](const Options& options, const QRect& area, const QPoint& point) {
+		DwindleLayout layout;
+		layout.configure(options);
+		layout.insert(A, 0, nullptr);
+		layout.compute(area);
+		layout.insert(B, cursorInsertionTarget(layout, point), &point);
+		layout.compute(area);
+		QVERIFY(layout.box(B).contains(point));
+	};
+
+	Options options;
+	options.preserveSplit = false;
+	check(options, QRect(-90, 42, 800, 800), QPoint(10, 742));
+
+	options.preserveSplit = true;
+	options.defaultSplitRatio = 1.4;
+	check(options, QRect(0, 0, 1000, 800), QPoint(550, 100));
+
+	options.defaultSplitRatio = 1.0;
+	options.smartSplit = true;
+	check(options, QRect(0, 0, 1000, 800), QPoint(500, 400));
 }
 
 void TestTilingLayout::discoveryQueuePreservesWinEventOrder() {
