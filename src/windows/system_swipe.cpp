@@ -30,10 +30,14 @@ QS_LOGGING_CATEGORY(logSystemSwipe, "quickshell.windows.systemswipe", QtWarningM
 
 constexpr auto TOUCHPAD_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\PrecisionTouchPad";
 constexpr auto SWIPE_VALUE = L"FourFingerSlideEnabled";
+constexpr auto UNTOUCHED_VALUE = L"ThreeFingerSlideEnabled";
 constexpr auto STATE_KEY = L"Software\\Quickshell";
 constexpr auto SWIPE_BACKUP = L"TouchpadSwipeBackup";
 constexpr auto SWIPE_MUTEX = L"Local\\QuickshellTouchpadSwipe";
 constexpr int SWIPE_SETTING = 18;
+constexpr int UNTOUCHED_SETTING = 17;
+constexpr DWORD UNTOUCHED_DEFAULT = 1;
+constexpr DWORD MINIMUM_BUILD = 26100;
 constexpr int RETRY_MS = 1000;
 constexpr int EXPLORER_SETTLE_MS = 2000;
 constexpr int MAX_ATTEMPTS = 60;
@@ -50,17 +54,12 @@ struct __declspec(uuid("4214f6fa-eb36-4e2f-9ca2-23fdc1832df7")) SwipeSettingsCac
 	virtual HRESULT STDMETHODCALLTYPE GetDWORD(int setting, DWORD* value) = 0;
 };
 
-bool supportsSettingsCache() {
-	const auto build = windowsBuild();
-	return build == 26100 || build == 26200 || build == 26300;
-}
-
-bool readSwipe(SwipeSetting& setting) {
+bool readSetting(const wchar_t* name, SwipeSetting& setting) {
 	DWORD size = sizeof(setting.value);
 	const auto status = RegGetValueW(
 	    HKEY_CURRENT_USER,
 	    TOUCHPAD_KEY,
-	    SWIPE_VALUE,
+	    name,
 	    RRF_RT_REG_DWORD,
 	    nullptr,
 	    &setting.value,
@@ -69,6 +68,8 @@ bool readSwipe(SwipeSetting& setting) {
 	setting.present = status == ERROR_SUCCESS ? 1 : 0;
 	return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
+
+bool readSwipe(SwipeSetting& setting) { return readSetting(SWIPE_VALUE, setting); }
 
 bool writeSwipe(const SwipeSetting& setting) {
 	if (setting.present == 0) {
@@ -133,6 +134,14 @@ public:
 
 	[[nodiscard]] bool valid() const { return this->cache != nullptr; }
 
+	bool understood() {
+		SwipeSetting untouched;
+		DWORD value = 0;
+		if (!this->valid() || !readSetting(UNTOUCHED_VALUE, untouched)) return false;
+		if (FAILED(this->cache->GetDWORD(UNTOUCHED_SETTING, &value))) return false;
+		return value == (untouched.present != 0 ? untouched.value : UNTOUCHED_DEFAULT);
+	}
+
 	bool reload() { return this->valid() && SUCCEEDED(this->cache->OnSettingChanged(SWIPE_SETTING)); }
 
 	bool swipeOff() {
@@ -150,7 +159,7 @@ bool turnOffSwipe() {
 	if (!restoreSwipeSetting() || !readSwipe(previous)) return false;
 
 	SettingsCache cache;
-	if (!cache.valid()) return false;
+	if (!cache.understood()) return false;
 	if (previous.present != 0 && previous.value == 0) return cache.reload() && cache.swipeOff();
 	if (cache.swipeOff()) return true;
 
@@ -212,7 +221,7 @@ void SystemSwipe::setSuppressRequested(bool requested) {
 		this->release();
 		return;
 	}
-	if (!supportsSettingsCache()) {
+	if (windowsBuild() < MINIMUM_BUILD) {
 		qCWarning(logSystemSwipe) << "Turning the Windows touchpad swipe off is not supported on build"
 		                          << windowsBuild();
 		return;
