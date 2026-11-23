@@ -3481,7 +3481,6 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	if (DwindleScene::enabled() && m.layout->tree->kind() == tiling::Kind::Dwindle
 	    && this->mAnimateMoves && this->sceneShows(m.layout, this->desktops->currentIndex())) {
 		const auto enabled = !m.focusMaximized;
-		if (enabled) this->yieldFullscreenTo(m);
 		for (auto& [other, existing]: this->managed) {
 			if (existing.layout == m.layout) existing.focusMaximized = false;
 		}
