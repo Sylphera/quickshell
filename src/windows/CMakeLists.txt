@@ -22,6 +22,8 @@ qt_add_library(quickshell-windows STATIC
 	desktop_slide.cpp
 	dwindle_scene.cpp
 	touchpad_gestures.cpp
+	touchpad_reader.cpp
+	touchpad_swipe.cpp
 	window_motion.cpp
 	native_corners.cpp
 	super_drag.cpp
@@ -142,6 +144,7 @@ target_link_libraries(quickshell-windows PRIVATE
 	winmm
 	wtsapi32
 	dxva2
+	hid
 	pdh
 	wbemuuid
 	ole32

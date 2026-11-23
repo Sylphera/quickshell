@@ -45,6 +45,14 @@ qt_add_executable(tiling_layout_test
 target_include_directories(tiling_layout_test PRIVATE ${QS_WINDOWS_SRC})
 target_link_libraries(tiling_layout_test PRIVATE Qt6::Core Qt6::Test)
 
+qt_add_executable(touchpad_swipe_test
+	touchpad_swipe_test.cpp
+	${QS_WINDOWS_SRC}/touchpad_swipe.cpp
+)
+
+target_include_directories(touchpad_swipe_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(touchpad_swipe_test PRIVATE Qt6::Core Qt6::Test)
+
 qt_add_executable(vpn_connections_test
 	vpn_connections_test.cpp
 	${QS_WINDOWS_SRC}/system/vpn_connections.cpp

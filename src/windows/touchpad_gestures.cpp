@@ -1,27 +1,76 @@
 #include "touchpad_gestures.hpp"
 #include <algorithm>
 
+#include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qobject.h>
 
 #include "desktop_slide.hpp"
+#include "touchpad_reader.hpp"
+#include "touchpad_swipe.hpp"
 
 namespace qs::windows {
 
 namespace {
 Q_LOGGING_CATEGORY(logGestures, "quickshell.windows.gestures", QtWarningMsg);
 constexpr int SIMULATION_STEP_MS = 8;
+constexpr int SWIPE_WATCHDOG_MS = 300;
 }
 
-TouchpadGestures::TouchpadGestures(QObject* parent): QObject(parent) {
+TouchpadGestures::TouchpadGestures(QObject* parent)
+    : QObject(parent)
+    , swipe([](int way) { return DesktopSlide::instance()->swipeCanGo(way); }) {
 	this->simulation.setInterval(SIMULATION_STEP_MS);
 	QObject::connect(&this->simulation, &QTimer::timeout, this, &TouchpadGestures::step);
+
+	this->watchdog.setSingleShot(true);
+	this->watchdog.setInterval(SWIPE_WATCHDOG_MS);
+	QObject::connect(&this->watchdog, &QTimer::timeout, this, &TouchpadGestures::cancelSwipe);
+	QObject::connect(&this->reader, &TouchpadReader::frame, this, &TouchpadGestures::onFrame);
+}
+
+void TouchpadGestures::setSwipeEnabled(bool enabled) {
+	if (enabled == this->mSwipeEnabled) return;
+	if (enabled) {
+		if (!this->reader.start()) return;
+	} else {
+		this->reader.stop();
+		this->cancelSwipe();
+	}
+	this->mSwipeEnabled = enabled;
+	emit this->swipeEnabledChanged();
+}
+
+void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double timeMs) {
+	if (this->simulation.isActive()) return;
+	auto step = this->swipe.frame(contacts, timeMs);
+	if (step.action == TouchpadSwipe::Action::Update) {
+		DesktopSlide::instance()->swipeUpdate(step.offset);
+	} else if (step.action == TouchpadSwipe::Action::End) {
+		qCDebug(logGestures) << "Swipe let go at" << step.offset << "forced" << step.forced << "cancelled"
+		                     << step.cancelled;
+		auto release = step.forced ? SwipeRelease::Force : SwipeRelease::Settle;
+		if (step.cancelled) release = SwipeRelease::Cancel;
+		DesktopSlide::instance()->swipeEnd(release);
+	}
+	if (this->swipe.active()) this->watchdog.start();
+	else this->watchdog.stop();
+}
+
+void TouchpadGestures::cancelSwipe() {
+	this->watchdog.stop();
+	auto swiping = this->swipe.active();
+	this->swipe.reset();
+	if (!swiping) return;
+	qCDebug(logGestures) << "Swipe cancelled";
+	DesktopSlide::instance()->swipeUpdate(0);
+	DesktopSlide::instance()->swipeEnd(SwipeRelease::Cancel);
 }
 
 void TouchpadGestures::simulateSwipe(double distance, int durationMs) {
 	qCDebug(logGestures) << "Simulating a swipe of" << distance << "desktops in" << durationMs << "ms";
-	if (this->simulation.isActive()) return;
+	if (this->simulation.isActive() || this->swipe.active()) return;
 	this->distance = distance;
 	this->durationMs = std::max(1, durationMs);
 	this->clock.start();
@@ -35,7 +84,7 @@ void TouchpadGestures::step() {
 	if (progress < 1.0) return;
 
 	this->simulation.stop();
-	DesktopSlide::instance()->swipeEnd(0);
+	DesktopSlide::instance()->swipeEnd(SwipeRelease::Settle);
 }
 
 }

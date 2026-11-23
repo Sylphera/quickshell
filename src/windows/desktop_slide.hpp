@@ -20,6 +20,12 @@ namespace qs::windows {
 void waitForCompositorFrame();
 double compositorRefreshMs();
 
+enum class SwipeRelease : quint8 {
+	Settle,
+	Force,
+	Cancel,
+};
+
 class DesktopSlide: public QObject {
 	Q_OBJECT;
 
@@ -30,7 +36,8 @@ public:
 	bool begin(qsizetype from, qsizetype to);
 
 	void swipeUpdate(double offset);
-	void swipeEnd(double velocity);
+	void swipeEnd(SwipeRelease release);
+	[[nodiscard]] bool swipeCanGo(int way) const;
 
 private:
 	explicit DesktopSlide(QObject* parent);

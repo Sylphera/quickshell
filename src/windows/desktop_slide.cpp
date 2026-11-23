@@ -36,7 +36,6 @@ Q_LOGGING_CATEGORY(logSlide, "quickshell.windows.slide", QtWarningMsg);
 constexpr auto* OVERLAY_CLASS = L"QuickshellDesktopSlide";
 constexpr double SLIDE_MS = 700;
 constexpr double SWIPE_CANCEL_RATIO = 0.2;
-constexpr double SWIPE_FORCE_SPEED = 1.5;
 constexpr int WORKSPACE_GAP = 50;
 constexpr int SETTLE_RETRY_MS = 30;
 constexpr int SETTLE_RETRIES = 30;
@@ -290,12 +289,19 @@ void DesktopSlide::swipeUpdate(double offset) {
 	this->retarget(to);
 }
 
-void DesktopSlide::swipeEnd(double velocity) {
+bool DesktopSlide::swipeCanGo(int way) const {
+	auto* desktops = VirtualDesktops::instance();
+	auto to = (this->swiping ? this->swipeFrom : desktops->shownIndex()) + way;
+	return to >= 0 && to < desktops->count();
+}
+
+void DesktopSlide::swipeEnd(SwipeRelease release) {
 	if (!this->swiping) return;
 	this->swiping = false;
-	auto goesBy = [velocity](double offset) {
-		return std::abs(offset) > SWIPE_CANCEL_RATIO
-		    || (std::abs(velocity) > SWIPE_FORCE_SPEED && velocity * offset > 0);
+	auto goesBy = [release](double offset) {
+		if (release == SwipeRelease::Cancel) return false;
+		return std::abs(offset) >= SWIPE_CANCEL_RATIO
+		    || (release == SwipeRelease::Force && offset != 0);
 	};
 	if (this->overlay == nullptr) {
 		if (this->swipeOffset != 0 && goesBy(this->swipeOffset)) {
@@ -311,7 +317,7 @@ void DesktopSlide::swipeEnd(double velocity) {
 		auto goes = this->target != this->swipeFrom && goesBy(offset);
 		to = goes ? this->target : this->swipeFrom;
 	}
-	qCDebug(logSlide) << "Swipe let go toward" << to << "from" << this->swipeFrom << "velocity" << velocity;
+	qCDebug(logSlide) << "Swipe let go toward" << to << "from" << this->swipeFrom;
 	this->retarget(to);
 	{
 		auto lock = std::lock_guard(this->mutex);
