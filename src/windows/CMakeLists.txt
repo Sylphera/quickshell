@@ -21,6 +21,7 @@ qt_add_library(quickshell-windows STATIC
 	scratchpad.cpp
 	desktop_slide.cpp
 	dwindle_scene.cpp
+	system_swipe.cpp
 	touchpad_gestures.cpp
 	touchpad_reader.cpp
 	touchpad_swipe.cpp

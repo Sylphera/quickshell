@@ -8,6 +8,12 @@
 #include <qlogging.h>
 #include <qtenvironmentvariables.h>
 
+#ifdef _WIN32
+#include <cstring>
+
+#include "../windows/system_swipe.hpp"
+#endif
+
 #ifdef QS_WINDOWS_GUI_EXE
 #include <cstdio>
 #include <windows.h>
@@ -151,6 +157,12 @@ void exitDaemon(int code) {
 #endif
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+	if (argc == 2 && std::strcmp(argv[1], qs::windows::SystemSwipe::RESTORE_ARGUMENT) == 0) {
+		return qs::windows::SystemSwipe::restoreWhenAbandoned();
+	}
+#endif
+
 #ifdef QS_WINDOWS_GUI_EXE
 	if (AttachConsole(ATTACH_PARENT_PROCESS)) {
 		FILE* stream = nullptr;

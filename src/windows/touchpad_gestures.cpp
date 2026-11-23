@@ -5,8 +5,10 @@
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qobject.h>
+#include <qpointer.h>
 
 #include "desktop_slide.hpp"
+#include "system_swipe.hpp"
 #include "touchpad_reader.hpp"
 #include "touchpad_swipe.hpp"
 
@@ -16,6 +18,7 @@ namespace {
 Q_LOGGING_CATEGORY(logGestures, "quickshell.windows.gestures", QtWarningMsg);
 constexpr int SIMULATION_STEP_MS = 8;
 constexpr int SWIPE_WATCHDOG_MS = 300;
+QPointer<TouchpadGestures> gSwiping; // NOLINT
 }
 
 TouchpadGestures::TouchpadGestures(QObject* parent)
@@ -28,18 +31,36 @@ TouchpadGestures::TouchpadGestures(QObject* parent)
 	this->watchdog.setInterval(SWIPE_WATCHDOG_MS);
 	QObject::connect(&this->watchdog, &QTimer::timeout, this, &TouchpadGestures::cancelSwipe);
 	QObject::connect(&this->reader, &TouchpadReader::frame, this, &TouchpadGestures::onFrame);
+	QObject::connect(
+	    &this->systemSwipe,
+	    &SystemSwipe::suppressedChanged,
+	    this,
+	    &TouchpadGestures::onSystemSwipeChanged
+	);
 }
+
+TouchpadGestures::~TouchpadGestures() { this->setSwipeEnabled(false); }
 
 void TouchpadGestures::setSwipeEnabled(bool enabled) {
 	if (enabled == this->mSwipeEnabled) return;
 	if (enabled) {
-		if (!this->reader.start()) return;
+		if (gSwiping != nullptr) gSwiping->setSwipeEnabled(false);
+		gSwiping = this;
+	} else if (gSwiping == this) {
+		gSwiping = nullptr;
+	}
+	this->mSwipeEnabled = enabled;
+	this->systemSwipe.setSuppressRequested(enabled);
+	emit this->swipeEnabledChanged();
+}
+
+void TouchpadGestures::onSystemSwipeChanged() {
+	if (this->systemSwipe.suppressed()) {
+		this->reader.start();
 	} else {
 		this->reader.stop();
 		this->cancelSwipe();
 	}
-	this->mSwipeEnabled = enabled;
-	emit this->swipeEnabledChanged();
 }
 
 void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double timeMs) {
