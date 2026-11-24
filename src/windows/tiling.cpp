@@ -520,20 +520,6 @@ QRect parkedFrame(const QRect& tile, bool peek = false) {
 	auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + (peek ? -1 : 100);
 	return QRect(QPoint(x, tile.top()), tile.size());
 }
-
-QRect waitingFrame(HWND hwnd, const QRect& tile) {
-	auto parked = parkedFrame(tile);
-	RECT raw {};
-	RECT frame {};
-	if (GetWindowRect(hwnd, &raw)
-	    && SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))
-	    && frame.left - raw.left > 1)
-	{
-		auto right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-		parked.moveLeft(right - 1 + (frame.left - raw.left));
-	}
-	return parked;
-}
 }
 
 void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& tile) {
@@ -551,15 +537,6 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		if (chromium && this->barMoving) this->place(m, parked);
 		else this->hold(m, tile);
 		return;
-	}
-	if (m.target.isNull() && this->canPop(m, layout, tile)) {
-		m.fresh = false;
-		auto waiting = waitingFrame(m.window->hwnd(), tile);
-		if (motion->begin(m.window->hwnd(), tile, tile, waiting, true)) {
-			this->moving.insert(m.window, tile);
-			this->place(m, waiting);
-			return;
-		}
 	}
 	m.fresh = false;
 	auto animate = this->canAnimate(m, layout, tile);
@@ -579,18 +556,6 @@ void TilingManager::placeMoving(Managed& m, const Layout* layout, const QRect& t
 		}
 	}
 	this->place(m, tile);
-}
-
-bool TilingManager::canPop(const Managed& m, const Layout* layout, const QRect& tile) const {
-	return false;
-	if (!this->mAnimateMoves || !m.fresh || layout->special || m.window == this->dragging) return false;
-	if (QDateTime::currentMSecsSinceEpoch() - m.managedAt > 2000) return false;
-	auto* hwnd = m.window->hwnd();
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd)) return false;
-	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return false;
-	if (m.window->desktop() != this->desktops->currentIndex()) return false;
-	auto rects = monitorRects(monitorForScreen(layout->screen));
-	return rects.valid && rects.monitor.contains(tile);
 }
 
 bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const {
@@ -960,23 +925,6 @@ void TilingManager::expectBarSpace(const QString& screenName, bool top, int rese
 	this->relayout();
 	this->sync();
 	this->barMoving = false;
-
-	return;
-	auto* motion = WindowMotion::instance();
-	for (auto& [window, m]: this->managed) {
-		if (!window->maximized() || window->minimized() || m.elevated) continue;
-		if (window->desktop() != this->desktops->currentIndex() || Scratchpad::holds(window)) continue;
-		if (monitorForScreen(window->screen()) != monitor) continue;
-		auto* hwnd = window->hwnd();
-		if (!IsWindowVisible(hwnd) || IsHungAppWindow(hwnd)) continue;
-		RECT bounds {};
-		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) continue;
-		auto from = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
-		if (from == work && !motion->moving(hwnd)) continue;
-		auto still = WindowMotion::travelsAsStill(hwnd);
-		auto parked = still ? QRect(parkedFrame(work).topLeft(), from.size()) : parkedFrame(work);
-		motion->begin(hwnd, from, work, parked, false, still);
-	}
 }
 
 void TilingManager::markAll() {
@@ -1754,11 +1702,11 @@ void TilingManager::prepareClose(TrackedWindow* window) {
 	if (layout == nullptr || !this->layoutAlive(layout)
 	    || layout->tree->kind() != tiling::Kind::Dwindle
 	    || !this->sceneShows(layout, this->desktops->currentIndex())
-	    || this->stateOf(m) != State::Tiled || m.fullscreen || m.offscreen || m.popping
+	    || this->stateOf(m) != State::Tiled || m.fullscreen || m.offscreen
 	    || m.target.isEmpty() || this->moving.contains(window))
 	{
 		qCDebug(logTiling) << "Dwindle close ineligible" << window->hwnd() << m.target
-		                  << m.fullscreen << m.offscreen << m.popping
+		                  << m.fullscreen << m.offscreen
 		                  << this->moving.contains(window);
 		return;
 	}
@@ -1792,7 +1740,7 @@ void TilingManager::cacheNextCloseFrame() {
 		    || layout->tree->kind() != tiling::Kind::Dwindle
 		    || !this->sceneShows(layout, this->desktops->shownIndex())
 		    || this->stateOf(m) != State::Tiled || m.fullscreen || m.offscreen || m.staged
-		    || m.popping || m.target.isEmpty() || this->moving.contains(window)) continue;
+		    || m.target.isEmpty() || this->moving.contains(window)) continue;
 
 		auto* monitor = monitorForScreen(layout->screen);
 		if (DwindleScene::presenting(monitor)) continue;
@@ -1885,7 +1833,6 @@ void TilingManager::apply(Layout* layout) {
 			tile = fullscreenFrame(window->hwnd(), rects.monitor);
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
 		}
-		if (m.popping) continue;
 		const auto scenePlacement = presenting && !m.maximizedTile && !parked;
 		const auto toggled = scenePlacement && m.fullscreenToggled;
 		if (scenePlacement) m.fullscreenToggled = false;
@@ -1996,7 +1943,7 @@ bool TilingManager::dwindlePlan(
 		if (window == nullptr) continue;
 		const auto& m = this->managed.at(window);
 		if (this->stateOf(m) == State::Hidden) continue;
-		if (this->stateOf(m) != State::Tiled || m.maximizedTile || m.popping || m.elevated
+		if (this->stateOf(m) != State::Tiled || m.maximizedTile || m.elevated
 		    || this->moving.contains(window))
 			return false;
 		auto tile = this->tileRect(layout, window);
@@ -2512,7 +2459,7 @@ void TilingManager::collectLayers(
 			continue;
 		}
 		if (m.layout == nullptr) continue;
-		auto settled = !m.staged && !m.offscreen && !m.popping && !IsHungAppWindow(hwnd);
+		auto settled = !m.staged && !m.offscreen && !IsHungAppWindow(hwnd);
 		if (settled && this->stateOf(m) == State::Tiled) tiled.insert(hwnd);
 		else skipped.insert(hwnd);
 	}
@@ -3774,37 +3721,6 @@ void setFullscreenLook(HWND hwnd, bool fullscreen) {
 	DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
 }
 
-}
-
-namespace {
-}
-
-bool TilingManager::popIn(Managed& m, const QRect& tile) {
-	auto* window = m.window;
-	auto* hwnd = window->hwnd();
-	auto current = this->desktops->currentIndex();
-	if (this->desktops->shownIndex() != current || window->desktop() != current) return false;
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsHungAppWindow(hwnd) || Scratchpad::holds(window)) return false;
-	for (auto& [other, om]: this->managed) {
-		if (other == window || other->minimized() || Scratchpad::holds(other)) continue;
-		if (other->desktop() == window->desktop()) return false;
-	}
-
-	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId() << "pops in";
-	this->place(m, waitingFrame(hwnd, tile));
-	m.popping = true;
-	auto target = QPointer<TrackedWindow>(window);
-	WindowPop::popInAt(hwnd, tile, [this, target]() {
-		if (!target) return;
-		auto found = this->managed.find(target.data());
-		if (found == this->managed.end()) return;
-		found->second.popping = false;
-		if (found->second.layout != nullptr) {
-			this->markLayout(found->second.layout);
-			this->sync();
-		}
-	});
-	return true;
 }
 
 void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {

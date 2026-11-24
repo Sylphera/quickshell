@@ -237,7 +237,6 @@ private:
 		QMargins tinyFrameInsets;
 		bool fullscreen = false;
 		bool dropped = false;
-		bool popping = false;
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
 		bool fullscreenToggled = false;
@@ -286,7 +285,6 @@ private:
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
 	void cacheNextCloseFrame();
-	bool popIn(Managed& m, const QRect& tile);
 	void updateTinyCorners(Managed& m, const QRect& frame);
 	void restoreTinyCorners(Managed& m);
 	void reassertTinyDecorations();
@@ -370,7 +368,6 @@ private:
 	QRect dragOrigin;
 	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
 	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
-	[[nodiscard]] bool canPop(const Managed& m, const Layout* layout, const QRect& tile) const;
 	void onMotionLanded(HWND hwnd, const QRect& frame);
 	EdgeDrag edgeDragState;
 	quint64 focusCounter = 0;
