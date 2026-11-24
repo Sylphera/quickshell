@@ -26,6 +26,7 @@
 #include <qtypes.h>
 
 #include "dwindle_scene.hpp"
+#include "tile_state.hpp"
 #include "tiling_layout.hpp"
 
 namespace qs::windows {
@@ -222,11 +223,8 @@ private:
 		bool tinyCornersApplied = false;
 		bool fresh = false;
 		bool appFullscreen = false;
-		bool staged = false;
 		bool maximizedTile = false;
-		bool focusMaximized = false;
 		bool maximizePending = false;
-		bool contractionHeld = false;
 		qint64 managedAt = 0;
 		bool tinySmallCorners = false;
 		bool tinyChromiumCorners = false;
@@ -235,13 +233,19 @@ private:
 		int previousCornerPreference = 0;
 		QRect tinyCornersRect;
 		QMargins tinyFrameInsets;
-		bool fullscreen = false;
 		bool dropped = false;
 		QRect fullscreenRestore;
 		bool fullscreenWasMaximized = false;
 		bool fullscreenToggled = false;
 		bool fullscreenLookPending = false;
 		std::optional<float> fullscreenTileRadius;
+		TileMode mode = TileMode::Normal;
+		TilePlacement placement = TilePlacement::Placed;
+
+		[[nodiscard]] bool focusMaximized() const { return this->mode == TileMode::Maximized; }
+		[[nodiscard]] bool fullscreen() const { return this->mode == TileMode::Fullscreen; }
+		[[nodiscard]] bool staged() const { return isStaged(this->placement); }
+		[[nodiscard]] bool contractionHeld() const { return isHeld(this->placement); }
 	};
 
 	bool start();
@@ -269,6 +273,7 @@ private:
 	void syncWindow(TrackedWindow* window);
 	void insertInto(Managed& m, Layout* layout, TrackedWindow* target, const QPoint* cursor);
 	void takeOut(Managed& m);
+	void clearMaximized(Layout* layout, const TrackedWindow* except, bool animate);
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);

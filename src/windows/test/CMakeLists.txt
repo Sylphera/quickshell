@@ -92,3 +92,7 @@ qt_add_executable(dwindle_fuzz_test
 
 target_include_directories(dwindle_fuzz_test PRIVATE ${QS_WINDOWS_SRC})
 target_link_libraries(dwindle_fuzz_test PRIVATE Qt6::Core Qt6::Test)
+
+qt_add_executable(tile_state_test tile_state_test.cpp)
+target_include_directories(tile_state_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(tile_state_test PRIVATE Qt6::Core Qt6::Test)
