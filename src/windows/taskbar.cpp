@@ -401,6 +401,8 @@ void TaskbarManager::turnOffAutoHide() {
 	showAllTaskbars();
 }
 
+void TaskbarManager::showAfterShell() { showAllTaskbars(); }
+
 void TaskbarManager::restoreForCrash() {
 	if (gSnapBarOwned.exchange(false)) restoreSnapBar(false);
 	if (gConcealing.load()) showAllTaskbars();

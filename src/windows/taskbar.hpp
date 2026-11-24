@@ -32,6 +32,7 @@ public:
 	void setSuppressSnapBar(bool enabled);
 
 	static void restoreForCrash();
+	static void showAfterShell();
 
 signals:
 	void hoverOnlyChanged();

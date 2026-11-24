@@ -21,6 +21,7 @@
 
 #include "../core/logcat.hpp"
 #include "appbar.hpp"
+#include "taskbar.hpp"
 #include "util.hpp"
 
 namespace qs::windows {
@@ -224,6 +225,7 @@ int SystemSwipe::restoreWhenAbandoned() {
 	const auto ownership = WaitForSingleObject(mutex, INFINITE);
 	if (ownership != WAIT_OBJECT_0 && ownership != WAIT_ABANDONED) return 1;
 	const auto restored = turnOn(FourFingers | ThreeFingers);
+	if (ownership == WAIT_ABANDONED) TaskbarManager::showAfterShell();
 	ReleaseMutex(mutex);
 	CloseHandle(mutex);
 	return restored ? 0 : 1;
