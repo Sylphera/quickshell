@@ -231,6 +231,7 @@ private:
 		QRect restore;
 		bool tinyCornersApplied = false;
 		bool fresh = false;
+		bool startupMove = false;
 		bool appFullscreen = false;
 		bool maximizedTile = false;
 		bool maximizePending = false;
@@ -298,6 +299,8 @@ private:
 	void clearMaximized(Layout* layout, const TrackedWindow* except, bool animate);
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
+	void openStartupLayouts();
+	QSet<Layout*> startupLayouts;
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
 	[[nodiscard]] bool floatsFreely(TrackedWindow* window) const;
 	[[nodiscard]] bool floats(const Managed& m) const;

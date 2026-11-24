@@ -1081,7 +1081,10 @@ bool TilingManager::start() {
 
 	this->tracker = WindowTracker::instance();
 	this->desktops = this->tracker->desktops();
-	startup::afterFirstFrame(this, [this] { this->updateEarlyParking(); });
+	startup::afterFirstFrame(this, [this] {
+		this->updateEarlyParking();
+		this->openStartupLayouts();
+	});
 
 	auto& c = this->connections;
 	c.append(
@@ -1974,8 +1977,14 @@ void TilingManager::dropEmptyLayouts() {
 }
 
 void TilingManager::apply(Layout* layout) {
-	const auto animateRearrangement = std::exchange(layout->animateRearrangement, false);
 	if (!this->layoutAlive(layout)) return;
+	if (!startup::settled() && this->mAnimateMoves && DwindleScene::enabled() && !layout->special
+	    && this->sceneShows(layout, this->desktops->currentIndex()))
+	{
+		this->startupLayouts.insert(layout);
+		return;
+	}
+	const auto animateRearrangement = std::exchange(layout->animateRearrangement, false);
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
 	if (!rects.valid) return;
@@ -2024,6 +2033,7 @@ void TilingManager::apply(Layout* layout) {
 
 		auto& m = this->managed.at(window);
 		m.openingFrame = {};
+		m.startupMove = false;
 		if (this->stateOf(m) != State::Tiled) continue;
 		if (!presenting) {
 			if (std::exchange(m.fullscreenLookPending, false)) setFullscreenLook(window->hwnd(), m.fullscreen());
@@ -2061,6 +2071,20 @@ void TilingManager::apply(Layout* layout) {
 		if (m.maximizePending && !this->moving.contains(window)) this->finishMaximize(m);
 	}
 	this->applyFloats(layout, presenting);
+}
+
+void TilingManager::openStartupLayouts() {
+	const auto layouts = std::exchange(this->startupLayouts, {});
+	for (auto* layout: layouts) {
+		if (!this->layoutAlive(layout)) continue;
+		for (auto id: layout->tree->ids()) {
+			auto* window = this->windowOf(id);
+			if (window == nullptr) continue;
+			auto& m = this->managed.at(window);
+			if (m.target.isNull() && !m.fullscreen() && this->stateOf(m) == State::Tiled) m.startupMove = true;
+		}
+		this->markLayout(layout);
+	}
 }
 
 void TilingManager::applyFloats(Layout* layout, bool presenting) {
@@ -2488,7 +2512,7 @@ bool TilingManager::dwindlePlan(
 			             m.fullscreen() ? DwindleFullscreen::Active : DwindleFullscreen::None,
 			             m.fullscreen() ? std::optional(0.0f) : std::nullopt});
 		} else {
-			auto previous = m.target.isEmpty() && !m.dropped ? QRect() : this->managedFrame(m);
+			auto previous = m.target.isEmpty() && !m.dropped && !m.startupMove ? QRect() : this->managedFrame(m);
 			auto settled = m.dropped || (!previous.isEmpty() && std::abs(previous.left() - m.target.left()) <= 4
 			                             && std::abs(previous.top() - m.target.top()) <= 4
 			                             && std::abs(previous.right() - m.target.right()) <= 4
