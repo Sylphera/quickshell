@@ -49,8 +49,6 @@ public:
 		QString name;
 	};
 
-	static constexpr qsizetype MAX_DESKTOPS = 1000;
-
 	static VirtualDesktops* instance();
 
 	[[nodiscard]] const QList<Desktop>& desktops() const { return this->mDesktops; }

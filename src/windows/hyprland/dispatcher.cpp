@@ -524,8 +524,7 @@ qsizetype Dispatcher::resolveWorkspace(const QString& arg, bool& create) const {
 		if (onlyExisting) return this->existingWorkspace(current, delta);
 
 		create = true;
-		constexpr auto last = qs::windows::VirtualDesktops::MAX_DESKTOPS - 1;
-		return qBound(qsizetype(0), current + delta, qsizetype(last));
+		return qMax(qsizetype(0), current + delta);
 	}
 
 	auto ok = false;

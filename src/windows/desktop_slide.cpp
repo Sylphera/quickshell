@@ -304,10 +304,9 @@ qsizetype DesktopSlide::swipeTarget(int way) const {
 		if (!Scratchpad::holds(window)) occupied.insert(window->desktop());
 	}
 	auto from = this->swiping ? this->swipeFrom : desktops->shownIndex();
-	auto to = swipeDestination(from, way, desktops->count(), [&occupied](qsizetype desktop) {
+	return swipeDestination(from, way, desktops->count(), [&occupied](qsizetype desktop) {
 		return occupied.contains(desktop);
 	});
-	return to < VirtualDesktops::MAX_DESKTOPS ? to : -1;
 }
 
 void DesktopSlide::goTo(qsizetype to) {

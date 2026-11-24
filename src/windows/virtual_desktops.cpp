@@ -707,12 +707,6 @@ void VirtualDesktops::switchThreadMain() {
 }
 
 void VirtualDesktops::ensureCount(qsizetype count, std::function<void(bool)> done) {
-	if (count > MAX_DESKTOPS) {
-		qCWarning(logDesktops) << "Refusing to create more than" << MAX_DESKTOPS << "desktops";
-		done(false);
-		return;
-	}
-
 	if (this->count() >= count) {
 		done(true);
 		return;
