@@ -10,6 +10,7 @@
 #include <qlist.h>
 #include <qobject.h>
 #include <qrect.h>
+#include <qset.h>
 #include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
@@ -75,6 +76,7 @@ private:
 	void setClickThrough(bool through);
 	void finish();
 	void placeUnderPanels();
+	void findPinned();
 
 	HWND overlay = nullptr;
 	HWND liveOverlay = nullptr;
@@ -107,6 +109,7 @@ private:
 	std::atomic<bool> stop = false;
 	int settleRetries = 0;
 	QList<HWND> raised;
+	QSet<HWND> pinned;
 	HDC wallDc = nullptr;
 	HBITMAP wallBitmap = nullptr;
 };

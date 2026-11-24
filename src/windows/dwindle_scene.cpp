@@ -26,6 +26,8 @@
 #include "dwindle_scene_geometry.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
+#include "util.hpp"
+#include "window_tracker.hpp"
 
 namespace qs::windows {
 
@@ -509,6 +511,7 @@ private:
 	QRect visibleWork;
 	bool prepare(const QList<DwindleTile>& plan);
 	bool addUnderlay(const QList<DwindleTile>& plan);
+	[[nodiscard]] bool staysAbove(HWND hwnd) const;
 	bool updateFullscreenBar(HWND window);
 	void publishDragScene() const;
 	bool makeTileColor();
@@ -1414,6 +1417,13 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 	return true;
 }
 
+bool Scene::staysAbove(HWND hwnd) const {
+	if (hwnd == this->host || this->tiles.contains(hwnd) || isOwnProcessWindow(hwnd)) return false;
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || cloaked(hwnd)) return false;
+	if (Scratchpad::holds(WindowTracker::instance()->windowFor(hwnd))) return false;
+	return frame(hwnd).intersects(this->visibleWork);
+}
+
 bool Scene::raise() {
 	if (this->barMonitor == nullptr) {
 		this->barMonitor = MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL);
@@ -1422,8 +1432,8 @@ bool Scene::raise() {
 	auto panels = WinPanelWindow::aboveWindowHandles();
 	auto above = HWND_TOPMOST;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-		if (panels.contains(hwnd) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
-			above = hwnd;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) continue;
+		if (panels.contains(hwnd) || this->staysAbove(hwnd)) above = hwnd;
 	}
 	return SetWindowPos(this->host, above, 0, 0, 0, 0,
 	                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;

@@ -380,6 +380,7 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
 	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
 
+	this->findPinned();
 	this->prepareBackdrop();
 	WinPanelWindow::setCoverActive(true);
 	this->raised = WinPanelWindow::raiseDemoted();
@@ -637,7 +638,7 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		auto* hwnd = windows[i];
 		if (ownWindow(hwnd)) continue;
 		auto* window = tracker->windowFor(hwnd);
-		if (Scratchpad::holds(window)) continue;
+		if (Scratchpad::holds(window) || this->pinned.contains(hwnd)) continue;
 		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.intersects(this->monitor)) continue;
@@ -809,11 +810,23 @@ void DesktopSlide::onSettled() {
 	});
 }
 
+void DesktopSlide::findPinned() {
+	this->pinned.clear();
+	auto* desktops = VirtualDesktops::instance();
+	auto* tracker = WindowTracker::instance();
+	for (auto* hwnd: topLevelWindows()) {
+		if (ownWindow(hwnd) || !topmost(hwnd)) continue;
+		auto* window = tracker->windowFor(hwnd);
+		if (window == nullptr || Scratchpad::holds(window) || window->minimized()) continue;
+		if (desktops->isWindowPinned(hwnd)) this->pinned.insert(hwnd);
+	}
+}
+
 void DesktopSlide::placeUnderPanels() {
 	HWND lowest = nullptr;
 	for (auto* hwnd: topLevelWindows()) {
-		if (hwnd == this->overlay || !ownWindow(hwnd) || !topmost(hwnd)) continue;
-		lowest = hwnd;
+		if (hwnd == this->overlay || !topmost(hwnd)) continue;
+		if (ownWindow(hwnd) || this->pinned.contains(hwnd)) lowest = hwnd;
 	}
 	SetWindowPos(
 	    this->overlay,
