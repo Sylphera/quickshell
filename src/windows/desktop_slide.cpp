@@ -22,6 +22,7 @@
 #include <qtimer.h>
 
 #include "dim_plan.hpp"
+#include "dwindle_scene.hpp"
 #include "inactive_dim.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
@@ -395,6 +396,7 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
 
 	if (!this->hurried) this->findPinned();
+	if (!this->hurried) this->captureDialogs(from);
 	this->prepareBackdrop();
 	WinPanelWindow::setCoverActive(true);
 	this->raised = WinPanelWindow::raiseDemoted();
@@ -635,6 +637,64 @@ void DesktopSlide::releaseThumb(const Thumb& thumb) {
 	this->liveThumbnailOrder.removeAll(thumb.window);
 }
 
+void DesktopSlide::captureDialogs(qsizetype desktop) {
+	for (auto iter = this->stills.begin(); iter != this->stills.end();) {
+		if (IsWindow(iter.key())) {
+			++iter;
+			continue;
+		}
+		DestroyWindow(iter->host);
+		iter = this->stills.erase(iter);
+	}
+
+	auto* tracker = WindowTracker::instance();
+	for (auto* hwnd: topLevelWindows()) {
+		auto* owner = GetWindow(hwnd, GW_OWNER);
+		auto* window = owner == nullptr ? nullptr : tracker->windowFor(hwnd);
+		if (window == nullptr || window->desktop() != desktop || window->minimized() || IsHungAppWindow(hwnd)) continue;
+		if (Scratchpad::holds(window) || this->pinned.contains(hwnd)) continue;
+		auto raw = rectOf(hwnd);
+		RECT bounds {};
+		if (raw.isEmpty() || !raw.intersects(this->monitor)
+		    || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))))
+			continue;
+		auto frame = QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+		auto source = frame.translated(-raw.topLeft());
+		auto* host = windowStill(hwnd, raw, source, DwindleScene::cornerRadius(hwnd));
+		if (host == nullptr) continue;
+		RECT size {};
+		GetWindowRect(host, &size);
+		if (size.right - size.left == frame.width() && size.bottom - size.top == frame.height())
+			source.moveTo(0, 0);
+		if (auto old = this->stills.value(hwnd); old.host != nullptr) DestroyWindow(old.host);
+		this->stills.insert(hwnd, {.host = host, .source = source, .frame = frame});
+	}
+}
+
+void DesktopSlide::addDialogs(qsizetype desktop, QList<Thumb>& added) {
+	auto* tracker = WindowTracker::instance();
+	const auto viewport = QRect(QPoint(), this->monitor.size());
+	for (auto iter = this->stills.cbegin(); iter != this->stills.cend(); ++iter) {
+		if (!IsWindow(iter.key())) continue;
+		auto* owner = tracker->windowFor(GetAncestor(iter.key(), GA_ROOTOWNER));
+		if (owner == nullptr || owner->desktop() != desktop || owner->minimized()) continue;
+		auto local = iter->frame.translated(-this->monitor.topLeft());
+		auto clipped = local.intersected(viewport);
+		if (clipped.isEmpty()) continue;
+		HTHUMBNAIL thumbnail = nullptr;
+		if (FAILED(DwmRegisterThumbnail(this->overlay, iter->host, &thumbnail))) continue;
+		DWM_THUMBNAIL_PROPERTIES props {};
+		props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		props.rcSource = toRect(
+		    QRect(iter->source.topLeft() + clipped.topLeft() - local.topLeft(), clipped.size())
+		);
+		props.opacity = 255;
+		props.fVisible = FALSE;
+		DwmUpdateThumbnailProperties(thumbnail, &props);
+		added.append({.thumbnail = thumbnail, .rect = clipped, .desktop = desktop, .source = iter->source});
+	}
+}
+
 bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 	auto* tracker = WindowTracker::instance();
 	if (tracker == nullptr || this->overlay == nullptr) return false;
@@ -659,6 +719,7 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.intersects(this->monitor)) continue;
+		if (this->stills.contains(hwnd)) continue;
 		if (tiling != nullptr && tiling->covers(window)) {
 			sources.removeIf([tracker, window](HWND under) {
 				return tracker->windowFor(under)->screen() == window->screen();
@@ -761,6 +822,10 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 			added.append({.thumbnail = thumbnail, .rect = part, .desktop = desktop});
 		}
 	}
+	auto known = std::ranges::any_of(this->thumbs, [desktop](const Thumb& thumb) {
+		return thumb.desktop == desktop && thumb.window == nullptr && thumb.source.isValid();
+	});
+	if (!known) this->addDialogs(desktop, added);
 	auto lock = std::lock_guard(this->mutex);
 	this->thumbs.append(added);
 	return complete;

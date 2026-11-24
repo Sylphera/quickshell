@@ -446,7 +446,10 @@ void TrackedWindow::refreshDesktop(bool askShell) {
 		return;
 	}
 
-	this->bDesktop = static_cast<qint32>(desktops->windowDesktopIndex(this->mHwnd));
+	auto index = desktops->windowDesktopIndex(this->mHwnd);
+	if (index == -1 && GetWindow(this->mHwnd, GW_OWNER) != nullptr)
+		index = desktops->windowDesktopIndex(GetAncestor(this->mHwnd, GA_ROOTOWNER));
+	this->bDesktop = static_cast<qint32>(index);
 }
 
 void TrackedWindow::activate() {
@@ -905,6 +908,18 @@ bool WindowTracker::sweepDestroyed() {
 	return removed;
 }
 
+namespace {
+
+bool isDialog(HWND hwnd) {
+	auto* owner = GetWindow(hwnd, GW_OWNER);
+	if (owner == nullptr || !IsWindowVisible(owner) || isOwnProcessWindow(owner)) return false;
+	if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION) return false;
+	constexpr auto passive = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
+	return (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & passive) == 0;
+}
+
+}
+
 bool WindowTracker::isEligible(HWND hwnd) const {
 	if (hwnd == nullptr || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
 	if (GetAncestor(hwnd, GA_ROOT) != hwnd) return false;
@@ -926,7 +941,7 @@ bool WindowTracker::isEligible(HWND hwnd) const {
 			if (IsWindowVisible(next)) break;
 		}
 
-		if (walk != hwnd) return false;
+		if (walk != hwnd && !isDialog(hwnd)) return false;
 	}
 
 	if (isShellClass(windowClass(hwnd))) return false;

@@ -41,7 +41,12 @@ bool paintsOnlyOnScreen(HWND hwnd) {
 	return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
 }
 
-HWND snapshotOf(const QRect& frame, HWND window = nullptr, const QRect& visible = QRect()) {
+HWND snapshotOf(
+    const QRect& frame,
+    HWND window = nullptr,
+    const QRect& visible = QRect(),
+    float cornerRadius = -1
+) {
 	auto width = frame.width();
 	auto height = frame.height();
 	if (width <= 0 || height <= 0) return nullptr;
@@ -107,7 +112,29 @@ HWND snapshotOf(const QRect& frame, HWND window = nullptr, const QRect& visible 
 	if (!translucent) {
 		for (qsizetype i = 0; i < count; i++) bits[i] |= 0xff000000; // NOLINT
 	}
-	if (window != nullptr && !visible.isEmpty()) {
+	if (cornerRadius >= 0) {
+		const auto shown = visible.isEmpty() ? QRect(0, 0, width, height) : visible;
+		const auto radius = static_cast<double>(cornerRadius);
+		const auto reach = static_cast<int>(std::ceil(radius));
+		for (auto cy = 0; cy < reach; cy++) {
+			for (auto cx = 0; cx < reach; cx++) {
+				const auto dx = radius - cx - 0.5;
+				const auto dy = radius - cy - 0.5;
+				const auto cover = std::clamp(radius + 0.5 - std::sqrt((dx * dx) + (dy * dy)), 0.0, 1.0);
+				if (cover >= 1) continue;
+				for (auto corner = 0; corner < 4; corner++) {
+					auto x = shown.left() + (corner % 2 == 0 ? cx : shown.width() - 1 - cx);
+					auto y = shown.top() + (corner < 2 ? cy : shown.height() - 1 - cy);
+					if (x < 0 || y < 0 || x >= width || y >= height) continue;
+					auto& pixel = bits[(y * width) + x]; // NOLINT
+					quint32 faded = 0;
+					for (auto shift = 0; shift < 32; shift += 8)
+						faded |= static_cast<quint32>(std::lround(((pixel >> shift) & 0xff) * cover)) << shift;
+					pixel = faded;
+				}
+			}
+		}
+	} else if (window != nullptr && !visible.isEmpty()) {
 		auto dpi = GetDpiForWindow(window);
 		auto radius = static_cast<int>(std::lround(8.0 * (dpi != 0 ? dpi : 96) / 96.0));
 		auto clearOutside = [&](int cx, int cy, int x0, int y0) {
@@ -209,6 +236,32 @@ bool hasPainted(HWND hwnd) {
 	return painted;
 }
 
+}
+
+HWND windowStill(HWND window, const QRect& raw, const QRect& visible, float radius) {
+	const auto frame = visible.translated(raw.topLeft());
+	auto covered = false;
+	for (auto* above = GetWindow(window, GW_HWNDPREV); above != nullptr && !covered;
+	     above = GetWindow(above, GW_HWNDPREV))
+	{
+		if (!IsWindowVisible(above) || IsIconic(above)) continue;
+		if ((GetWindowLongPtrW(above, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0) continue;
+		DWORD cloaked = 0;
+		DwmGetWindowAttribute(above, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+		RECT rect {};
+		if (cloaked != 0 || !GetWindowRect(above, &rect)) continue;
+		covered = QRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top).intersects(frame);
+	}
+	const QRect screen(
+	    GetSystemMetrics(SM_XVIRTUALSCREEN),
+	    GetSystemMetrics(SM_YVIRTUALSCREEN),
+	    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+	    GetSystemMetrics(SM_CYVIRTUALSCREEN)
+	);
+	if (covered || !screen.contains(frame)) return snapshotOf(raw, window, visible, radius);
+
+	auto* still = snapshotOf(frame, nullptr, QRect(), radius);
+	return still != nullptr ? still : snapshotOf(raw, window, visible, radius);
 }
 
 bool WindowMotion::travelsAsStill(HWND hwnd) { return paintsOnlyOnScreen(hwnd); }

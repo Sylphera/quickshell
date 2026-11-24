@@ -57,6 +57,14 @@ private:
 		bool fullscreen = false;
 	};
 
+	struct Still {
+		HWND host = nullptr;
+		QRect source;
+		QRect frame;
+	};
+
+	void captureDialogs(qsizetype desktop);
+	void addDialogs(qsizetype desktop, QList<Thumb>& added);
 	[[nodiscard]] qsizetype swipeTarget(int way) const;
 	void goTo(qsizetype to);
 	bool start(qsizetype from, qsizetype to);
@@ -112,6 +120,7 @@ private:
 	int settleRetries = 0;
 	QList<HWND> raised;
 	QSet<HWND> pinned;
+	QHash<HWND, Still> stills;
 	bool hurried = false;
 	HDC wallDc = nullptr;
 	HBITMAP wallBitmap = nullptr;

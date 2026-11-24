@@ -1017,6 +1017,7 @@ bool TilingManager::isTiled(TrackedWindow* window) const {
 }
 
 bool TilingManager::allowsHoverFocus(TrackedWindow* window) const {
+	if (window != nullptr && IsWindowEnabled(window->hwnd()) == FALSE) return false;
 	auto target = this->managed.find(window);
 	if (target == this->managed.end() || target->second.layout == nullptr) return true;
 
@@ -4831,8 +4832,8 @@ void TilingManager::placeFloat(TrackedWindow* window, const QRect& frame) {
 	if (found != this->managed.end() && this->mEnabled && this->mAnimateMoves && DwindleScene::enabled()) {
 		auto& m = found->second;
 		auto* home = this->floats(m) ? this->floatHome(m, true) : nullptr;
-		const auto hidden = !Scratchpad::holds(window) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-		if (home != nullptr && !hidden && this->sceneShows(home, this->desktops->currentIndex())) {
+		if (home != nullptr && this->sceneShows(home, this->desktops->currentIndex())) {
+			dropTopmost(m);
 			m.floatFrame = frame;
 			this->sendFloat(m);
 			return;

@@ -16,6 +16,7 @@
 namespace qs::windows {
 
 bool hasWindowBackdrop(HWND hwnd);
+HWND windowStill(HWND window, const QRect& raw, const QRect& visible, float radius);
 class WindowMotion: public QObject {
 	Q_OBJECT;
 
