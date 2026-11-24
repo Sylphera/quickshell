@@ -30,6 +30,8 @@ std::atomic<bool> gForegroundBlocked = false; // NOLINT
 std::atomic<bool> gSuperChord = false;        // NOLINT
 
 std::thread* gThread = nullptr; // NOLINT
+HHOOK gHook = nullptr;          // NOLINT
+UINT_PTR gRehookTimer = 0;      // NOLINT
 
 struct HeldKey {
 	uint32_t id = 0;
@@ -201,6 +203,8 @@ bool isHiddenFromUs(HWND hwnd) {
 	return hidden;
 }
 
+void followVirtualMachine(HWND hwnd);
+
 void CALLBACK foregroundChanged(
     HWINEVENTHOOK /*hook*/,
     DWORD /*event*/,
@@ -212,6 +216,7 @@ void CALLBACK foregroundChanged(
 ) {
 	if (idObject != OBJID_WINDOW) return;
 	gForegroundBlocked.store(isHiddenFromUs(hwnd));
+	followVirtualMachine(hwnd);
 }
 
 LRESULT onModifier(const HookSnapshot& snapshot, const KBDLLHOOKSTRUCT* info, uint8_t bit, bool up) {
@@ -331,6 +336,44 @@ LRESULT CALLBACK hookProc(int code, WPARAM wParam, LPARAM lParam) {
 	return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
+bool isVirtualMachine(HWND hwnd) {
+	static constexpr const wchar_t* NAMES[] = {
+	    L"virtualboxvm.exe", L"virtualbox.exe", L"vmware.exe", L"vmplayer.exe", L"vmware-vmx.exe",
+	    L"windowssandboxclient.exe", L"windowssandboxremotesession.exe", L"vmconnect.exe",
+	    L"mstsc.exe", L"msrdc.exe",
+	};
+	if (hwnd == nullptr) return false;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	auto* process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (process == nullptr) return false;
+	wchar_t path[MAX_PATH] {};
+	DWORD size = MAX_PATH;
+	const auto ok = QueryFullProcessImageNameW(process, 0, path, &size) != FALSE;
+	CloseHandle(process);
+	if (!ok) return false;
+	const auto* name = wcsrchr(path, L'\\');
+	name = name != nullptr ? name + 1 : path;
+	for (const auto* candidate: NAMES) {
+		if (_wcsicmp(name, candidate) == 0) return true;
+	}
+	return false;
+}
+
+void CALLBACK rehook(HWND /*hwnd*/, UINT /*message*/, UINT_PTR /*id*/, DWORD /*time*/) {
+	if (gHook == nullptr || !isVirtualMachine(GetForegroundWindow())) {
+		if (gRehookTimer != 0) KillTimer(nullptr, std::exchange(gRehookTimer, 0));
+		return;
+	}
+	auto* fresh = SetWindowsHookExW(WH_KEYBOARD_LL, &hookProc, GetModuleHandleW(nullptr), 0);
+	if (fresh != nullptr) UnhookWindowsHookEx(std::exchange(gHook, fresh));
+}
+
+void followVirtualMachine(HWND hwnd) {
+	if (gRehookTimer != 0 || !isVirtualMachine(hwnd)) return;
+	gRehookTimer = SetTimer(nullptr, 0, 500, &rehook);
+}
+
 void hookThreadMain() {
 	MSG msg {};
 	PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
@@ -340,6 +383,7 @@ void hookThreadMain() {
 	prioritizeInputThread(THREAD_PRIORITY_TIME_CRITICAL);
 
 	auto* hook = SetWindowsHookExW(WH_KEYBOARD_LL, &hookProc, GetModuleHandleW(nullptr), 0);
+	gHook = hook;
 
 	if (hook == nullptr) {
 		auto error = GetLastError();
@@ -360,14 +404,16 @@ void hookThreadMain() {
 	);
 
 	gForegroundBlocked.store(isHiddenFromUs(GetForegroundWindow()));
+	followVirtualMachine(GetForegroundWindow());
 
 	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
 		TranslateMessage(&msg);
 		DispatchMessageW(&msg);
 	}
 
+	if (gRehookTimer != 0) KillTimer(nullptr, std::exchange(gRehookTimer, 0));
 	if (foregroundHook != nullptr) UnhookWinEvent(foregroundHook);
-	UnhookWindowsHookEx(hook);
+	UnhookWindowsHookEx(std::exchange(gHook, nullptr));
 
 	gHeld.fill({});
 	gTapCandidate = 0;
