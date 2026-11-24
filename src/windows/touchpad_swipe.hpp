@@ -27,11 +27,15 @@ public:
 		Update,
 		End,
 		Vertical,
+		Move,
+		MoveEnd,
 	};
 
 	struct Step {
 		Action action = Action::None;
 		double offset = 0;
+		double dx = 0;
+		double dy = 0;
 		bool forced = false;
 		bool cancelled = false;
 	};
@@ -40,17 +44,23 @@ public:
 
 	Step frame(const QList<TouchpadContact>& contacts, double timeMs);
 	void reset();
+	void setEnabled(bool fourFingers, bool threeFingers);
 
-	[[nodiscard]] bool active() const { return this->state == State::Horizontal; }
+	[[nodiscard]] bool swiping() const { return this->state == State::Horizontal; }
+	[[nodiscard]] bool moving() const { return this->state == State::Moving; }
 
 private:
 	enum class State : quint8 {
 		Waiting,
 		Horizontal,
 		Vertical,
+		Moving,
+		Ignored,
 	};
 
 	[[nodiscard]] Step finish() const;
+	[[nodiscard]] bool enabledFor(qsizetype count) const;
+	[[nodiscard]] State startMoving() const;
 	[[nodiscard]] bool fingersSwitched(qsizetype count, double timeMs);
 	void advance(double moved);
 	void trackReturn();
@@ -59,6 +69,12 @@ private:
 	QList<TouchpadContact> previous;
 	State state = State::Waiting;
 	qsizetype fingers = 0;
+	bool fourFingers = true;
+	bool threeFingers = true;
+	bool spent = false;
+	double startSpread = 0;
+	double moveX = 0;
+	double moveY = 0;
 	qsizetype pendingFingers = -1;
 	double pendingSince = 0;
 	double totalX = 0;

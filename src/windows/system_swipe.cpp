@@ -1,4 +1,5 @@
 #include "system_swipe.hpp"
+#include <array>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -29,19 +30,28 @@ namespace {
 QS_LOGGING_CATEGORY(logSystemSwipe, "quickshell.windows.systemswipe", QtWarningMsg);
 
 constexpr auto TOUCHPAD_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\PrecisionTouchPad";
-constexpr auto SWIPE_VALUE = L"FourFingerSlideEnabled";
-constexpr auto UNTOUCHED_VALUE = L"ThreeFingerSlideEnabled";
+constexpr auto UNTOUCHED_VALUE = L"ThreeFingerTapEnabled";
 constexpr auto STATE_KEY = L"Software\\Quickshell";
-constexpr auto SWIPE_BACKUP = L"TouchpadSwipeBackup";
 constexpr auto SWIPE_MUTEX = L"Local\\QuickshellTouchpadSwipe";
-constexpr int SWIPE_SETTING = 18;
-constexpr int UNTOUCHED_SETTING = 17;
+constexpr int UNTOUCHED_SETTING = 15;
 constexpr DWORD UNTOUCHED_DEFAULT = 1;
 constexpr DWORD MINIMUM_BUILD = 26100;
 constexpr int RETRY_MS = 1000;
 constexpr int EXPLORER_SETTLE_MS = 2000;
 constexpr int MAX_ATTEMPTS = 60;
 constexpr size_t MAX_PATH_LENGTH = 32768;
+
+struct Swipe {
+	SystemSwipe::Fingers fingers;
+	const wchar_t* value;
+	const wchar_t* backup;
+	int setting;
+};
+
+constexpr std::array SWIPES = {
+    Swipe {SystemSwipe::FourFingers, L"FourFingerSlideEnabled", L"TouchpadSwipeBackup", 18},
+    Swipe {SystemSwipe::ThreeFingers, L"ThreeFingerSlideEnabled", L"TouchpadMoveBackup", 17},
+};
 
 struct SwipeSetting {
 	DWORD present = 0;
@@ -69,17 +79,15 @@ bool readSetting(const wchar_t* name, SwipeSetting& setting) {
 	return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
 
-bool readSwipe(SwipeSetting& setting) { return readSetting(SWIPE_VALUE, setting); }
-
-bool writeSwipe(const SwipeSetting& setting) {
+bool writeSetting(const wchar_t* name, const SwipeSetting& setting) {
 	if (setting.present == 0) {
-		const auto status = RegDeleteKeyValueW(HKEY_CURRENT_USER, TOUCHPAD_KEY, SWIPE_VALUE);
+		const auto status = RegDeleteKeyValueW(HKEY_CURRENT_USER, TOUCHPAD_KEY, name);
 		return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 	}
 	const auto status = RegSetKeyValueW(
 	    HKEY_CURRENT_USER,
 	    TOUCHPAD_KEY,
-	    SWIPE_VALUE,
+	    name,
 	    REG_DWORD,
 	    &setting.value,
 	    sizeof(setting.value)
@@ -87,13 +95,13 @@ bool writeSwipe(const SwipeSetting& setting) {
 	return status == ERROR_SUCCESS;
 }
 
-bool restoreSwipeSetting() {
+bool restoreSetting(const Swipe& swipe) {
 	SwipeSetting previous;
 	DWORD size = sizeof(previous);
 	const auto status = RegGetValueW(
 	    HKEY_CURRENT_USER,
 	    STATE_KEY,
-	    SWIPE_BACKUP,
+	    swipe.backup,
 	    RRF_RT_REG_BINARY,
 	    nullptr,
 	    &previous,
@@ -103,9 +111,11 @@ bool restoreSwipeSetting() {
 	if (status != ERROR_SUCCESS || size != sizeof(previous) || previous.present > 1) return false;
 
 	SwipeSetting current;
-	if (!readSwipe(current)) return false;
-	if (current.present != 0 && current.value == 0 && !writeSwipe(previous)) return false;
-	const auto removed = RegDeleteKeyValueW(HKEY_CURRENT_USER, STATE_KEY, SWIPE_BACKUP);
+	if (!readSetting(swipe.value, current)) return false;
+	if (current.present != 0 && current.value == 0 && !writeSetting(swipe.value, previous)) {
+		return false;
+	}
+	const auto removed = RegDeleteKeyValueW(HKEY_CURRENT_USER, STATE_KEY, swipe.backup);
 	return removed == ERROR_SUCCESS || removed == ERROR_FILE_NOT_FOUND;
 }
 
@@ -142,11 +152,13 @@ public:
 		return value == (untouched.present != 0 ? untouched.value : UNTOUCHED_DEFAULT);
 	}
 
-	bool reload() { return this->valid() && SUCCEEDED(this->cache->OnSettingChanged(SWIPE_SETTING)); }
+	bool reload(const Swipe& swipe) {
+		return this->valid() && SUCCEEDED(this->cache->OnSettingChanged(swipe.setting));
+	}
 
-	bool swipeOff() {
+	bool off(const Swipe& swipe) {
 		DWORD value = 1;
-		return this->valid() && SUCCEEDED(this->cache->GetDWORD(SWIPE_SETTING, &value)) && value == 0;
+		return this->valid() && SUCCEEDED(this->cache->GetDWORD(swipe.setting, &value)) && value == 0;
 	}
 
 private:
@@ -154,36 +166,41 @@ private:
 	Microsoft::WRL::ComPtr<SwipeSettingsCache> cache;
 };
 
-bool turnOffSwipe() {
+bool turnOff(const Swipe& swipe) {
 	SwipeSetting previous;
-	if (!restoreSwipeSetting() || !readSwipe(previous)) return false;
+	if (!restoreSetting(swipe) || !readSetting(swipe.value, previous)) return false;
 
 	SettingsCache cache;
 	if (!cache.understood()) return false;
-	if (previous.present != 0 && previous.value == 0) return cache.reload() && cache.swipeOff();
-	if (cache.swipeOff()) return true;
+	if (previous.present != 0 && previous.value == 0) return cache.reload(swipe) && cache.off(swipe);
+	if (cache.off(swipe)) return true;
 
 	const auto saved = RegSetKeyValueW(
 	    HKEY_CURRENT_USER,
 	    STATE_KEY,
-	    SWIPE_BACKUP,
+	    swipe.backup,
 	    REG_BINARY,
 	    &previous,
 	    sizeof(previous)
 	);
 	if (saved != ERROR_SUCCESS) return false;
 
-	const auto reloaded = writeSwipe({.present = 1, .value = 0}) && cache.reload();
-	const auto restored = restoreSwipeSetting();
-	if (reloaded && restored && cache.swipeOff()) return true;
-	cache.reload();
+	const auto reloaded = writeSetting(swipe.value, {.present = 1, .value = 0}) && cache.reload(swipe);
+	const auto restored = restoreSetting(swipe);
+	if (reloaded && restored && cache.off(swipe)) return true;
+	cache.reload(swipe);
 	return false;
 }
 
-bool turnOnSwipe() {
-	const auto restored = restoreSwipeSetting();
+bool turnOn(int fingers) {
 	SettingsCache cache;
-	return cache.reload() && restored;
+	auto done = true;
+	for (const auto& swipe: SWIPES) {
+		if ((fingers & swipe.fingers) == 0) continue;
+		const auto restored = restoreSetting(swipe);
+		done = cache.reload(swipe) && restored && done;
+	}
+	return done;
 }
 
 }
@@ -192,12 +209,12 @@ SystemSwipe::SystemSwipe(QObject* parent): QObject(parent) {
 	this->retry.setSingleShot(true);
 	QObject::connect(&this->retry, &QTimer::timeout, this, &SystemSwipe::acquire);
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
-		this->setSuppressRequested(false);
+		this->setRequested(0);
 	});
 }
 
 SystemSwipe::~SystemSwipe() {
-	this->setSuppressRequested(false);
+	this->setRequested(0);
 	if (this->guard != nullptr) CloseHandle(this->guard);
 }
 
@@ -206,17 +223,17 @@ int SystemSwipe::restoreWhenAbandoned() {
 	if (mutex == nullptr) return 1;
 	const auto ownership = WaitForSingleObject(mutex, INFINITE);
 	if (ownership != WAIT_OBJECT_0 && ownership != WAIT_ABANDONED) return 1;
-	const auto restored = turnOnSwipe();
+	const auto restored = turnOn(FourFingers | ThreeFingers);
 	ReleaseMutex(mutex);
 	CloseHandle(mutex);
 	return restored ? 0 : 1;
 }
 
-void SystemSwipe::setSuppressRequested(bool requested) {
-	if (requested == this->requested) return;
-	this->requested = requested;
+void SystemSwipe::setRequested(int fingers) {
+	if (fingers == this->requested) return;
+	const auto before = std::exchange(this->requested, fingers);
 	this->attempts = 0;
-	if (!requested) {
+	if (fingers == 0) {
 		if (auto* app = QCoreApplication::instance()) app->removeNativeEventFilter(this);
 		this->release();
 		return;
@@ -226,7 +243,7 @@ void SystemSwipe::setSuppressRequested(bool requested) {
 		                          << windowsBuild();
 		return;
 	}
-	QCoreApplication::instance()->installNativeEventFilter(this);
+	if (before == 0) QCoreApplication::instance()->installNativeEventFilter(this);
 	this->acquire();
 }
 
@@ -243,29 +260,35 @@ bool SystemSwipe::nativeEventFilter(
 }
 
 void SystemSwipe::acquire() {
-	if (!this->requested) return;
-	if (this->lock() && this->startGuard() && turnOffSwipe()) {
-		this->setSuppressed(true);
-		return;
+	if (this->requested == 0) return;
+	if (this->lock() && this->startGuard()) {
+		const auto dropped = this->mSuppressed & ~this->requested;
+		if (dropped != 0) turnOn(dropped);
+		auto off = 0;
+		for (const auto& swipe: SWIPES) {
+			if ((this->requested & swipe.fingers) != 0 && turnOff(swipe)) off |= swipe.fingers;
+		}
+		this->setSuppressed(off);
+		if (off == this->requested) return;
 	}
 	if (++this->attempts < MAX_ATTEMPTS) {
 		this->retry.start(RETRY_MS);
 		return;
 	}
-	qCWarning(logSystemSwipe) << "Could not turn the Windows touchpad swipe off.";
-	this->release();
+	qCWarning(logSystemSwipe) << "Could not turn every Windows touchpad swipe off.";
+	if (this->mSuppressed == 0) this->release();
 }
 
 void SystemSwipe::release() {
 	this->retry.stop();
 	if (this->mutex != nullptr) {
-		if (!turnOnSwipe()) {
+		if (!turnOn(FourFingers | ThreeFingers)) {
 			qCWarning(logSystemSwipe) << "Could not turn the Windows touchpad swipe back on.";
 		}
 		ReleaseMutex(this->mutex);
 		CloseHandle(std::exchange(this->mutex, nullptr));
 	}
-	this->setSuppressed(false);
+	this->setSuppressed(0);
 }
 
 bool SystemSwipe::lock() {
@@ -319,10 +342,10 @@ bool SystemSwipe::startGuard() {
 	return true;
 }
 
-void SystemSwipe::setSuppressed(bool suppressed) {
-	if (suppressed == this->mSuppressed) return;
-	this->mSuppressed = suppressed;
-	qCInfo(logSystemSwipe) << "Windows touchpad swipe" << (suppressed ? "off" : "back on");
+void SystemSwipe::setSuppressed(int fingers) {
+	if (fingers == this->mSuppressed) return;
+	this->mSuppressed = fingers;
+	qCInfo(logSystemSwipe) << "Windows touchpad swipes turned off:" << fingers;
 	emit this->suppressedChanged();
 }
 

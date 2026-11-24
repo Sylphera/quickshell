@@ -17,6 +17,11 @@ class SystemSwipe
 	Q_OBJECT;
 
 public:
+	enum Fingers : int {
+		FourFingers = 1,
+		ThreeFingers = 2,
+	};
+
 	static constexpr auto RESTORE_ARGUMENT = "--restore-touchpad-swipe";
 	static int restoreWhenAbandoned();
 
@@ -24,8 +29,8 @@ public:
 	~SystemSwipe() override;
 	Q_DISABLE_COPY_MOVE(SystemSwipe);
 
-	[[nodiscard]] bool suppressed() const { return this->mSuppressed; }
-	void setSuppressRequested(bool requested);
+	[[nodiscard]] int suppressed() const { return this->mSuppressed; }
+	void setRequested(int fingers);
 
 	bool nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) override;
 
@@ -37,14 +42,14 @@ private:
 	void release();
 	bool lock();
 	bool startGuard();
-	void setSuppressed(bool suppressed);
+	void setSuppressed(int fingers);
 
 	QTimer retry;
 	int attempts = 0;
 	HANDLE mutex = nullptr;
 	HANDLE guard = nullptr;
-	bool requested = false;
-	bool mSuppressed = false;
+	int requested = 0;
+	int mSuppressed = 0;
 };
 
 }

@@ -133,6 +133,8 @@ public:
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
 
+	bool beginGestureMove(TrackedWindow* window);
+	void endGestureMove(TrackedWindow* window, std::optional<Edge> direction);
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
 	void haltMotion(HWND hwnd, bool resize);
 	void edgeDrag(const QPoint& delta);

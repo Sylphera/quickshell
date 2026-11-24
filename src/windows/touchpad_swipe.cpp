@@ -12,16 +12,30 @@ namespace qs::windows {
 namespace {
 
 constexpr qsizetype SWIPE_FINGERS = 4;
+constexpr qsizetype MOVE_FINGERS = 3;
 constexpr double SWIPE_DISTANCE = 700;
 constexpr double SWIPE_FORCE_SPEED = 5;
 constexpr double SWIPE_MINIMUM = 2;
 constexpr double START_THRESHOLD = 5;
+constexpr double MOVE_START_THRESHOLD = 16;
 constexpr double DIRECTION_LOCK_THRESHOLD = 10;
 constexpr double RETURN_THRESHOLD = 35;
 constexpr double FINGER_SWITCH_MS = 100;
 constexpr double LIBINPUT_BASELINE = 0.9;
 constexpr double LIBINPUT_TOUCHPAD_SLOWDOWN = 0.2968;
 constexpr double UNITS_PER_MM = 1000 / 25.4 * LIBINPUT_BASELINE * LIBINPUT_TOUCHPAD_SLOWDOWN;
+
+double spreadOf(const QList<TouchpadContact>& contacts) {
+	auto x = 0.0;
+	auto y = 0.0;
+	for (const auto& contact: contacts) {
+		x += contact.x / static_cast<double>(contacts.length());
+		y += contact.y / static_cast<double>(contacts.length());
+	}
+	auto spread = 0.0;
+	for (const auto& contact: contacts) spread += std::hypot(contact.x - x, contact.y - y);
+	return spread / static_cast<double>(contacts.length()) * UNITS_PER_MM;
+}
 
 }
 
@@ -43,15 +57,19 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 	if (contacts.isEmpty()) {
 		auto step = this->finish();
 		this->reset();
+		this->spent = false;
 		return step;
 	}
 
 	auto before = std::exchange(this->previous, contacts);
 	if (this->fingersSwitched(contacts.length(), timeMs)) {
 		auto step = this->finish();
+		if (step.action == Action::MoveEnd && contacts.length() > this->fingers) step.cancelled = true;
+		if (step.action != Action::None) this->spent = true;
 		this->reset();
 		this->previous = contacts;
 		this->fingers = contacts.length();
+		this->startSpread = spreadOf(contacts);
 		return step;
 	}
 
@@ -65,13 +83,23 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 		dy += contact.y - old->y;
 		matched++;
 	}
-	if (this->fingers != SWIPE_FINGERS || matched == 0 || (dx == 0 && dy == 0)) return {};
+	if (!this->enabledFor(this->fingers) || matched == 0 || (dx == 0 && dy == 0)) return {};
 	dx *= UNITS_PER_MM / matched;
 	dy *= UNITS_PER_MM / matched;
 
 	if (this->state == State::Waiting) {
 		this->totalX += dx;
 		this->totalY += dy;
+		if (this->fingers == MOVE_FINGERS) this->state = this->startMoving();
+	}
+	if (this->state == State::Moving) {
+		this->moveX += dx;
+		this->moveY += dy;
+		return {.action = Action::Move, .dx = this->moveX, .dy = this->moveY};
+	}
+	if (this->fingers == MOVE_FINGERS) return {};
+
+	if (this->state == State::Waiting) {
 		auto horizontal = std::abs(this->totalX);
 		auto vertical = std::abs(this->totalY);
 		if (std::max(horizontal, vertical) < START_THRESHOLD) return {};
@@ -84,11 +112,30 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 	return {.action = Action::Update, .offset = this->delta / SWIPE_DISTANCE};
 }
 
+void TouchpadSwipe::setEnabled(bool fourFingers, bool threeFingers) {
+	this->fourFingers = fourFingers;
+	this->threeFingers = threeFingers;
+}
+
+bool TouchpadSwipe::enabledFor(qsizetype count) const {
+	if (count == SWIPE_FINGERS) return this->fourFingers;
+	return count == MOVE_FINGERS && this->threeFingers && !this->spent;
+}
+
+TouchpadSwipe::State TouchpadSwipe::startMoving() const {
+	auto moved = std::hypot(this->totalX, this->totalY);
+	if (moved < MOVE_START_THRESHOLD) return State::Waiting;
+	return std::abs(spreadOf(this->previous) - this->startSpread) > moved ? State::Ignored : State::Moving;
+}
+
 void TouchpadSwipe::reset() {
 	this->previous.clear();
 	this->state = State::Waiting;
 	this->fingers = 0;
 	this->pendingFingers = -1;
+	this->startSpread = 0;
+	this->moveX = 0;
+	this->moveY = 0;
 	this->totalX = 0;
 	this->totalY = 0;
 	this->delta = 0;
@@ -101,6 +148,9 @@ void TouchpadSwipe::reset() {
 
 TouchpadSwipe::Step TouchpadSwipe::finish() const {
 	if (this->state == State::Vertical) return {.action = Action::Vertical};
+	if (this->state == State::Moving) {
+		return {.action = Action::MoveEnd, .dx = this->moveX, .dy = this->moveY};
+	}
 	if (this->state != State::Horizontal) return {};
 	return {
 	    .action = Action::End,

@@ -2988,6 +2988,33 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 	this->markLayout(layout);
 }
 
+bool TilingManager::beginGestureMove(TrackedWindow* window) {
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end() || iter->second.fullscreen || this->dragging != nullptr) return false;
+	this->haltMotion(window->hwnd(), false);
+	this->onMoveSizeStarted(window);
+	return this->dragging == window;
+}
+
+void TilingManager::endGestureMove(TrackedWindow* window, std::optional<Edge> direction) {
+	if (window != this->dragging) return;
+	this->dragging = nullptr;
+	this->dragOrigin = QRect();
+
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end()) return;
+	auto& m = iter->second;
+	if (m.layout == nullptr) {
+		this->markWindow(window);
+		return;
+	}
+
+	m.dropped = true;
+	m.target = QRect();
+	if (direction && this->tiledActive() == &m) this->moveDirection(*direction);
+	this->markLayout(m.layout);
+}
+
 void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	auto* from = m.layout;
 	auto self = idOf(m.window);

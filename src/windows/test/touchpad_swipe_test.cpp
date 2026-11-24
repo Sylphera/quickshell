@@ -24,6 +24,8 @@ struct Hand {
 	TouchpadSwipe::Step end;
 	int ends = 0;
 	int verticals = 0;
+	int moves = 0;
+	TouchpadSwipe::Step moved;
 
 	explicit Hand(bool left = true, bool right = true)
 	    : swipe([left, right](int way) { return way < 0 ? left : right; }) {}
@@ -36,6 +38,10 @@ struct Hand {
 		this->time += FRAME_MS;
 		this->last = this->swipe.frame(contacts, this->time);
 		if (this->last.action == Action::Vertical) this->verticals++;
+		if (this->last.action == Action::MoveEnd) {
+			this->moves++;
+			this->moved = this->last;
+		}
 		if (this->last.action != Action::End) return;
 		this->end = this->last;
 		this->ends++;
@@ -188,6 +194,82 @@ private slots:
 		hand.move(0, -5, 20, 3);
 		hand.lift();
 		QCOMPARE(hand.verticals, 1);
+	}
+
+	void threeFingersMove() {
+		auto hand = Hand();
+		hand.frame(3);
+		hand.move(20, 5, 40, 3);
+		QCOMPARE(hand.last.action, Action::Move);
+		QVERIFY(hand.last.dx > 180 && hand.last.dx < 215);
+		QVERIFY(hand.last.dy > 40 && hand.last.dy < 55);
+		hand.lift();
+		QCOMPARE(hand.moves, 1);
+		QVERIFY(!hand.moved.cancelled);
+		QCOMPARE(hand.ends, 0);
+	}
+
+	void aSmallThreeFingerMotionIsNotAMove() {
+		auto hand = Hand();
+		hand.frame(3);
+		hand.move(1.3, 0, 20, 3);
+		hand.lift();
+		QCOMPARE(hand.moves, 0);
+	}
+
+	void aFourthFingerCancelsTheMove() {
+		auto hand = Hand();
+		hand.frame(3);
+		hand.move(5, 0, 20, 3);
+		hand.move(5, 0, 20, 4);
+		QCOMPARE(hand.moves, 1);
+		QVERIFY(hand.moved.cancelled);
+	}
+
+	void liftingASwipeDoesNotStartAMove() {
+		auto hand = Hand();
+		hand.frame(4);
+		hand.move(-20, 0, 30);
+		hand.move(-10, 0, 40, 3);
+		hand.lift();
+		QCOMPARE(hand.ends, 1);
+		QCOMPARE(hand.moves, 0);
+		hand.frame(3);
+		hand.move(-10, 0, 20, 3);
+		hand.lift();
+		QCOMPARE(hand.moves, 1);
+	}
+
+	void turnedOffFingersDoNothing() {
+		auto hand = Hand();
+		hand.swipe.setEnabled(true, false);
+		hand.frame(3);
+		hand.move(20, 0, 40, 3);
+		hand.lift();
+		QCOMPARE(hand.moves, 0);
+		hand.swipe.setEnabled(false, true);
+		hand.frame(4);
+		hand.move(20, 0, 40);
+		hand.lift();
+		QCOMPARE(hand.ends, 0);
+	}
+
+	void aPinchIsNotAMove() {
+		auto swipe = TouchpadSwipe([](int) { return true; });
+		auto time = 0.0;
+		auto action = Action::None;
+		for (auto i = 0; i <= 40; i++) {
+			auto open = i * 0.5;
+			time += FRAME_MS;
+			auto step = swipe.frame(
+			    {{.id = 0, .x = 60 - open, .y = 30},
+			     {.id = 1, .x = 75 + open, .y = 30},
+			     {.id = 2, .x = 67 + open * 0.4, .y = 45 + open}},
+			    time
+			);
+			if (step.action != Action::None) action = step.action;
+		}
+		QCOMPARE(action, Action::None);
 	}
 
 	void onlyFourFingersSwipe() {

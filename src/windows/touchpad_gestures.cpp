@@ -39,23 +39,47 @@ TouchpadGestures::TouchpadGestures(QObject* parent)
 	);
 }
 
-TouchpadGestures::~TouchpadGestures() { this->setSwipeEnabled(false); }
+TouchpadGestures::~TouchpadGestures() {
+	this->setSwipeEnabled(false);
+	this->setMoveEnabled(false);
+}
 
 void TouchpadGestures::setSwipeEnabled(bool enabled) {
 	if (enabled == this->mSwipeEnabled) return;
-	if (enabled) {
-		if (gSwiping != nullptr) gSwiping->setSwipeEnabled(false);
-		gSwiping = this;
-	} else if (gSwiping == this) {
-		gSwiping = nullptr;
-	}
 	this->mSwipeEnabled = enabled;
-	this->systemSwipe.setSuppressRequested(enabled);
+	this->updateRequested();
 	emit this->swipeEnabledChanged();
 }
 
+void TouchpadGestures::setMoveEnabled(bool enabled) {
+	if (enabled == this->mMoveEnabled) return;
+	this->mMoveEnabled = enabled;
+	this->updateRequested();
+	emit this->moveEnabledChanged();
+}
+
+void TouchpadGestures::updateRequested() {
+	auto fingers = (this->mSwipeEnabled ? SystemSwipe::FourFingers : 0)
+	             | (this->mMoveEnabled ? SystemSwipe::ThreeFingers : 0);
+	if (fingers != 0 && gSwiping != this) {
+		if (auto* other = gSwiping.data()) {
+			other->setSwipeEnabled(false);
+			other->setMoveEnabled(false);
+		}
+		gSwiping = this;
+	} else if (fingers == 0 && gSwiping == this) {
+		gSwiping = nullptr;
+	}
+	this->systemSwipe.setRequested(fingers);
+}
+
 void TouchpadGestures::onSystemSwipeChanged() {
-	if (this->systemSwipe.suppressed()) {
+	auto fingers = this->systemSwipe.suppressed();
+	this->swipe.setEnabled(
+	    (fingers & SystemSwipe::FourFingers) != 0,
+	    (fingers & SystemSwipe::ThreeFingers) != 0
+	);
+	if (fingers != 0) {
 		this->reader.start();
 	} else {
 		this->reader.stop();
@@ -76,14 +100,19 @@ void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double ti
 		DesktopSlide::instance()->swipeEnd(release);
 	} else if (step.action == TouchpadSwipe::Action::Vertical) {
 		emit this->verticalSwiped();
+	} else if (step.action == TouchpadSwipe::Action::Move) {
+		this->move.update(step.dx, step.dy);
+	} else if (step.action == TouchpadSwipe::Action::MoveEnd) {
+		this->move.end(step.dx, step.dy, step.cancelled);
 	}
-	if (this->swipe.active()) this->watchdog.start();
+	if (this->swipe.swiping() || this->swipe.moving()) this->watchdog.start();
 	else this->watchdog.stop();
 }
 
 void TouchpadGestures::cancelSwipe() {
 	this->watchdog.stop();
-	auto swiping = this->swipe.active();
+	auto swiping = this->swipe.swiping();
+	if (this->swipe.moving()) this->move.end(0, 0, true);
 	this->swipe.reset();
 	if (!swiping) return;
 	qCDebug(logGestures) << "Swipe cancelled";
@@ -93,7 +122,7 @@ void TouchpadGestures::cancelSwipe() {
 
 void TouchpadGestures::simulateSwipe(double distance, int durationMs) {
 	qCDebug(logGestures) << "Simulating a swipe of" << distance << "desktops in" << durationMs << "ms";
-	if (this->simulation.isActive() || this->swipe.active()) return;
+	if (this->simulation.isActive() || this->swipe.swiping()) return;
 	this->distance = distance;
 	this->durationMs = std::max(1, durationMs);
 	this->clock.start();

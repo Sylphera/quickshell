@@ -9,6 +9,7 @@
 #include <qtmetamacros.h>
 
 #include "system_swipe.hpp"
+#include "touchpad_move.hpp"
 #include "touchpad_reader.hpp"
 #include "touchpad_swipe.hpp"
 
@@ -17,6 +18,7 @@ namespace qs::windows {
 class TouchpadGestures: public QObject {
 	Q_OBJECT;
 	Q_PROPERTY(bool swipeEnabled READ swipeEnabled WRITE setSwipeEnabled NOTIFY swipeEnabledChanged);
+	Q_PROPERTY(bool moveEnabled READ moveEnabled WRITE setMoveEnabled NOTIFY moveEnabledChanged);
 	QML_ELEMENT;
 	QML_SINGLETON;
 
@@ -27,11 +29,14 @@ public:
 
 	[[nodiscard]] bool swipeEnabled() const { return this->mSwipeEnabled; }
 	void setSwipeEnabled(bool enabled);
+	[[nodiscard]] bool moveEnabled() const { return this->mMoveEnabled; }
+	void setMoveEnabled(bool enabled);
 
 	Q_INVOKABLE void simulateSwipe(double distance, int durationMs);
 
 signals:
 	void swipeEnabledChanged();
+	void moveEnabledChanged();
 	void verticalSwiped();
 
 private:
@@ -39,12 +44,15 @@ private:
 	void onFrame(const QList<TouchpadContact>& contacts, double timeMs);
 	void cancelSwipe();
 	void onSystemSwipeChanged();
+	void updateRequested();
 
 	SystemSwipe systemSwipe;
 	TouchpadReader reader;
 	TouchpadSwipe swipe;
+	TouchpadMove move;
 	QTimer watchdog;
 	bool mSwipeEnabled = false;
+	bool mMoveEnabled = false;
 
 	QTimer simulation;
 	QElapsedTimer clock;
