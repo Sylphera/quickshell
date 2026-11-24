@@ -1,4 +1,7 @@
 #include "process.hpp"
+#ifdef _WIN32
+#include <qt_windows.h>
+#endif
 #include <csignal> // NOLINT
 #include <utility>
 
@@ -213,6 +216,12 @@ void Process::startProcessIfReady() {
 	if (!this->mStdinEnabled) this->process->closeWriteChannel();
 
 	this->setupEnvironment(this->process);
+#ifdef _WIN32
+	this->process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+		args->flags &= ~static_cast<DWORD>(CREATE_NEW_CONSOLE);
+		args->flags |= CREATE_NO_WINDOW;
+	});
+#endif
 	this->process->start(cmd, args);
 }
 
