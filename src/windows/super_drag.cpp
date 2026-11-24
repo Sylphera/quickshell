@@ -75,6 +75,7 @@ constexpr UINT POS_FLAGS = SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | S
 static_assert(sizeof(LPARAM) >= sizeof(uint64_t));
 
 std::atomic<bool> gEnabled = false;      // NOLINT
+std::atomic<bool> gSuspended = false;    // NOLINT
 std::atomic<DWORD> gWorkerId = 0;        // NOLINT
 std::atomic<bool> gWorkerStop = false;   // NOLINT
 std::atomic<HWND> gGuiWindow = nullptr;  // NOLINT
@@ -722,6 +723,8 @@ void SuperDragManager::setEnabled(bool enabled) {
 	emit this->enabledChanged();
 }
 
+void SuperDragManager::setSuspended(bool suspended) { gSuspended.store(suspended); }
+
 void SuperDragManager::setWheelColumns(bool enabled) {
 	if (enabled == this->wheelColumns) return;
 	this->wheelColumns = enabled;
@@ -926,6 +929,7 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 		hook.side = 0;
 		return true;
 	}
+	if (gSuspended.load(std::memory_order_relaxed)) return false;
 	if (message == WM_XBUTTONDOWN) {
 		auto* gui = gGuiWindow.load();
 		if (!gEnabled.load(std::memory_order_relaxed) || gui == nullptr) return false;
@@ -966,6 +970,7 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 }
 
 bool SuperDragManager::onWheel(WPARAM message, const MSLLHOOKSTRUCT* info) {
+	if (gSuspended.load(std::memory_order_relaxed)) return false;
 	if (!isDown(VK_LWIN) && !isDown(VK_RWIN)) return false;
 
 	auto horizontal = message == WM_MOUSEHWHEEL;

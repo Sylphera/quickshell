@@ -18,6 +18,7 @@
 #include <qtimer.h>
 #include <qtypes.h>
 
+#include "../hotkeys.hpp"
 #include "../keyboard_hook.hpp"
 #include "../kill_mode.hpp"
 #include "../scratchpad.hpp"
@@ -501,9 +502,12 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 	} else if (name == "screenzoom") {
 		if (args == "in" || args == "out") adjustScreenZoom(args == "in");
 		else if (args == "reset") resetScreenZoom();
+	} else if (name == "submap") {
+		auto* hotkeys = qs::windows::hotkeys::HotkeyManager::instance();
+		hotkeys->setPassthrough(args.trimmed() != "reset" && !hotkeys->passthrough());
 	} else if (name == "pseudo" || name == "focusmonitor"
 	           || name == "movecurrentworkspacetomonitor"
-	           || name == "swapnext" || name == "togglegroup" || name == "submap")
+	           || name == "swapnext" || name == "togglegroup")
 	{
 		this->unsupported(name);
 	} else {

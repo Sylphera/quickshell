@@ -65,6 +65,8 @@ public:
 	Q_DISABLE_COPY_MOVE(HotkeyManager);
 
 	static HotkeyManager* instance();
+	void setPassthrough(bool passthrough);
+	[[nodiscard]] bool passthrough() const { return this->mPassthrough; }
 
 	void setShellDir(const QString& shellDir);
 	void reload();
@@ -104,6 +106,7 @@ private:
 	void parse(const QByteArray& data, const QString& path);
 	void unregisterAll();
 	void registerAll();
+	bool mPassthrough = false;
 	qsizetype addToTrigger(qsizetype index);
 	void resetTrigger(qsizetype index);
 	void registerTriggers();

@@ -29,6 +29,8 @@
 #include <qvariant.h>
 
 #include "../core/generation.hpp"
+#include "services/notifications/server.hpp"
+#include "super_drag.hpp"
 #include "../core/instanceinfo.hpp"
 #include "../core/rootwrapper.hpp"
 #include "../io/ipchandler.hpp"
@@ -845,10 +847,28 @@ void HotkeyManager::registerAll() {
 	if (this->messageWindow == nullptr) return;
 
 	for (auto i = 0; i < this->binds.size(); i++) {
-		if (this->binds.at(i).action != Bind::Action::Native) this->addToTrigger(i);
+		const auto& bind = this->binds.at(i);
+		if (bind.action == Bind::Action::Native) continue;
+		if (this->mPassthrough && (bind.action != Bind::Action::Dispatch || !bind.argument.startsWith("submap")))
+			continue;
+		this->addToTrigger(i);
 	}
 
 	this->registerTriggers();
+}
+
+void HotkeyManager::setPassthrough(bool passthrough) {
+	if (passthrough == this->mPassthrough) return;
+	this->mPassthrough = passthrough;
+	SuperDragManager::setSuspended(passthrough);
+	this->unregisterAll();
+	this->registerAll();
+	emit this->bindsChanged();
+	services::notifications::NotificationServer::instance()->notifySend(
+	    passthrough ? "Entered Virtual Machine submap" : "Exited Virtual Machine submap",
+	    passthrough ? "Keybinds disabled. hit SUPER+ALT+F1 to escape" : "Keybinds re-enabled",
+	    {"-a", "Hyprland"}
+	);
 }
 
 void HotkeyManager::resetTrigger(qsizetype index) {

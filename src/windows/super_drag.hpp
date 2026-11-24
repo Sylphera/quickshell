@@ -24,6 +24,7 @@ public:
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
 	void setWheelColumns(bool enabled);
+	static void setSuspended(bool suspended);
 	[[nodiscard]] bool focusFollowsMouse() const { return this->mFocusFollowsMouse; }
 	void setFocusFollowsMouse(bool enabled);
 	enum class WheelBind { Workspace, OccupiedWorkspace, MoveWindow };
