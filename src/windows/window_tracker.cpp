@@ -452,8 +452,13 @@ void TrackedWindow::refreshDesktop(bool askShell) {
 	this->bDesktop = static_cast<qint32>(index);
 }
 
-void TrackedWindow::activate() {
+void TrackedWindow::activate(bool followDesktop) {
 	auto* desktops = this->tracker->desktops();
+	if (!followDesktop) {
+		if (desktops->isWindowOnCurrent(this->mHwnd)) this->raise();
+		return;
+	}
+
 	auto desktop = desktops->windowDesktopIndex(this->mHwnd);
 	if (desktop == -1 || desktop == desktops->currentIndex()) {
 		this->raise();

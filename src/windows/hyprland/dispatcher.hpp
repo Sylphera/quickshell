@@ -42,6 +42,7 @@ private:
 	void fullscreen(const QString& selector, int mode);
 	void pin(qs::windows::TrackedWindow* window);
 	void moveFocus(const QString& direction);
+	void cycleFocus(bool backwards);
 	void moveWindow(const QString& direction);
 	void swapWindow(const QString& direction);
 	void toggleFloating(qs::windows::TrackedWindow* window, const QString& action);

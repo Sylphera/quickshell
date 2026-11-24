@@ -31,6 +31,7 @@
 #include "connection.hpp"
 #include "workspace.hpp"
 
+#include <dwmapi.h>
 #include <shellapi.h>
 
 using namespace qs::windows;
@@ -443,6 +444,8 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		this->pin(this->resolveWindow(args));
 	} else if (name == "movefocus") {
 		this->moveFocus(args);
+	} else if (name == "cyclenext") {
+		this->cycleFocus(args == "prev");
 	} else if (name == "movewindow") {
 		this->moveWindow(args);
 	} else if (name == "movewindowpixel") {
@@ -482,7 +485,7 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		if (args == "in" || args == "out") adjustScreenZoom(args == "in");
 		else if (args == "reset") resetScreenZoom();
 	} else if (name == "pseudo" || name == "focusmonitor"
-	           || name == "cyclenext" || name == "movecurrentworkspacetomonitor"
+	           || name == "movecurrentworkspacetomonitor"
 	           || name == "swapnext" || name == "togglegroup" || name == "submap")
 	{
 		this->unsupported(name);
@@ -723,6 +726,38 @@ void Dispatcher::pin(TrackedWindow* window) {
 	if (!desktops->pinWindow(hwnd, pin) || tiling == nullptr) return;
 	SetWindowPos(hwnd, pin ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
 	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+}
+
+void Dispatcher::cycleFocus(bool backwards) {
+	auto* tracker = this->ipc->tracker();
+	auto* desktops = this->ipc->desktops();
+	tracker->syncActive();
+	auto* active = tracker->activeWindow();
+	const auto inSpecial = Scratchpad::holds(active) && Scratchpad::instance()->shown();
+
+	QList<TrackedWindow*> candidates;
+	for (auto* window: tracker->windows()) {
+		auto* hwnd = window->hwnd();
+		if (!IsWindowVisible(hwnd) || !IsWindowEnabled(hwnd) || window->minimized() || IsIconic(hwnd))
+			continue;
+		if (Scratchpad::holds(window) != inSpecial || !desktops->isWindowOnCurrent(hwnd)) continue;
+
+		DWORD cloaked = 0;
+		if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0)
+			continue;
+
+		candidates.append(window);
+	}
+
+	if (candidates.isEmpty()) return;
+	const auto current = candidates.indexOf(active);
+	const auto count = candidates.size();
+	const auto next = current < 0 ? (backwards ? count - 1 : 0)
+	                              : (current + count + (backwards ? -1 : 1)) % count;
+	if (auto* target = candidates.at(next); target != active) {
+		warpToFocusChange(tracker);
+		target->activate(false);
+	}
 }
 
 void Dispatcher::moveFocus(const QString& direction) {

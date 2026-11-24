@@ -69,7 +69,7 @@ public:
 	[[nodiscard]] qint32 desktop() const { return this->bDesktop.value(); }
 	[[nodiscard]] bool isUwpFrame() const { return this->uwpFrame; }
 
-	void activate();
+	void activate(bool followDesktop = true);
 	void close();
 	void setMinimized(bool minimized);
 	void setMaximized(bool maximized);

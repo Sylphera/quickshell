@@ -912,7 +912,9 @@ void HotkeyManager::registerTriggers() {
 		auto& trigger = this->triggers[i];
 		if (trigger.binds.isEmpty() || trigger.mechanism == Bind::Mechanism::Hotkey) continue;
 
-		auto useHook = trigger.kind != HookTrigger::Combo || (trigger.combo.mods & ModSuper) != 0;
+		const auto altTab = trigger.combo.vk == VK_TAB
+		                    && (trigger.combo.mods == ModAlt || trigger.combo.mods == (ModAlt | ModShift));
+		auto useHook = trigger.kind != HookTrigger::Combo || (trigger.combo.mods & ModSuper) != 0 || altTab;
 
 		if (!useHook) {
 			auto modifiers = hotkeyModifiers(trigger.combo.mods) | (trigger.repeat ? 0 : MOD_NOREPEAT);
