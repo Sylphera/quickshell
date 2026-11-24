@@ -395,6 +395,7 @@ struct Tile: AnimatedFrame {
 	bool fadingIn = false;
 	bool closingReflow = false;
 	DwindleFullscreen fullscreen = DwindleFullscreen::None;
+	bool floating = false;
 	int order = 0;
 	bool waitingForSize = false;
 	ComPtr<IDCompositionScaleTransform> pop;
@@ -421,7 +422,18 @@ struct FloatingCopy {
 	Thumbnail source;
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
+	ComPtr<IDCompositionEffectGroup> fade;
 	QRect shown;
+	float opacityFrom = 1.0f;
+	float opacityTarget = 1.0f;
+	qint64 opacityStart = 0;
+
+	[[nodiscard]] float opacityAt(qint64 now) const {
+		if (this->opacityStart == 0) return this->opacityTarget;
+		const auto elapsed = static_cast<double>(now - this->opacityStart) / (Duration * frequency());
+		return std::lerp(this->opacityFrom, this->opacityTarget,
+		                 static_cast<float>(dwindle::ease(elapsed)));
+	}
 };
 
 struct CloseFrame {
@@ -496,7 +508,7 @@ public:
 
 	~Scene() { this->hide(); }
 
-	bool show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused);
+	bool show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused, bool instant = false);
 	void snapshotClose(HWND window);
 	void holdCloseSource(HWND window);
 	void acceptCachedClose(HWND window, CloseFrame frame);
@@ -520,12 +532,12 @@ private:
 	QRect visibleWork;
 	bool prepare(const QList<DwindleTile>& plan);
 	bool addUnderlay(const QList<DwindleTile>& plan);
-	[[nodiscard]] QList<HWND> floatingWindows() const;
-	void copyFloating();
+	[[nodiscard]] QList<HWND> floatingWindows(HWND cover) const;
+	void copyFloating(qint64 now, HWND cover, bool uncovering);
 	bool followFloating(HWND window, FloatingCopy& copy);
 	void dropFloating();
 	[[nodiscard]] bool staysAbove(HWND hwnd) const;
-	bool updateFullscreenBar(HWND window);
+	bool updateFullscreenBar(HWND window, qint64 now, bool instant);
 	void publishDragScene() const;
 	bool makeTileColor();
 	bool addDiagnosticMarker(Tile& tile);
@@ -563,6 +575,7 @@ private:
 	HWND host = nullptr;
 	HWND focused = nullptr;
 	HWND hiddenFront = nullptr;
+	QSet<HWND> coveredFloats;
 	HWND backdropWindow = nullptr;
 	HMONITOR barMonitor = nullptr;
 	ComPtr<IDCompositionDesktopDevice> desktopDevice;
@@ -574,6 +587,7 @@ private:
 	ComPtr<IDCompositionVisual> handoffFrame;
 	Thumbnail backdrop;
 	std::unique_ptr<Thumbnail> fullscreenBar;
+	ComPtr<IDCompositionEffectGroup> fullscreenBarFade;
 	std::map<HWND, std::unique_ptr<Thumbnail>> underlay;
 	std::map<HWND, std::unique_ptr<FloatingCopy>> floats;
 	ComPtr<IDCompositionVisual> dimVisual;
@@ -1213,12 +1227,13 @@ QRect Scene::frameForDrag(HWND window) const {
 	return found->second->shownAt(counter()).toRect();
 }
 
-bool Scene::updateFullscreenBar(HWND window) {
+bool Scene::updateFullscreenBar(HWND window, qint64 now, bool instant) {
 	if (this->fullscreenBar != nullptr) {
 		if (FAILED(this->root->RemoveVisual(this->fullscreenBar->visual.Get()))) return false;
 	}
 	if (window == nullptr) {
 		this->fullscreenBar.reset();
+		this->fullscreenBarFade.Reset();
 		return true;
 	}
 	if (this->fullscreenBar == nullptr) {
@@ -1228,7 +1243,11 @@ bool Scene::updateFullscreenBar(HWND window) {
 		auto bar = std::make_unique<Thumbnail>();
 		if (!this->addSource(*bar, window, shown.translated(-bounds.topLeft()))) return true;
 		if (FAILED(bar->visual->SetOffsetX(static_cast<float>(shown.x() - this->work.x())))
-		    || FAILED(bar->visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y()))))
+		    || FAILED(bar->visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y())))
+		    || FAILED(this->device->CreateEffectGroup(this->fullscreenBarFade.ReleaseAndGetAddressOf()))
+		    || !this->animate(instant ? 0.0f : 1.0f, 0.0f, now,
+		                      [this](auto value) { return this->fullscreenBarFade->SetOpacity(value); })
+		    || FAILED(bar->visual->SetEffect(this->fullscreenBarFade.Get())))
 			return false;
 		this->fullscreenBar = std::move(bar);
 	}
@@ -1245,7 +1264,7 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 	});
 }
 
-bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused) {
+bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused, bool instant) {
 	if (!this->prepare(plan)) return false;
 	if (!this->showFront()) return false;
 	if (this->dim != nullptr) {
@@ -1357,6 +1376,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 		const auto& placement = plan[i];
 		auto& tile = *this->tiles.at(placement.window);
 		tile.fullscreen = placement.fullscreen;
+		tile.floating = placement.floating;
 		if (tile.fullscreen == DwindleFullscreen::Active) fullscreen = placement.window;
 		if (tile.fullscreen == DwindleFullscreen::Leaving) leavingFullscreen = placement.window;
 		if (!tile.target.isEmpty() && tile.target == placement.target
@@ -1385,7 +1405,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 	auto* bar = fullscreen != nullptr
 	          ? WinPanelWindow::fullscreenBarHandle(MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL))
 	          : nullptr;
-	if (!this->updateFullscreenBar(bar)) return false;
+	if (!this->updateFullscreenBar(bar, start, instant && !continuing)) return false;
 	auto* front = fullscreen != nullptr ? fullscreen
 	              : this->focused != nullptr ? this->focused : leavingFullscreen;
 	if (front != nullptr) {
@@ -1398,9 +1418,10 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 	}
 	auto* fadeAround = fullscreen != nullptr ? fullscreen : this->focused;
 	for (auto& [hwnd, tile]: this->tiles) {
+		const auto target = fadeAround != nullptr && hwnd != fadeAround ? 0.0f : 1.0f;
 		if (!continuing && leavingFullscreen != nullptr && hwnd != leavingFullscreen)
 			tile->opacityTarget = 0.0f;
-		const auto target = fadeAround != nullptr && hwnd != fadeAround ? 0.0f : 1.0f;
+		if (!continuing && instant && target == 0.0f) tile->opacityTarget = 0.0f;
 		if (!continuing && tile->opacityTarget == 0.0f && target == 0.0f
 		    && FAILED(tile->fade->SetOpacity(0.0f))) return false;
 		if (tile->opacityTarget == target) continue;
@@ -1422,8 +1443,8 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 		this->hide();
 		return false;
 	}
-	if (fullscreen == nullptr) this->copyFloating();
-	else this->dropFloating();
+	const auto uncovering = !continuing && (leavingFullscreen != nullptr || (instant && fadeAround != nullptr));
+	this->copyFloating(start, fadeAround, uncovering);
 	if (!succeeded(this->device->Commit(), "Commit")) return false;
 	if (fresh && !this->raise()) return false;
 	this->publishDragScene();
@@ -1456,14 +1477,16 @@ bool Scene::showFront() {
 	return true;
 }
 
-QList<HWND> Scene::floatingWindows() const {
+QList<HWND> Scene::floatingWindows(HWND cover) const {
 	QList<HWND> windows;
 	if (this->dim != nullptr) return windows;
 	auto* tracker = WindowTracker::instance();
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && hwnd != this->backdropWindow;
 	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
 	{
-		if (hwnd == this->host || this->tiles.contains(hwnd) || isOwnProcessWindow(hwnd)) continue;
+		if (hwnd == this->host || isOwnProcessWindow(hwnd)) continue;
+		const auto tile = this->tiles.find(hwnd);
+		if (tile != this->tiles.end() && !tile->second->floating && hwnd != cover) continue;
 		if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd) || cloaked(hwnd)) continue;
 		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
 		auto* window = tracker->windowFor(hwnd);
@@ -1499,23 +1522,35 @@ bool Scene::followFloating(HWND window, FloatingCopy& copy) {
 	return true;
 }
 
-void Scene::copyFloating() {
-	const auto windows = this->floatingWindows();
+void Scene::copyFloating(qint64 now, HWND cover, bool uncovering) {
+	const auto windows = this->floatingWindows(cover);
 	for (auto it = this->floats.begin(); it != this->floats.end();) {
-		if (windows.contains(it->first)) {
+		if (windows.contains(it->first) && !this->tiles.contains(it->first)) {
 			++it;
 			continue;
 		}
 		this->root->RemoveVisual(it->second->container.Get());
 		it = this->floats.erase(it);
 	}
+	const auto coverAt = windows.indexOf(cover);
+	const auto covered = QSet<HWND>(windows.begin(), windows.begin() + qMax(qsizetype(0), coverAt));
 	for (auto* hwnd: windows) {
+		if (auto tile = this->tiles.find(hwnd); tile != this->tiles.end()) {
+			this->root->RemoveVisual(tile->second->container.Get());
+			this->root->AddVisual(tile->second->container.Get(), FALSE, nullptr);
+			tile->second->order = ++this->lastTileOrder;
+			continue;
+		}
 		auto found = this->floats.find(hwnd);
 		if (found == this->floats.end()) {
 			auto copy = std::make_unique<FloatingCopy>();
+			copy->opacityTarget = uncovering || this->coveredFloats.contains(hwnd) ? 0.0f : 1.0f;
 			if (!this->addSource(copy->source, hwnd)
 			    || FAILED(this->device->CreateVisual(copy->container.GetAddressOf()))
 			    || FAILED(this->device->CreateRectangleClip(copy->clip.GetAddressOf()))
+			    || FAILED(this->device->CreateEffectGroup(copy->fade.GetAddressOf()))
+			    || FAILED(copy->fade->SetOpacity(copy->opacityTarget))
+			    || FAILED(copy->container->SetEffect(copy->fade.Get()))
 			    || FAILED(copy->container->SetClip(copy->clip.Get()))
 			    || FAILED(copy->container->AddVisual(copy->source.visual.Get(), FALSE, nullptr))
 			    || !this->followFloating(hwnd, *copy))
@@ -1525,8 +1560,18 @@ void Scene::copyFloating() {
 			this->followFloating(hwnd, *found->second);
 			this->root->RemoveVisual(found->second->container.Get());
 		}
-		this->root->AddVisual(found->second->container.Get(), FALSE, nullptr);
+		auto& copy = *found->second;
+		this->root->AddVisual(copy.container.Get(), FALSE, nullptr);
+		const auto target = covered.contains(hwnd) ? 0.0f : 1.0f;
+		if (copy.opacityTarget == target) continue;
+		const auto opacity = copy.opacityAt(now);
+		if (!this->animate(opacity, target, now, [&copy](auto value) { return copy.fade->SetOpacity(value); }))
+			continue;
+		copy.opacityFrom = opacity;
+		copy.opacityTarget = target;
+		copy.opacityStart = now;
 	}
+	this->coveredFloats = covered;
 }
 
 void Scene::dropFloating() {
@@ -1851,6 +1896,7 @@ void Scene::hide() {
 	this->sample.stop();
 	this->focused = nullptr;
 	this->hiddenFront = nullptr;
+	this->coveredFloats.clear();
 	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
 	this->release();
 	this->finishing = false;
@@ -1871,6 +1917,7 @@ void Scene::hide() {
 	}
 	this->backdrop.visual.Reset();
 	this->fullscreenBar.reset();
+	this->fullscreenBarFade.Reset();
 	this->underlay.clear();
 	this->floats.clear();
 	this->dimVisual.Reset();
@@ -2046,7 +2093,7 @@ void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<Dwin
 	auto& scene = scenes()[monitor];
 	if (scene == nullptr || scene->work != viewport || scene->dim != underlayDim(monitor))
 		scene = std::make_unique<Scene>(viewport, underlayDim(monitor));
-	if (!scene->show(tiles, work, focused)) {
+	if (!scene->show(tiles, work, focused, !changed && !closing)) {
 		qCDebug(logDwindleScene) << "Using immediate placement";
 		DwindleScene::dismiss(monitor);
 	}
@@ -2123,6 +2170,14 @@ void DwindleScene::onOcclusion(std::function<bool(HWND)> stage) {
 
 void DwindleScene::onRelease(std::function<void(const QList<HWND>&)> release) {
 	releaser() = std::move(release);
+}
+
+HWND DwindleScene::coverUnder(HWND window) {
+	for (const auto& [monitor, scene]: scenes()) {
+		if (scene != nullptr && scene->visible() && scene->held() && scene->focusedWindow() == window)
+			return scene->hostWindow();
+	}
+	return nullptr;
 }
 
 HWND DwindleScene::specialHost() {

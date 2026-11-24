@@ -20,6 +20,7 @@ struct DwindleTile {
 	QRect openingFrame;
 	DwindleFullscreen fullscreen = DwindleFullscreen::None;
 	std::optional<float> cornerRadius;
+	bool floating = false;
 };
 
 class DwindleScene {
@@ -45,6 +46,7 @@ public:
 	static void onRelease(std::function<void(const QList<HWND>&)> release);
 	static void dismissAll();
 	static void drop(HMONITOR monitor);
+	static HWND coverUnder(HWND window);
 	static HWND specialHost();
 	static bool holdsSpecial();
 	static bool animating();

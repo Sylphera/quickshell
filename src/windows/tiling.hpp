@@ -243,6 +243,10 @@ private:
 		TilePlacement placement = TilePlacement::Placed;
 		bool stageNoted = false;
 		qint64 unplacedSince = 0;
+		QRect floatFrame;
+		bool floatPending = false;
+		bool floatMoving = false;
+		qint64 coveredAt = 0;
 
 		[[nodiscard]] bool focusMaximized() const { return this->mode == TileMode::Maximized; }
 		[[nodiscard]] bool fullscreen() const { return this->mode == TileMode::Fullscreen; }
@@ -280,6 +284,17 @@ private:
 	void apply(Layout* layout);
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
 	[[nodiscard]] bool floatsFreely(TrackedWindow* window) const;
+	[[nodiscard]] bool floats(const Managed& m) const;
+	[[nodiscard]] Layout* floatHome(const Managed& m, bool create);
+	[[nodiscard]] QList<Managed*> sceneFloats(Layout* layout);
+	[[nodiscard]] QRect floatGoal(const Managed& m, const Layout* layout) const;
+	void coverOthers(Managed& m);
+	void sendFloat(Managed& m);
+	void restoreFloat(Managed& m);
+	void forgetFloat(Managed& m);
+	void uncoverFor(const Managed& m);
+	bool toggleFloatMaximize(Managed& m);
+	void applyFloats(Layout* layout, bool presenting);
 	void coverNewWindow(HWND hwnd);
 	void stage(Managed& m, const QRect& tile);
 	void finishMaximize(Managed& m);

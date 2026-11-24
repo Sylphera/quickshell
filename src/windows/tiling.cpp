@@ -82,6 +82,8 @@ void setWindowShadowsSuppressed(bool suppress) {
 using tiling::Edge;
 
 void setFullscreenLook(HWND hwnd, bool fullscreen);
+void markFullscreen(HWND hwnd, const QRect& raw, bool maximized);
+void unmarkFullscreen(HWND hwnd);
 
 bool framelessWindow(HWND hwnd) {
 	RECT window {};
@@ -273,7 +275,7 @@ void setFrame(HWND hwnd, const QRect& target, bool tiled = false, const QMargins
 	);
 }
 
-void setRawRect(HWND hwnd, const QRect& rect) {
+void setRawRect(HWND hwnd, const QRect& rect, bool wait = false) {
 	SetWindowPos(
 	    hwnd,
 	    nullptr,
@@ -281,7 +283,7 @@ void setRawRect(HWND hwnd, const QRect& rect) {
 	    rect.top(),
 	    rect.width(),
 	    rect.height(),
-	    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
+	    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | (wait ? 0 : SWP_ASYNCWINDOWPOS)
 	);
 }
 
@@ -416,6 +418,18 @@ QRect rawFor(HWND hwnd, const QRect& wanted) {
 	    raw.top() - frame.top(),
 	    rightOf(raw) - rightOf(frame),
 	    bottomOf(raw) - bottomOf(frame)
+	);
+}
+
+QRect frameFor(HWND hwnd, const QRect& wanted) {
+	QRect raw;
+	QRect frame;
+	if (wanted.isNull() || !readFrame(hwnd, raw, frame)) return wanted;
+	return wanted.adjusted(
+	    frame.left() - raw.left(),
+	    frame.top() - raw.top(),
+	    rightOf(frame) - rightOf(raw),
+	    bottomOf(frame) - bottomOf(raw)
 	);
 }
 
@@ -609,6 +623,23 @@ bool TilingManager::canAnimate(const Managed& m, const Layout* layout, const QRe
 }
 
 void TilingManager::haltMotion(HWND hwnd, bool resize) {
+	for (auto& [window, m]: this->managed) {
+		if (window->hwnd() != hwnd || m.layout != nullptr || !m.focusMaximized() || m.fullscreenRestore.isNull())
+			continue;
+		DwindleScene::dismissAll();
+		if (resize) break;
+		const auto frame = this->managedFrame(m);
+		const auto point = cursorPos();
+		const auto size = m.fullscreenRestore.size();
+		const auto across = static_cast<double>(point.x() - frame.left()) / qMax(1, frame.width());
+		const auto down = static_cast<double>(point.y() - frame.top()) / qMax(1, frame.height());
+		const QRect grabbed(
+		    QPoint(point.x() - qRound(across * size.width()), point.y() - qRound(down * size.height())), size
+		);
+		if (IsWindow(hwnd) && !IsHungAppWindow(hwnd)) setRawRect(hwnd, grabbed, true);
+		return;
+	}
+
 	const auto frame = DwindleScene::frameForDrag(hwnd);
 	if (!frame.isEmpty()) {
 		DwindleScene::dismissAll();
@@ -969,6 +1000,9 @@ bool TilingManager::allowsHoverFocus(TrackedWindow* window) const {
 	const auto special = Scratchpad::holds(window);
 	for (const auto& [other, m]: this->managed) {
 		if (other == window || other->minimized()) continue;
+		if (m.focusMaximized() && m.layout == nullptr && !special && this->floats(m)
+		    && other->desktop() == window->desktop() && other->screen() == window->screen())
+			return false;
 		if (m.focusMaximized() && m.layout == target->second.layout) return false;
 		if (m.fullscreen() && Scratchpad::holds(other) == special
 		    && (special || (other->desktop() == window->desktop() && other->screen() == window->screen())))
@@ -1055,6 +1089,10 @@ bool TilingManager::start() {
 		DwindleScene::dismissAll();
 		this->updateEarlyParking();
 		this->updateShellFullscreen();
+		for (auto& [window, m]: this->managed) {
+			if (m.mode == TileMode::Normal) continue;
+			this->markLayout(m.layout != nullptr ? m.layout : this->floatHome(m, true));
+		}
 	}));
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::desktopsChanged, this, [this]() {
 		this->markAll();
@@ -1127,6 +1165,10 @@ void TilingManager::stop() {
 		if (m.fullscreen()) {
 			this->leaveFullscreen(m);
 			setFullscreenLook(window->hwnd(), false);
+		}
+		if (this->floats(m)) {
+			if (m.focusMaximized()) this->restoreFloat(m);
+			if (m.floatMoving && !m.floatFrame.isNull()) setFrame(window->hwnd(), m.floatFrame);
 		}
 		this->bringBack(m);
 		this->restoreTinyCorners(m);
@@ -1236,6 +1278,11 @@ void TilingManager::unmanage(TrackedWindow* window) {
 		WindowMotion::instance()->cancel(window->hwnd());
 		if (IsWindow(window->hwnd())) setFrame(window->hwnd(), moved.value());
 		this->moving.erase(moved);
+	}
+	if (iter->second.layout == nullptr && (iter->second.mode != TileMode::Normal || iter->second.floatMoving)) {
+		for (auto& [key, layout]: this->layouts) {
+			if (this->sceneShows(layout.get(), this->desktops->currentIndex())) this->markLayout(layout.get());
+		}
 	}
 	this->takeOut(iter->second);
 	if (closing) this->syncTimer.start(0);
@@ -1510,6 +1557,10 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	auto& m = iter->second;
 
 	if (window == this->dragging) return;
+	if (m.layout == nullptr && m.focusMaximized() && (window->minimized() || window->maximized())) {
+		if (!m.fullscreenRestore.isNull()) restorePlacement(window->hwnd(), m.fullscreenRestore);
+		this->forgetFloat(m);
+	}
 	if (m.focusMaximized() && window->minimized()) {
 		m.mode = nextMode(m.mode, TileModeEvent::Restore);
 		m.fullscreenToggled = true;
@@ -1533,7 +1584,10 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	}
 
 	if (state == State::Out) {
-		if (m.layout == nullptr) return;
+		if (m.layout == nullptr) {
+			if (m.mode != TileMode::Normal || m.floatMoving) this->markLayout(this->floatHome(m, true));
+			return;
+		}
 
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);
@@ -1635,6 +1689,16 @@ void TilingManager::insertInto(
 ) {
 	auto* window = m.window;
 
+	if (m.layout == nullptr && (m.mode != TileMode::Normal || m.floatMoving)) {
+		if (!m.fullscreenRestore.isNull()) m.preTiling = m.fullscreenRestore;
+		if (m.fullscreen()) m.fullscreenRestore = QRect();
+		else this->forgetFloat(m);
+		m.floatFrame = QRect();
+		m.floatPending = false;
+		m.floatMoving = false;
+		m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+	}
+
 	const auto newOpening = m.fresh && m.preTiling.isNull()
 	    && (!layout->special || this->sceneShows(layout, 0))
 	    && this->mAnimateMoves && DwindleScene::enabled()
@@ -1697,10 +1761,16 @@ void TilingManager::insertInto(
 void TilingManager::clearMaximized(Layout* layout, const TrackedWindow* except, bool animate) {
 	if (layout == nullptr) return;
 	for (auto& [other, existing]: this->managed) {
-		if (other == except || existing.layout != layout || !existing.focusMaximized()) continue;
+		if (other == except || !existing.focusMaximized()) continue;
+		if (existing.layout == nullptr && this->floats(existing) && this->floatHome(existing, false) == layout) {
+			this->restoreFloat(existing);
+			continue;
+		}
+		if (existing.layout != layout) continue;
 		existing.mode = nextMode(existing.mode, TileModeEvent::Restore);
 		if (!animate) continue;
 		existing.fullscreenToggled = true;
+		this->restackTimer.start();
 		this->markLayout(layout);
 	}
 }
@@ -1791,7 +1861,7 @@ void TilingManager::cacheNextCloseFrame() {
 
 void TilingManager::dropEmptyLayouts() {
 	for (auto iter = this->layouts.begin(); iter != this->layouts.end();) {
-		if (iter->second->tree->isEmpty()) {
+		if (iter->second->tree->isEmpty() && this->sceneFloats(iter->second.get()).isEmpty()) {
 			auto* layout = iter->second.get();
 			if (DwindleScene::enabled() && this->layoutAlive(layout)
 			    && this->sceneShows(layout, this->desktops->currentIndex()))
@@ -1836,7 +1906,13 @@ void TilingManager::apply(Layout* layout) {
 			HWND focused = nullptr;
 			for (auto id: layout->tree->ids()) {
 				auto* member = this->windowOf(id);
-				if (member != nullptr && this->managed.at(member).focusMaximized()) focused = member->hwnd();
+				if (member == nullptr) continue;
+				const auto& covering = this->managed.at(member);
+				if (covering.fullscreen() || (covering.focusMaximized() && focused == nullptr))
+					focused = member->hwnd();
+			}
+			for (auto* m: this->sceneFloats(layout)) {
+				if (m->fullscreen() || (m->focusMaximized() && focused == nullptr)) focused = m->window->hwnd();
 			}
 			DwindleScene::present(monitor, rects.work, plan, changed, focused);
 		}
@@ -1892,6 +1968,150 @@ void TilingManager::apply(Layout* layout) {
 		this->placeMoving(m, layout, tile);
 		if (m.maximizePending && !this->moving.contains(window)) this->finishMaximize(m);
 	}
+	this->applyFloats(layout, presenting);
+}
+
+void TilingManager::applyFloats(Layout* layout, bool presenting) {
+	for (auto* m: this->sceneFloats(layout)) {
+		auto* hwnd = m->window->hwnd();
+		if (!presenting) {
+			if (std::exchange(m->fullscreenLookPending, false)) setFullscreenLook(hwnd, m->fullscreen());
+			if (!m->fullscreen()) m->fullscreenTileRadius.reset();
+		}
+		const auto goal = this->floatGoal(*m, layout);
+		const auto pending = std::exchange(m->floatPending, false) || goal != m->floatFrame;
+		m->floatFrame = goal;
+		if (pending) {
+			m->placement = nextPlacement(m->placement, TilePlacementEvent::Unhold);
+			const auto actual = this->managedFrame(*m);
+			if (presenting && goal.width() <= actual.width() && goal.height() <= actual.height()
+			    && goal.size() != actual.size())
+			{
+				m->placement = nextPlacement(m->placement, TilePlacementEvent::Hold);
+				if (!this->healTimer.isActive()) this->healTimer.start();
+				continue;
+			}
+			if (goal != actual) setFrame(hwnd, goal);
+		}
+		if (!presenting) m->floatMoving = false;
+	}
+}
+
+bool TilingManager::floats(const Managed& m) const {
+	auto* window = m.window;
+	return m.layout == nullptr && !m.elevated && !window->minimized() && !window->maximized()
+	    && window->desktop() >= 0 && window->screen() != nullptr && !Scratchpad::holds(window)
+	    && this->stateOf(m) == State::Out;
+}
+
+TilingManager::Layout* TilingManager::floatHome(const Managed& m, bool create) {
+	return this->layoutFor(m.window, create);
+}
+
+QList<TilingManager::Managed*> TilingManager::sceneFloats(Layout* layout) {
+	QList<Managed*> found;
+	for (auto& [window, m]: this->managed) {
+		if (m.mode == TileMode::Normal && !m.floatMoving) continue;
+		if (!this->floats(m) || this->floatHome(m, false) != layout) continue;
+		found.append(&m);
+	}
+	return found;
+}
+
+QRect TilingManager::floatGoal(const Managed& m, const Layout* layout) const {
+	const auto rects = monitorRects(monitorForScreen(layout->screen));
+	if (!rects.valid) return m.floatFrame;
+	if (m.fullscreen()) return fullscreenFrame(m.window->hwnd(), rects.monitor);
+	if (!m.focusMaximized()) return m.floatFrame;
+	const auto gap = toPhysical(this->mGapsOut, layout->screen->devicePixelRatio());
+	return rects.work.adjusted(gap, gap, -gap, -gap);
+}
+
+void TilingManager::coverOthers(Managed& m) {
+	m.coveredAt = QDateTime::currentMSecsSinceEpoch();
+	if (Scratchpad::holds(m.window)) return;
+	SetWindowPos(m.window->hwnd(), HWND_TOP, 0, 0, 0, 0,
+	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+}
+
+void TilingManager::sendFloat(Managed& m) {
+	m.floatPending = true;
+	m.floatMoving = true;
+	if (auto* home = this->floatHome(m, true)) this->markLayout(home);
+}
+
+void TilingManager::forgetFloat(Managed& m) {
+	m.mode = nextMode(m.mode, TileModeEvent::Restore);
+	m.fullscreenRestore = QRect();
+	m.floatFrame = QRect();
+	m.floatPending = false;
+	m.floatMoving = false;
+	m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+	unmarkFullscreen(m.window->hwnd());
+	for (auto& [key, layout]: this->layouts) {
+		if (this->sceneShows(layout.get(), this->desktops->currentIndex())) this->markLayout(layout.get());
+	}
+}
+
+void TilingManager::restoreFloat(Managed& m) {
+	auto* hwnd = m.window->hwnd();
+	m.mode = nextMode(m.mode, TileModeEvent::Restore);
+	m.floatFrame = frameFor(hwnd, std::exchange(m.fullscreenRestore, QRect()));
+	unmarkFullscreen(hwnd);
+	if (m.floatFrame.isNull()) return;
+	this->sendFloat(m);
+}
+
+bool TilingManager::toggleFloatMaximize(Managed& m) {
+	auto* window = m.window;
+	auto* hwnd = window->hwnd();
+	if (m.focusMaximized()) {
+		this->restoreFloat(m);
+		window->activate();
+		return true;
+	}
+
+	if (m.fullscreen()) {
+		m.mode = nextMode(m.mode, TileModeEvent::LeaveFullscreen);
+		rememberFullscreen(window, false);
+		this->updateFullscreenLook(m);
+	} else {
+		QRect raw;
+		QRect frame;
+		if (!readFrame(hwnd, raw, frame)) return false;
+		if (m.floatMoving && !m.floatFrame.isNull()) raw = rawFor(hwnd, m.floatFrame);
+		m.fullscreenRestore = raw;
+		markFullscreen(hwnd, raw, false);
+		for (auto& [other, existing]: this->managed) {
+			if (existing.fullscreen() && !Scratchpad::holds(other) && other->desktop() == window->desktop()
+			    && other->screen() == window->screen())
+				this->leaveFullscreen(existing);
+		}
+		this->clearMaximized(this->floatHome(m, true), window, true);
+	}
+
+	m.mode = nextMode(m.mode, TileModeEvent::ToggleMaximize);
+	this->coverOthers(m);
+	this->sendFloat(m);
+	this->updateShellFullscreen();
+	window->activate();
+	return true;
+}
+
+void TilingManager::uncoverFor(const Managed& m) {
+	if (!this->floats(m) || (GetWindowLongPtrW(m.window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return;
+	auto* window = m.window;
+	auto changed = false;
+	for (auto& [other, existing]: this->managed) {
+		if (other == window || existing.mode == TileMode::Normal || other->minimized() || Scratchpad::holds(other)) continue;
+		if (other->desktop() != window->desktop() || other->screen() != window->screen()) continue;
+		if (m.managedAt > existing.coveredAt || GetWindow(window->hwnd(), GW_OWNER) == other->hwnd()) continue;
+		if (existing.fullscreen()) this->leaveFullscreen(existing);
+		else if (existing.layout == nullptr) this->restoreFloat(existing);
+		else this->clearMaximized(existing.layout, nullptr, true);
+		changed = true;
+	}
+	if (changed) this->updateShellFullscreen();
 }
 
 void TilingManager::finishMaximize(Managed& m) {
@@ -1955,6 +2175,14 @@ void TilingManager::releaseStaged(const QList<HWND>& windows) {
 		if (!windows.contains(window->hwnd())) continue;
 		if (std::exchange(m.fullscreenLookPending, false)) setFullscreenLook(window->hwnd(), m.fullscreen());
 		if (!m.fullscreen()) m.fullscreenTileRadius.reset();
+		if (m.layout == nullptr) {
+			const auto held = m.contractionHeld();
+			m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+			m.unplacedSince = 0;
+			m.floatMoving = false;
+			if (held && !m.floatFrame.isNull() && IsWindow(window->hwnd())) setFrame(window->hwnd(), m.floatFrame);
+			continue;
+		}
 		if (!m.staged() && !m.contractionHeld()) continue;
 		const auto wasStaged = m.staged();
 		const auto wasHeld = m.contractionHeld();
@@ -2029,6 +2257,21 @@ bool TilingManager::dwindlePlan(
 			plan.append({window->hwnd(), previous, tile, settled, m.openingFrame, fullscreen, radius});
 		}
 		participants.insert(window->hwnd());
+	}
+	for (auto* m: this->sceneFloats(layout)) {
+		auto* hwnd = m->window->hwnd();
+		if (!IsWindowVisible(hwnd) || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		const auto goal = this->floatGoal(*m, layout);
+		const auto leaving = !m->fullscreen() && m->fullscreenLookPending;
+		const auto radius = m->fullscreen() ? std::optional(0.0f) : leaving ? m->fullscreenTileRadius : std::nullopt;
+		const auto fullscreen = m->fullscreen() ? DwindleFullscreen::Active
+		                        : leaving ? DwindleFullscreen::Leaving : DwindleFullscreen::None;
+		if (still && (m->floatPending || goal != m->floatFrame)) return false;
+		const auto previous = still ? goal : this->managedFrame(*m);
+		if (goal.isEmpty() || previous.isEmpty()) return false;
+		changed |= m->floatPending || goal != m->floatFrame;
+		plan.append({hwnd, previous, goal, true, {}, fullscreen, radius, true});
+		participants.insert(hwnd);
 	}
 	for (auto* window: this->tracker->windows()) {
 		if (window->minimized() || window->desktop() != this->desktops->currentIndex()
@@ -2511,7 +2754,9 @@ void TilingManager::collectLayers(
 		auto* hwnd = window->hwnd();
 		if (window->desktop() != this->desktops->currentIndex() || Scratchpad::holds(window)) continue;
 		if (window->minimized() || !IsWindowVisible(hwnd)) continue;
-		if (window->fullscreen() || window->borderlessFullscreen() || m.fullscreen()) {
+		if (window->fullscreen() || window->borderlessFullscreen() || m.fullscreen()
+		    || (m.focusMaximized() && m.layout != nullptr))
+		{
 			blocking.insert(hwnd);
 			continue;
 		}
@@ -3078,7 +3323,10 @@ void TilingManager::onActiveWindowChanged() {
 	auto& m = iter->second;
 	m.focusStamp = ++this->focusCounter;
 	this->yieldFullscreenTo(m);
-	if (m.layout == nullptr) return;
+	if (m.layout == nullptr) {
+		this->uncoverFor(m);
+		return;
+	}
 	this->clearMaximized(m.layout, window, true);
 
 	m.layout->lastFocused = window;
@@ -3203,7 +3451,11 @@ void TilingManager::onDeadline() {
 void TilingManager::onMoveSizeStarted(TrackedWindow* window) {
 	DwindleScene::dismissAll();
 	auto iter = this->managed.find(window);
-	if (iter == this->managed.end() || iter->second.layout == nullptr) return;
+	if (iter == this->managed.end()) return;
+	if (iter->second.layout == nullptr) {
+		if (iter->second.focusMaximized() || iter->second.floatMoving) this->forgetFloat(iter->second);
+		return;
+	}
 	this->restoreTinyCorners(iter->second);
 
 	auto state = this->stateOf(iter->second);
@@ -3790,6 +4042,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	if (iter == this->managed.end()) return false;
 	this->warnFullscreenConflict(window);
 	auto& m = iter->second;
+	if (this->floats(m)) return this->toggleFloatMaximize(m);
 	if (m.fullscreen() && m.layout != nullptr && !window->minimized()
 	    && this->stateOf(m) == State::Tiled && !m.elevated
 	    && m.layout->tree->kind() == tiling::Kind::Dwindle && DwindleScene::enabled()
@@ -3799,6 +4052,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 		m.maximizedTile = false;
 		this->clearMaximized(m.layout, nullptr, false);
 		m.mode = nextMode(m.mode, TileModeEvent::ToggleMaximize);
+		this->coverOthers(m);
 		m.fullscreenToggled = true;
 		rememberFullscreen(window, false);
 		this->updateShellFullscreen();
@@ -3813,6 +4067,8 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 		if (!m.focusMaximized()) this->yieldFullscreenTo(m);
 		this->clearMaximized(m.layout, window, false);
 		m.mode = nextMode(m.mode, TileModeEvent::ToggleMaximize);
+		if (m.focusMaximized()) this->coverOthers(m);
+		else this->restackTimer.start();
 		m.fullscreenToggled = true;
 		this->markLayout(m.layout);
 		window->activate();
@@ -3893,7 +4149,8 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 	if (iter == this->managed.end()) return false;
 	auto& m = iter->second;
 	auto* hwnd = window->hwnd();
-	m.mode = nextMode(m.mode, TileModeEvent::Restore);
+	const auto floating = this->floats(m);
+	if (!floating) m.mode = nextMode(m.mode, TileModeEvent::Restore);
 
 	if (!m.fullscreen()) {
 		if (m.elevated || window->minimized()) return false;
@@ -3908,7 +4165,13 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		RECT raw {};
 		if (!GetWindowRect(hwnd, &raw)) return false;
 		auto before = QRect(QPoint(raw.left, raw.top), QPoint(raw.right - 1, raw.bottom - 1));
-		this->clearMaximized(m.layout, nullptr, false);
+		if (floating) {
+			if (!m.fullscreenRestore.isNull()) before = m.fullscreenRestore;
+			else if (m.floatMoving && !m.floatFrame.isNull()) before = rawFor(hwnd, m.floatFrame);
+			this->clearMaximized(this->floatHome(m, true), window, true);
+		} else {
+			this->clearMaximized(m.layout, nullptr, false);
+		}
 		for (auto& [other, existing]: this->managed) {
 			if (!existing.fullscreen() || Scratchpad::holds(other) != special) continue;
 			if (special || (other->desktop() == window->desktop() && other->screen() == window->screen())) {
@@ -3921,10 +4184,12 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		markFullscreen(hwnd, before, wasMaximized);
 		auto frame = fullscreenFrame(hwnd, rects.monitor);
 		if (special) frame.translate(0, this->mSpecialOffset);
-		if (!tiled) setFrame(hwnd, frame);
+		if (!tiled && !floating) setFrame(hwnd, frame);
 
 		m.mode = nextMode(m.mode, TileModeEvent::ToggleFullscreen);
 		m.fullscreenToggled = true;
+		this->coverOthers(m);
+		if (floating) this->sendFloat(m);
 		this->updateFullscreenLook(m);
 		if (m.fullscreenTileRadius.has_value()) WinPanelWindow::prepareFullscreenBarHandoff(monitor);
 		this->markLayout(m.layout);
@@ -3960,23 +4225,29 @@ void TilingManager::warnFullscreenConflict(TrackedWindow* source, qsizetype desk
 
 void TilingManager::leaveFullscreen(Managed& m) {
 	auto* hwnd = m.window->hwnd();
-	if (!m.fullscreenRestore.isNull()) setRawRect(hwnd, m.fullscreenRestore);
+	const auto floating = this->floats(m) && !m.fullscreenWasMaximized && !m.fullscreenRestore.isNull();
+	if (floating) m.floatFrame = frameFor(hwnd, m.fullscreenRestore);
+	else if (!m.fullscreenRestore.isNull()) setRawRect(hwnd, m.fullscreenRestore);
 	if (m.fullscreenWasMaximized) ShowWindowAsync(hwnd, SW_MAXIMIZE);
 	m.fullscreenRestore = QRect();
 	m.fullscreenWasMaximized = false;
 	m.mode = nextMode(m.mode, TileModeEvent::LeaveFullscreen);
 	m.fullscreenToggled = true;
 	unmarkFullscreen(hwnd);
+	if (floating) this->sendFloat(m);
+	this->restackTimer.start();
 	this->updateFullscreenLook(m);
 	this->markLayout(m.layout);
 }
 
 void TilingManager::updateFullscreenLook(Managed& m) {
 	auto* hwnd = m.window->hwnd();
-	const auto animate = DwindleScene::enabled() && this->mAnimateMoves && m.layout != nullptr
-	    && m.layout->tree->kind() == tiling::Kind::Dwindle
-	    && this->sceneShows(m.layout, this->desktops->currentIndex())
-	    && this->stateOf(m) == State::Tiled;
+	const auto floating = this->floats(m);
+	auto* layout = floating ? this->floatHome(m, true) : m.layout;
+	const auto animate = DwindleScene::enabled() && this->mAnimateMoves && layout != nullptr
+	    && layout->tree->kind() == tiling::Kind::Dwindle
+	    && this->sceneShows(layout, this->desktops->currentIndex())
+	    && (floating || this->stateOf(m) == State::Tiled);
 	if (!animate) m.fullscreenTileRadius.reset();
 	else if (m.fullscreen() && !m.fullscreenTileRadius.has_value())
 		m.fullscreenTileRadius = DwindleScene::cornerRadius(hwnd);

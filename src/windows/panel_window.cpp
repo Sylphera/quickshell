@@ -1081,9 +1081,11 @@ void WinPanelWindow::updateLayer() {
 			constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
 			if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
 				SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+			auto* cover = DwindleScene::coverUnder(fullscreen);
+			auto* under = cover != nullptr && GetWindow(fullscreen, GW_HWNDNEXT) == cover ? cover : fullscreen;
 			if ((GetWindowLongPtrW(fullscreen, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0
-			    && GetWindow(fullscreen, GW_HWNDNEXT) != hwnd)
-				SetWindowPos(hwnd, fullscreen, 0, 0, 0, 0, flags);
+			    && GetWindow(under, GW_HWNDNEXT) != hwnd)
+				SetWindowPos(hwnd, under, 0, 0, 0, 0, flags);
 			InputMaskTracker::instance()->refresh();
 			return;
 		}
