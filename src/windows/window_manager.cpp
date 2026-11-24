@@ -12,6 +12,7 @@
 #include <qstring.h>
 #include <qtimer.h>
 
+#include "desktop_trimmer.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
@@ -401,6 +402,7 @@ WindowManager::WindowManager(QObject* parent): QObject(parent) {
 	QObject::connect(behavior, &WorkspaceBehavior::backAndForthChanged, this, &WindowManager::workspaceBackAndForthChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::warpOnChangeChanged, this, &WindowManager::warpOnChangeWorkspaceChanged);
 	QObject::connect(behavior, &WorkspaceBehavior::hideSwitchPopupChanged, this, &WindowManager::hideDesktopPopupChanged);
+	QObject::connect(DesktopTrimmer::instance(), &DesktopTrimmer::enabledChanged, this, &WindowManager::removeEmptyDesktopsChanged);
 	// clang-format on
 }
 
@@ -459,6 +461,12 @@ bool WindowManager::hideDesktopPopup() const {
 }
 void WindowManager::setHideDesktopPopup(bool enabled) {
 	WorkspaceBehavior::instance()->setHideSwitchPopup(enabled);
+}
+
+bool WindowManager::removeEmptyDesktops() const { return DesktopTrimmer::instance()->enabled(); }
+
+void WindowManager::setRemoveEmptyDesktops(bool enabled) {
+	DesktopTrimmer::instance()->setEnabled(enabled);
 }
 
 } // namespace qs::windows

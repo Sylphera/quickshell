@@ -71,6 +71,7 @@ public:
 	}
 	void commitSwitch();
 	void ensureCount(qsizetype count, std::function<void(bool)> done);
+	[[nodiscard]] bool creating() const { return this->creationTarget != 0; }
 	bool removeDesktop(qsizetype index, qsizetype fallback);
 	bool moveWindow(HWND hwnd, qsizetype index);
 	bool pinWindow(HWND hwnd, bool pinned);

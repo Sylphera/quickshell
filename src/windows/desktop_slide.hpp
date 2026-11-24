@@ -38,6 +38,7 @@ public:
 	void swipeUpdate(double offset);
 	void swipeEnd(SwipeRelease release);
 	[[nodiscard]] bool swipeCanGo(int way) const;
+	[[nodiscard]] bool busy() const { return this->swiping || this->overlay != nullptr; }
 
 private:
 	explicit DesktopSlide(QObject* parent);
