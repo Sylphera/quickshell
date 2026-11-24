@@ -220,5 +220,6 @@ void setParkNewWindows(bool park);
 void claimEarlyPark(HWND hwnd);
 bool isEarlyParked(HWND hwnd);
 void releaseEarlyPark(HWND hwnd);
+void releaseEarlyParks();
 
 } // namespace qs::windows

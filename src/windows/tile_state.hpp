@@ -56,4 +56,29 @@ enum class TilePlacementEvent : quint8 {
 	return placement;
 }
 
+enum class TileHeal : quint8 { None, Wait, Release, EndAnimation, Replace };
+
+struct TileHealth {
+	TilePlacement placement = TilePlacement::Placed;
+	bool busy = false;
+	bool animated = false;
+	bool lost = false;
+	qint64 unplacedMs = 0;
+};
+
+constexpr qint64 TILE_WAIT_MS = 1500;
+constexpr qint64 TILE_ANIMATION_MS = 8000;
+
+[[nodiscard]] constexpr TileHeal healTile(const TileHealth& health) {
+	if (health.placement == TilePlacement::Placed) {
+		if (!health.lost) return TileHeal::None;
+		return health.busy || health.animated ? TileHeal::Wait : TileHeal::Replace;
+	}
+	if (health.busy) return TileHeal::Wait;
+	if (health.animated) {
+		return health.unplacedMs >= TILE_ANIMATION_MS ? TileHeal::EndAnimation : TileHeal::Wait;
+	}
+	return health.unplacedMs >= TILE_WAIT_MS ? TileHeal::Release : TileHeal::Wait;
+}
+
 }

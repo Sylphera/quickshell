@@ -4,10 +4,14 @@
 
 #include "tile_state.hpp"
 
+using qs::windows::healTile;
 using qs::windows::isHeld;
 using qs::windows::isStaged;
 using qs::windows::nextMode;
 using qs::windows::nextPlacement;
+using qs::windows::TILE_ANIMATION_MS;
+using qs::windows::TILE_WAIT_MS;
+using Heal = qs::windows::TileHeal;
 using Mode = qs::windows::TileMode;
 using ModeEvent = qs::windows::TileModeEvent;
 using Placement = qs::windows::TilePlacement;
@@ -80,6 +84,55 @@ private slots:
 			QVERIFY(!isHeld(next));
 			QCOMPARE(isStaged(next), isStaged(placement));
 		}
+	}
+
+	void aPlacedTileOnScreenIsLeftAlone() {
+		for (auto busy: {false, true}) {
+			for (auto animated: {false, true}) {
+				QCOMPARE(healTile({.busy = busy, .animated = animated}), Heal::None);
+			}
+		}
+	}
+
+	void aLostTileComesBackOnceNothingMoves() {
+		QCOMPARE(healTile({.lost = true}), Heal::Replace);
+		QCOMPARE(healTile({.busy = true, .lost = true}), Heal::Wait);
+		QCOMPARE(healTile({.animated = true, .lost = true}), Heal::Wait);
+	}
+
+	void aWaitingTileIsAlwaysWatchedUntilItIsPlaced() {
+		for (auto placement: {Placement::Staged, Placement::Held, Placement::StagedHeld}) {
+			for (auto busy: {false, true}) {
+				for (auto animated: {false, true}) {
+					for (auto lost: {false, true}) {
+						for (qint64 ms: {qint64(0), TILE_WAIT_MS, TILE_ANIMATION_MS}) {
+							auto heal = healTile({
+							    .placement = placement,
+							    .busy = busy,
+							    .animated = animated,
+							    .lost = lost,
+							    .unplacedMs = ms,
+							});
+							QVERIFY(heal != Heal::None);
+							if (busy) QCOMPARE(heal, Heal::Wait);
+							if (!busy && ms >= TILE_ANIMATION_MS) QVERIFY(heal != Heal::Wait);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	void anAnimationIsNotCutEarly() {
+		QCOMPARE(
+		    healTile({.placement = Placement::Staged, .animated = true, .unplacedMs = TILE_ANIMATION_MS - 1}),
+		    Heal::Wait
+		);
+		QCOMPARE(
+		    healTile({.placement = Placement::Held, .unplacedMs = TILE_WAIT_MS - 1}),
+		    Heal::Wait
+		);
+		QCOMPARE(healTile({.placement = Placement::Held, .unplacedMs = TILE_WAIT_MS}), Heal::Release);
 	}
 };
 

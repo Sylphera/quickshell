@@ -728,6 +728,17 @@ void releaseEarlyPark(HWND hwnd) {
 	putBack(hwnd, rect);
 }
 
+void releaseEarlyParks() {
+	std::vector<std::pair<HWND, RECT>> parked;
+	{
+		auto lock = std::lock_guard(gParkMutex);
+		for (const auto& [hwnd, entry]: gEarlyParked) parked.emplace_back(hwnd, entry.first);
+		gEarlyParked.clear();
+		gEarlyParkCount.store(0);
+	}
+	for (const auto& [hwnd, rect]: parked) putBack(hwnd, rect);
+}
+
 void WindowTracker::drainEvents() {
 	gEventWakePending.store(false);
 	if (gEarlyParkCount.load() > 0) {

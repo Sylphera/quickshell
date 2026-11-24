@@ -114,6 +114,7 @@ constexpr int DWINDLE_OPENING_INTERVAL_MS = 28;
 constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
 constexpr int HUNG_RETRY_MS = 500;
+constexpr int HEAL_MS = 500;
 constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
@@ -406,6 +407,23 @@ QRect onScreen(const QRect& rect) {
 	return clampInto(rect, monitorRects(MonitorFromRect(&native, MONITOR_DEFAULTTONEAREST)).work);
 }
 
+QRect rawFor(HWND hwnd, const QRect& wanted) {
+	QRect raw;
+	QRect frame;
+	if (!readFrame(hwnd, raw, frame)) return wanted;
+	return wanted.adjusted(
+	    raw.left() - frame.left(),
+	    raw.top() - frame.top(),
+	    rightOf(raw) - rightOf(frame),
+	    bottomOf(raw) - bottomOf(frame)
+	);
+}
+
+bool onAnyMonitor(const QRect& rect) {
+	auto native = toRECT(rect);
+	return MonitorFromRect(&native, MONITOR_DEFAULTTONULL) != nullptr;
+}
+
 void restorePlacement(HWND hwnd, const QRect& rect) {
 	WINDOWPLACEMENT placement {};
 	placement.length = sizeof(placement);
@@ -454,10 +472,15 @@ TilingManager::TilingManager() {
 	QObject::connect(&this->deadlineTimer, &QTimer::timeout, this, &TilingManager::onDeadline);
 	this->closeCacheTimer.setInterval(100);
 	QObject::connect(&this->closeCacheTimer, &QTimer::timeout, this, &TilingManager::cacheNextCloseFrame);
+	this->healTimer.setSingleShot(true);
+	this->healTimer.setInterval(HEAL_MS);
+	QObject::connect(&this->healTimer, &QTimer::timeout, this, &TilingManager::heal);
 
 	if (auto* app = QCoreApplication::instance()) {
 		QObject::connect(app, &QCoreApplication::aboutToQuit, this, [this]() {
+			setParkNewWindows(false);
 			this->unparkAll();
+			releaseEarlyParks();
 			setWindowShadowsSuppressed(false);
 		});
 	}
@@ -1098,8 +1121,14 @@ void TilingManager::stop() {
 		QObject::disconnect(screen, nullptr, this, nullptr);
 	}
 
+	this->stopMotions();
 	QList<TrackedWindow*> tiled;
 	for (auto& [window, m]: this->managed) {
+		if (m.fullscreen()) {
+			this->leaveFullscreen(m);
+			setFullscreenLook(window->hwnd(), false);
+		}
+		this->bringBack(m);
 		this->restoreTinyCorners(m);
 		QObject::disconnect(window, nullptr, this, nullptr);
 		if (m.layout == nullptr) continue;
@@ -1120,6 +1149,7 @@ void TilingManager::stop() {
 	this->restackTimer.stop();
 	this->verifyTimer.stop();
 	this->deadlineTimer.stop();
+	this->healTimer.stop();
 
 	if (this->ownerMutex != nullptr) {
 		ReleaseMutex(this->ownerMutex);
@@ -1389,6 +1419,7 @@ void TilingManager::sync() {
 			if (auto* window = this->windowOf(id)) {
 				auto& m = this->managed.at(window);
 				this->restoreTinyCorners(m);
+				this->bringBack(m);
 				this->unpark(m);
 				m.layout = nullptr;
 				m.target = QRect();
@@ -1399,6 +1430,8 @@ void TilingManager::sync() {
 		this->dirtyLayouts.remove(layout);
 		iter = this->layouts.erase(iter);
 	}
+
+	this->auditTrees();
 
 	auto windows = std::move(this->dirtyWindows);
 	this->dirtyWindows.clear();
@@ -1416,6 +1449,7 @@ void TilingManager::sync() {
 		if (layouts.contains(layout.get())) this->apply(layout.get());
 	}
 	this->updateShellFullscreen();
+	if (!this->healTimer.isActive()) this->healTimer.start();
 }
 
 namespace {
@@ -1680,11 +1714,11 @@ void TilingManager::takeOut(Managed& m) {
 	layout->tree->remove(idOf(m.window));
 	if (layout->lastFocused == m.window) layout->lastFocused = nullptr;
 
+	this->bringBack(m);
 	m.layout = nullptr;
 	m.target = QRect();
 	m.openingFrame = {};
 	m.accepted = QRect();
-	m.placement = nextPlacement(m.placement, TilePlacementEvent::Unhold);
 	m.verifying = false;
 	this->unverified.remove(m.window);
 
@@ -1874,6 +1908,7 @@ bool TilingManager::holdContraction(Managed& m, const QRect& tile) {
 	if (!m.contractionHeld() || m.target != tile)
 		qCDebug(logTiling) << "Holding Dwindle contraction" << m.window->hwnd() << actual << "to" << tile;
 	m.placement = nextPlacement(m.placement, TilePlacementEvent::Hold);
+	if (!this->healTimer.isActive()) this->healTimer.start();
 	m.target = tile;
 	m.accepted = actual;
 	m.verifying = false;
@@ -1891,6 +1926,9 @@ void TilingManager::stage(Managed& m, const QRect& tile) {
 	if (m.contractionHeld()) staged.setSize(actual.size());
 	if (!m.staged()) m.nativeFrameRefreshRequested = false;
 	m.placement = nextPlacement(m.placement, TilePlacementEvent::Stage);
+	if (!m.offscreen && (!m.stageNoted || m.target != tile)) rememberParked(hwnd, rawFor(hwnd, tile));
+	m.stageNoted = true;
+	if (!this->healTimer.isActive()) this->healTimer.start();
 	m.target = tile;
 	m.accepted = staged;
 	m.verifying = false;
@@ -1921,6 +1959,7 @@ void TilingManager::releaseStaged(const QList<HWND>& windows) {
 		const auto wasStaged = m.staged();
 		const auto wasHeld = m.contractionHeld();
 		m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+		m.unplacedSince = 0;
 		m.accepted = QRect();
 		if (m.target.isNull() || this->stateOf(m) != State::Tiled) continue;
 		if (wasStaged && m.layout != nullptr && m.layout->special) Scratchpad::raiseWindow(window->hwnd());
@@ -1930,6 +1969,7 @@ void TilingManager::releaseStaged(const QList<HWND>& windows) {
 		if (wasHeld)
 			qCDebug(logTiling) << "Finishing Dwindle contraction" << window->hwnd() << m.target;
 		this->updateTinyCorners(m, m.target);
+		this->forgetStage(m);
 		this->send(m, this->managedFrame(m), this->needsNativeFrameRefresh(m));
 	}
 }
@@ -2299,9 +2339,14 @@ bool TilingManager::needsNativeFrameRefresh(Managed& m) {
 	    && enabled;
 }
 
+void TilingManager::forgetStage(Managed& m) {
+	if (std::exchange(m.stageNoted, false) && !m.offscreen) forgetParked(m.window->hwnd());
+}
+
 void TilingManager::place(Managed& m, const QRect& tile) {
 	if (m.contractionHeld()) return;
 	claimEarlyPark(m.window->hwnd());
+	this->forgetStage(m);
 	if (m.maximizedTile && m.window->maximized()) {
 		m.target = tile;
 		m.verifying = false;
@@ -2740,18 +2785,7 @@ void TilingManager::markOffscreen(Managed& m, bool offscreen, const QRect& resto
 		return;
 	}
 
-	auto raw = restore;
-	QRect current;
-	QRect frame;
-	if (readFrame(hwnd, current, frame)) {
-		raw = restore.adjusted(
-		    current.left() - frame.left(),
-		    current.top() - frame.top(),
-		    rightOf(current) - rightOf(frame),
-		    bottomOf(current) - bottomOf(frame)
-		);
-	}
-
+	auto raw = rawFor(hwnd, restore);
 	if (m.offscreen && raw == m.restore) return;
 	m.offscreen = true;
 	m.restore = raw;
@@ -2775,7 +2809,132 @@ void TilingManager::unpark(Managed& m) {
 }
 
 void TilingManager::unparkAll() {
-	for (auto& [window, m]: this->managed) this->unpark(m);
+	for (auto& [window, m]: this->managed) {
+		this->bringBack(m);
+		this->unpark(m);
+	}
+	this->stopMotions();
+}
+
+void TilingManager::stopMotions() {
+	const auto stopped = std::exchange(this->moving, {});
+	for (auto iter = stopped.cbegin(); iter != stopped.cend(); ++iter) {
+		if (!this->managed.contains(iter.key())) continue;
+		auto* hwnd = iter.key()->hwnd();
+		WindowMotion::instance()->cancel(hwnd);
+		if (IsWindow(hwnd)) setFrame(hwnd, iter.value());
+	}
+}
+
+void TilingManager::bringBack(Managed& m) {
+	m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+	m.unplacedSince = 0;
+	if (!std::exchange(m.stageNoted, false)) return;
+
+	auto* hwnd = m.window->hwnd();
+	if (!m.offscreen) forgetParked(hwnd);
+	if (m.target.isNull() || !IsWindow(hwnd)) return;
+	if (IsIconic(hwnd) || IsZoomed(hwnd)) restorePlacement(hwnd, onScreen(m.target));
+	else setFrame(hwnd, onScreen(m.target));
+}
+
+void TilingManager::auditTrees() {
+	for (auto& [key, layout]: this->layouts) {
+		TrackedWindow* maximized = nullptr;
+		for (auto id: layout->tree->ids()) {
+			auto* window = this->windowOf(id);
+			auto* m = window == nullptr ? nullptr : &this->managed.at(window);
+			if (m == nullptr || m->layout != layout.get()) {
+				qCWarning(logTiling) << "Tile" << id << "has no window here; closing its gap";
+				layout->tree->remove(id);
+				this->dirtyLayouts.insert(layout.get());
+				continue;
+			}
+			if (!m->focusMaximized()) continue;
+			if (maximized == nullptr) {
+				maximized = window;
+				continue;
+			}
+			qCWarning(logTiling) << "Two maximized tiles in one layout; keeping the last focused";
+			auto& other = this->managed.at(maximized);
+			auto& older = other.focusStamp < m->focusStamp ? other : *m;
+			older.mode = nextMode(older.mode, TileModeEvent::Restore);
+			if (&older == &other) maximized = window;
+			this->dirtyLayouts.insert(layout.get());
+		}
+	}
+
+	for (auto& [window, m]: this->managed) {
+		if (m.layout == nullptr) continue;
+		auto known = std::ranges::any_of(this->layouts, [&m](const auto& entry) {
+			return entry.second.get() == m.layout;
+		});
+		if (known && m.layout->tree->contains(idOf(window))) continue;
+		qCWarning(logTiling) << "Window" << window->addressHex() << window->appId()
+		                     << "lost its tile; tiling it again";
+		m.layout = nullptr;
+		m.target = QRect();
+		this->dirtyWindows.insert(window);
+	}
+}
+
+void TilingManager::heal() {
+	if (!this->mEnabled) return;
+
+	const auto now = QDateTime::currentMSecsSinceEpoch();
+	const auto busy = this->dragging != nullptr || this->edgeDragState.window != nullptr
+	               || this->desktops->shownIndex() != this->desktops->currentIndex();
+	auto again = false;
+	QList<HWND> stuck;
+	QSet<HMONITOR> endless;
+
+	for (auto& [window, m]: this->managed) {
+		if (m.placement == TilePlacement::Placed) m.unplacedSince = 0;
+		else if (m.unplacedSince == 0) m.unplacedSince = now;
+
+		const auto alive = m.layout != nullptr && this->layoutAlive(m.layout);
+		auto* monitor = alive ? monitorForScreen(m.layout->screen) : nullptr;
+		const auto animated = monitor != nullptr && DwindleScene::presenting(monitor);
+		const auto shown = alive && this->sceneShows(m.layout, this->desktops->currentIndex());
+		const auto settled = shown && !m.offscreen && !m.verifying && !m.target.isNull()
+		                  && !this->moving.contains(window) && IsWindowVisible(window->hwnd())
+		                  && !IsHungAppWindow(window->hwnd()) && this->stateOf(m) == State::Tiled;
+		const auto lost = settled && onAnyMonitor(m.target) && !onAnyMonitor(this->managedFrame(m));
+
+		switch (healTile({
+		    .placement = m.placement,
+		    .busy = busy,
+		    .animated = animated,
+		    .lost = lost,
+		    .unplacedMs = m.unplacedSince == 0 ? 0 : now - m.unplacedSince,
+		}))
+		{
+		case TileHeal::None: break;
+		case TileHeal::Wait: again = true; break;
+		case TileHeal::Release:
+			qCWarning(logTiling) << "Window" << window->addressHex() << window->appId()
+			                     << "was left waiting without an animation; placing it" << m.target;
+			stuck.append(window->hwnd());
+			break;
+		case TileHeal::EndAnimation:
+			qCWarning(logTiling) << "The animation of" << window->addressHex() << window->appId()
+			                     << "doesn't end; ending it";
+			endless.insert(monitor);
+			again = true;
+			break;
+		case TileHeal::Replace:
+			qCWarning(logTiling) << "Window" << window->addressHex() << window->appId()
+			                     << "was off every monitor; placing it" << m.target;
+			m.accepted = QRect();
+			m.corrections = 0;
+			this->send(m, this->managedFrame(m));
+			break;
+		}
+	}
+
+	for (auto* monitor: endless) DwindleScene::dismiss(monitor);
+	if (!stuck.isEmpty()) this->releaseStaged(stuck);
+	if (again) this->healTimer.start();
 }
 
 void TilingManager::restoreForCrash() {

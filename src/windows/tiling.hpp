@@ -241,6 +241,8 @@ private:
 		std::optional<float> fullscreenTileRadius;
 		TileMode mode = TileMode::Normal;
 		TilePlacement placement = TilePlacement::Placed;
+		bool stageNoted = false;
+		qint64 unplacedSince = 0;
 
 		[[nodiscard]] bool focusMaximized() const { return this->mode == TileMode::Maximized; }
 		[[nodiscard]] bool fullscreen() const { return this->mode == TileMode::Fullscreen; }
@@ -312,6 +314,11 @@ private:
 	void markOffscreen(Managed& m, bool offscreen, const QRect& restore);
 	void unpark(Managed& m);
 	void unparkAll();
+	void stopMotions();
+	void bringBack(Managed& m);
+	void forgetStage(Managed& m);
+	void heal();
+	void auditTrees();
 	static void rescueParked();
 
 	void onActiveWindowChanged();
@@ -382,6 +389,7 @@ private:
 	QTimer restackTimer;
 	QTimer verifyTimer;
 	QTimer deadlineTimer;
+	QTimer healTimer;
 	QTimer closeCacheTimer;
 	qsizetype nextCloseWindow = 0;
 	QList<QMetaObject::Connection> connections;
