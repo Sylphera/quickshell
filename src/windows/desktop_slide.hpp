@@ -35,6 +35,7 @@ public:
 	Q_DISABLE_COPY_MOVE(DesktopSlide);
 
 	bool begin(qsizetype from, qsizetype to);
+	void goBack(qsizetype to, qsizetype from);
 
 	void swipeUpdate(double offset);
 	void swipeEnd(SwipeRelease release);

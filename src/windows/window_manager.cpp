@@ -12,7 +12,9 @@
 #include <qstring.h>
 #include <qtimer.h>
 
+#include "desktop_slide.hpp"
 #include "desktop_trimmer.hpp"
+#include "scratchpad.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
@@ -27,6 +29,8 @@ namespace {
 
 Q_LOGGING_CATEGORY(logWorkspace, "quickshell.windows.workspace", QtWarningMsg);
 
+constexpr int FOREIGN_SETTLE_MS = 400;
+constexpr int FOREIGN_LIMIT_MS = 300;
 constexpr qint64 WARP_TIMEOUT_MS = 2000;
 constexpr int WARP_FALLBACK_MS = 500;
 constexpr int FOCUS_REPAIR_MS = 150;
@@ -145,7 +149,15 @@ WorkspaceBehavior::WorkspaceBehavior(QObject* parent)
 	this->focusTimer.setInterval(FOCUS_REPAIR_MS);
 	QObject::connect(&this->focusTimer, &QTimer::timeout, this, &WorkspaceBehavior::repairFocus);
 
-	QTimer::singleShot(0, this, &WorkspaceBehavior::watchTracker);
+	QTimer::singleShot(0, this, [this] {
+		this->watchTracker();
+		QObject::connect(
+		    WindowTracker::instance(),
+		    &WindowTracker::foregroundChanged,
+		    this,
+		    &WorkspaceBehavior::onForeground
+		);
+	});
 }
 
 void WorkspaceBehavior::setBackAndForth(bool enabled) {
@@ -190,6 +202,7 @@ void WorkspaceBehavior::updateSwitchPopup() {
 }
 
 void WorkspaceBehavior::onCurrentChanged() {
+	this->sinceSwitch.start();
 	this->updateSwitchPopup();
 	if (this->mHideSwitchPopup && this->switchPopup == nullptr) {
 		QTimer::singleShot(SWITCH_POPUP_RETRY_MS, this, &WorkspaceBehavior::updateSwitchPopup);
@@ -233,6 +246,29 @@ void WorkspaceBehavior::watchTracker() {
 		if (window != this->lastActive) return;
 		this->lastActive = nullptr;
 		this->expectFocus(this->desktops->currentIndex());
+	});
+}
+
+void WorkspaceBehavior::onForeground(HWND hwnd) {
+	auto* window = this->tracker->windowFor(hwnd);
+	if (window == nullptr || window->minimized() || Scratchpad::holds(window)) return;
+
+	auto* slide = DesktopSlide::instance();
+	auto from = this->desktops->currentIndex();
+	auto busy = slide->busy() || this->tracker->activationPending()
+	         || this->desktops->shownIndex() != from;
+	auto settling = this->sinceSwitch.isValid() && this->sinceSwitch.elapsed() < FOREIGN_SETTLE_MS;
+	if (busy || settling || this->desktops->isWindowPinned(hwnd)) return;
+
+	auto to = this->desktops->windowDesktopIndex(hwnd);
+	if (to < 0 || to == from) return;
+	auto late = this->desktops->nativeCurrentIndex() != from;
+	auto started = slide->begin(from, to);
+	qCDebug(logWorkspace) << "Windows goes from desktop" << from << "to" << to << "for" << hwnd
+	                      << "already there" << late << "slide" << started;
+	if (!started) return;
+	QTimer::singleShot(FOREIGN_LIMIT_MS, this, [this, slide, from, to] {
+		if (this->desktops->nativeCurrentIndex() != to) slide->goBack(to, from);
 	});
 }
 

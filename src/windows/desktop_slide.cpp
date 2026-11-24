@@ -259,6 +259,10 @@ bool DesktopSlide::begin(qsizetype from, qsizetype to) {
 	return this->overlay != nullptr;
 }
 
+void DesktopSlide::goBack(qsizetype to, qsizetype from) {
+	if (this->overlay != nullptr && !this->swiping && this->target == to) this->retarget(from);
+}
+
 void DesktopSlide::swipeUpdate(double offset) {
 	auto* desktops = VirtualDesktops::instance();
 	if (!this->swiping) {

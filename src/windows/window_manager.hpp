@@ -3,6 +3,7 @@
 #include <qt_windows.h>
 
 #include <qcolor.h>
+#include <qelapsedtimer.h>
 #include <qobject.h>
 #include <qpointer.h>
 #include <qqmlintegration.h>
@@ -47,6 +48,7 @@ private:
 	~WorkspaceBehavior() override;
 
 	void onCurrentChanged();
+	void onForeground(HWND hwnd);
 	void tryWarp();
 	void cancelWarp();
 	void warpToTopmost();
@@ -77,6 +79,7 @@ private:
 	qsizetype focusDesktop = -1;
 	const void* lastActive = nullptr;
 	QTimer focusTimer;
+	QElapsedTimer sinceSwitch;
 };
 
 class WindowManager: public QObject {
