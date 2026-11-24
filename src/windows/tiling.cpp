@@ -1940,10 +1940,7 @@ void TilingManager::apply(Layout* layout) {
 
 		auto tile = this->tileRect(layout, window);
 		if (m.maximizedTile && !layout->special) tile = maximizedFrame(window->hwnd(), rects.work);
-		if (m.focusMaximized() && !layout->special) {
-			auto gap = toPhysical(this->mGapsOut, layout->screen->devicePixelRatio());
-			tile = rects.work.adjusted(gap, gap, -gap, -gap);
-		}
+		if (m.focusMaximized()) tile = this->tileRect(layout, window, true);
 		if (m.fullscreen()) {
 			tile = fullscreenFrame(window->hwnd(), rects.monitor);
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
@@ -2222,12 +2219,7 @@ bool TilingManager::dwindlePlan(
 		    || this->moving.contains(window))
 			return false;
 		auto tile = this->tileRect(layout, window);
-		if (m.focusMaximized() && !layout->special) {
-			const auto rects = monitorRects(monitorForScreen(layout->screen));
-			if (!rects.valid) return false;
-			auto gap = toPhysical(this->mGapsOut, layout->screen->devicePixelRatio());
-			tile = rects.work.adjusted(gap, gap, -gap, -gap);
-		}
+		if (m.focusMaximized()) tile = this->tileRect(layout, window, true);
 		if (m.fullscreen()) {
 			const auto rects = monitorRects(monitorForScreen(layout->screen));
 			if (!rects.valid) return false;
