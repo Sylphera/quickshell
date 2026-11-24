@@ -100,6 +100,7 @@ public:
 	static void restack(const QList<HWND>& hwnds);
 	static void setCoverActive(bool active);
 	static void setCoverOverPanels(bool active);
+	static void recheckFullscreenApp();
 	static void setShellFullscreen(const QSet<HMONITOR>& monitors,
 	                               const QHash<HMONITOR, HWND>& managed = {});
 

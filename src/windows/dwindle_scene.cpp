@@ -586,6 +586,7 @@ private:
 	void refresh();
 	void settle();
 	bool raise();
+	void keepBarAbove();
 	void hideFront();
 	bool showFront();
 	bool holdNow();
@@ -1550,6 +1551,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 }
 
 bool Scene::holdNow() {
+	this->keepBarAbove();
 	this->dropFloating();
 	this->hideFront();
 	if (this->hiddenFront != this->focused) return false;
@@ -1588,7 +1590,7 @@ bool Scene::showFront() {
 
 QList<HWND> Scene::floatingWindows(HWND cover) const {
 	QList<HWND> windows;
-	if (this->dim != nullptr) return windows;
+	const auto special = this->dim != nullptr;
 	auto* tracker = WindowTracker::instance();
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && hwnd != this->backdropWindow;
 	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
@@ -1597,12 +1599,13 @@ QList<HWND> Scene::floatingWindows(HWND cover) const {
 		const auto tile = this->tiles.find(hwnd);
 		if (tile != this->tiles.end() && !tile->second->floating && hwnd != cover) continue;
 		if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd) || cloaked(hwnd)) continue;
-		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		if (!special && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
 		auto* window = tracker->windowFor(hwnd);
+		if (special != Scratchpad::holds(window)) continue;
 		auto* owner = GetWindow(hwnd, GW_OWNER);
 		const auto dialog = owner != nullptr && tracker->windowFor(GetAncestor(owner, GA_ROOTOWNER)) != nullptr
 		                 && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
-		if ((window == nullptr && !dialog) || Scratchpad::holds(window)) continue;
+		if (window == nullptr && !dialog) continue;
 		if (frame(hwnd).intersects(this->visibleWork)) windows.prepend(hwnd);
 	}
 	return windows;
@@ -1697,11 +1700,14 @@ bool Scene::staysAbove(HWND hwnd) const {
 	return frame(hwnd).intersects(this->visibleWork);
 }
 
+void Scene::keepBarAbove() {
+	if (this->barMonitor != nullptr) return;
+	this->barMonitor = MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL);
+	WinPanelWindow::setDwindleBarAbove(this->barMonitor, true);
+}
+
 bool Scene::raise() {
-	if (this->barMonitor == nullptr) {
-		this->barMonitor = MonitorFromWindow(this->host, MONITOR_DEFAULTTONULL);
-		WinPanelWindow::setDwindleBarAbove(this->barMonitor, true);
-	}
+	this->keepBarAbove();
 	auto panels = WinPanelWindow::aboveWindowHandles();
 	auto above = HWND_TOPMOST;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {

@@ -447,7 +447,12 @@ public:
 		this->restackTop();
 	}
 
+	void recheckFullscreenApp() {
+		if (this->fullscreenAppActive() != this->mFullscreenBehind) this->restackTop();
+	}
+
 	void restackTop() {
+		this->mFullscreenBehind = this->fullscreenAppActive();
 		for (auto* panel: this->mPanels) {
 			if (panel->bLayer == PanelLayer::Top) panel->updateLayer();
 		}
@@ -456,6 +461,7 @@ public:
 private:
 	QList<WinPanelWindow*> mPanels;
 	bool mFullscreenApp = false;
+	bool mFullscreenBehind = false;
 	QSet<HMONITOR> mShellFullscreen;
 	QHash<HMONITOR, HWND> mManagedFullscreen;
 	QSet<HMONITOR> mFullscreenBarHandoffs;
@@ -1152,6 +1158,8 @@ void WinPanelWindow::setCoverOverPanels(bool active) {
 		panel->updateLayer();
 	}
 }
+
+void WinPanelWindow::recheckFullscreenApp() { WinPanelStack::instance()->recheckFullscreenApp(); }
 
 void WinPanelWindow::setShellFullscreen(const QSet<HMONITOR>& monitors,
                                        const QHash<HMONITOR, HWND>& managed) {

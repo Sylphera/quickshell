@@ -49,7 +49,7 @@ public:
 	[[nodiscard]] TrackedWindow* tileAt(const QPoint& point);
 	void setSpecialOffset(int offset);
 	[[nodiscard]] int specialOffset() const { return this->mSpecialOffset; }
-	[[nodiscard]] QHash<HWND, QRect> specialFrames() const;
+	[[nodiscard]] QHash<HWND, QRect> specialFrames();
 
 	[[nodiscard]] bool enabled() const { return this->mEnabled; }
 	void setEnabled(bool enabled);
@@ -132,6 +132,9 @@ public:
 	[[nodiscard]] TrackedWindow* specialMaximizedWindow() const;
 	[[nodiscard]] TrackedWindow* specialCoveringWindow() const;
 	[[nodiscard]] bool covers(TrackedWindow* window) const;
+	[[nodiscard]] bool floatsInSpecial(TrackedWindow* window) const;
+	[[nodiscard]] bool overSpecialCover(TrackedWindow* window) const;
+	QRect settleFloat(TrackedWindow* window);
 	void updateShellFullscreen();
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);

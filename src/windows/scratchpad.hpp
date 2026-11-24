@@ -61,8 +61,12 @@ private:
 		QPointer<TrackedWindow> window;
 		HWND hwnd = nullptr;
 		QRect rect;
+		QRect floating;
 	};
 
+	void rememberFloating();
+	void placeFloating();
+	[[nodiscard]] bool floats(const Entry& entry) const;
 	bool handle(ScratchpadEvent event);
 	void prepare();
 	void enter();

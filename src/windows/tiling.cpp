@@ -475,7 +475,8 @@ TilingManager::TilingManager() {
 	this->restackTimer.setSingleShot(true);
 	this->restackTimer.setInterval(0);
 	QObject::connect(&this->restackTimer, &QTimer::timeout, this, &TilingManager::restack);
-	QObject::connect(this, &TilingManager::windowTilingChanged, this, [this] {
+	QObject::connect(this, &TilingManager::windowTilingChanged, this, [this](TrackedWindow* window) {
+		if (Scratchpad::holds(window)) Scratchpad::raiseWindow(window->hwnd());
 		this->restackTimer.start();
 	});
 
@@ -1002,8 +1003,8 @@ bool TilingManager::allowsHoverFocus(TrackedWindow* window) const {
 	const auto special = Scratchpad::holds(window);
 	for (const auto& [other, m]: this->managed) {
 		if (other == window || other->minimized()) continue;
-		if (m.focusMaximized() && m.layout == nullptr && !special && this->floats(m)
-		    && other->desktop() == window->desktop() && other->screen() == window->screen())
+		if (m.focusMaximized() && m.layout == nullptr && this->floats(m) && Scratchpad::holds(other) == special
+		    && (special || (other->desktop() == window->desktop() && other->screen() == window->screen())))
 			return false;
 		if (m.focusMaximized() && m.layout == target->second.layout) return false;
 		if (m.fullscreen() && Scratchpad::holds(other) == special
@@ -1022,6 +1023,10 @@ bool TilingManager::occupiesDwindleTile(HWND hwnd) const {
 	if (found == this->managed.end()) return false;
 
 	const auto& m = found->second;
+	if (this->floats(m)) {
+		return !m.fullscreen() && !m.appFullscreen && !m.window->borderlessFullscreen()
+		    && !(m.window->fullscreen() && framelessCover(hwnd));
+	}
 	if (m.layout == nullptr || (m.layout->special && !this->sceneShows(m.layout, 0))
 	    || m.layout->tree->kind() != tiling::Kind::Dwindle
 	    || m.fullscreen() || m.offscreen || m.staged() || m.target.isEmpty()
@@ -1303,7 +1308,8 @@ TilingManager::State TilingManager::stateOf(const Managed& m) const {
 	auto* window = m.window;
 
 	if (Scratchpad::holds(window)) {
-		if (m.elevated) return State::Out;
+		if (m.elevated || m.override == Override::Float) return State::Out;
+		if (m.override != Override::Tile && (m.autoFloat || this->floatsByRule(m))) return State::Out;
 		if (window->minimized() || !Scratchpad::instance()->shown()) return State::Hidden;
 		return State::Tiled;
 	}
@@ -1336,9 +1342,9 @@ bool TilingManager::floatsByRule(const Managed& m) const {
 	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
 	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
 
-	constexpr auto FLOATING_EX =
-	    WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_DLGMODALFRAME;
-	if ((exStyle & FLOATING_EX) != 0) return true;
+	auto floatingEx = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_DLGMODALFRAME;
+	if (!Scratchpad::holds(m.window)) floatingEx |= WS_EX_TOPMOST;
+	if ((exStyle & floatingEx) != 0) return true;
 
 	if ((style & WS_THICKFRAME) == 0 || (style & WS_MAXIMIZEBOX) == 0) return true;
 
@@ -1587,7 +1593,8 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 			return;
 		}
 
-		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
+		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated
+		            && (!Scratchpad::holds(window) || Scratchpad::instance()->shown());
 		this->takeOut(m);
 		if (floated) this->restoreFloating(m, m.override == Override::Float || this->isExcluded(window));
 		else this->unpark(m);
@@ -1974,11 +1981,12 @@ void TilingManager::applyFloats(Layout* layout, bool presenting) {
 			if (!m->fullscreen()) m->fullscreenTileRadius.reset();
 		}
 		const auto goal = this->floatGoal(*m, layout);
-		const auto pending = std::exchange(m->floatPending, false) || goal != m->floatFrame;
+		const auto actual = this->managedFrame(*m);
+		const auto astray = layout->special && !presenting && goal != actual;
+		const auto pending = std::exchange(m->floatPending, false) || goal != m->floatFrame || astray;
 		m->floatFrame = goal;
 		if (pending) {
 			m->placement = nextPlacement(m->placement, TilePlacementEvent::Unhold);
-			const auto actual = this->managedFrame(*m);
 			if (presenting && goal.width() <= actual.width() && goal.height() <= actual.height()
 			    && goal.size() != actual.size())
 			{
@@ -1995,8 +2003,8 @@ void TilingManager::applyFloats(Layout* layout, bool presenting) {
 bool TilingManager::floats(const Managed& m) const {
 	auto* window = m.window;
 	return m.layout == nullptr && !m.elevated && !window->minimized() && !window->maximized()
-	    && window->desktop() >= 0 && window->screen() != nullptr && !Scratchpad::holds(window)
-	    && this->stateOf(m) == State::Out;
+	    && window->screen() != nullptr && this->stateOf(m) == State::Out
+	    && (Scratchpad::holds(window) ? Scratchpad::instance()->shown() : window->desktop() >= 0);
 }
 
 TilingManager::Layout* TilingManager::floatHome(const Managed& m, bool create) {
@@ -2016,15 +2024,20 @@ QList<TilingManager::Managed*> TilingManager::sceneFloats(Layout* layout) {
 QRect TilingManager::floatGoal(const Managed& m, const Layout* layout) const {
 	const auto rects = monitorRects(monitorForScreen(layout->screen));
 	if (!rects.valid) return m.floatFrame;
-	if (m.fullscreen()) return fullscreenFrame(m.window->hwnd(), rects.monitor);
+	const auto shift = layout->special ? this->mSpecialOffset : 0;
+	if (m.fullscreen()) return fullscreenFrame(m.window->hwnd(), rects.monitor).translated(0, shift);
 	if (!m.focusMaximized()) return m.floatFrame;
-	const auto gap = toPhysical(this->mGapsOut, layout->screen->devicePixelRatio());
-	return rects.work.adjusted(gap, gap, -gap, -gap);
+	const auto gap =
+	    toPhysical(layout->special ? SPECIAL_GAPS_OUT : this->mGapsOut, layout->screen->devicePixelRatio());
+	return rects.work.adjusted(gap, gap, -gap, -gap).translated(0, shift);
 }
 
 void TilingManager::coverOthers(Managed& m) {
 	m.coveredAt = QDateTime::currentMSecsSinceEpoch();
-	if (Scratchpad::holds(m.window)) return;
+	if (Scratchpad::holds(m.window)) {
+		Scratchpad::raiseWindow(m.window->hwnd());
+		return;
+	}
 	SetWindowPos(m.window->hwnd(), HWND_TOP, 0, 0, 0, 0,
 	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
 }
@@ -2078,9 +2091,10 @@ bool TilingManager::toggleFloatMaximize(Managed& m) {
 		if (m.floatMoving && !m.floatFrame.isNull()) raw = rawFor(hwnd, m.floatFrame);
 		m.fullscreenRestore = raw;
 		markFullscreen(hwnd, raw, LeftMark::Maximized);
+		const auto special = Scratchpad::holds(window);
 		for (auto& [other, existing]: this->managed) {
-			if (existing.fullscreen() && !Scratchpad::holds(other) && other->desktop() == window->desktop()
-			    && other->screen() == window->screen())
+			if (!existing.fullscreen() || Scratchpad::holds(other) != special) continue;
+			if (special || (other->desktop() == window->desktop() && other->screen() == window->screen()))
 				this->leaveFullscreen(existing);
 		}
 		this->clearMaximized(this->floatHome(m, true), window, true);
@@ -2095,12 +2109,15 @@ bool TilingManager::toggleFloatMaximize(Managed& m) {
 }
 
 void TilingManager::uncoverFor(const Managed& m) {
-	if (!this->floats(m) || (GetWindowLongPtrW(m.window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return;
 	auto* window = m.window;
+	const auto special = Scratchpad::holds(window);
+	if (!this->floats(m)) return;
+	if (!special && (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return;
 	auto changed = false;
 	for (auto& [other, existing]: this->managed) {
-		if (other == window || existing.mode == TileMode::Normal || other->minimized() || Scratchpad::holds(other)) continue;
-		if (other->desktop() != window->desktop() || other->screen() != window->screen()) continue;
+		if (other == window || existing.mode == TileMode::Normal || other->minimized()) continue;
+		if (Scratchpad::holds(other) != special) continue;
+		if (!special && (other->desktop() != window->desktop() || other->screen() != window->screen())) continue;
 		if (m.managedAt > existing.coveredAt || GetWindow(window->hwnd(), GW_OWNER) == other->hwnd()) continue;
 		if (existing.fullscreen()) this->leaveFullscreen(existing);
 		else if (existing.layout == nullptr) this->restoreFloat(existing);
@@ -2167,6 +2184,7 @@ bool TilingManager::stageOccluding(HWND hwnd) {
 }
 
 void TilingManager::releaseStaged(const QList<HWND>& windows) {
+	QTimer::singleShot(VERIFY_DELAY_MS, this, &WinPanelWindow::recheckFullscreenApp);
 	for (auto& [window, m]: this->managed) {
 		if (!windows.contains(window->hwnd())) continue;
 		if (std::exchange(m.fullscreenLookPending, false)) setFullscreenLook(window->hwnd(), m.fullscreen());
@@ -2251,7 +2269,8 @@ bool TilingManager::dwindlePlan(
 	}
 	for (auto* m: this->sceneFloats(layout)) {
 		auto* hwnd = m->window->hwnd();
-		if (!IsWindowVisible(hwnd) || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		if (!IsWindowVisible(hwnd)) continue;
+		if (!layout->special && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
 		const auto goal = this->floatGoal(*m, layout);
 		const auto leaving = !m->fullscreen() && m->fullscreenLookPending;
 		const auto radius = m->fullscreen() ? std::optional(0.0f) : leaving ? m->fullscreenTileRadius : std::nullopt;
@@ -2919,6 +2938,10 @@ void TilingManager::setSpecialOffset(int offset) {
 	if (!this->mEnabled) return;
 	if (offset != 0 && DwindleScene::enabled()) DwindleScene::drop(Scratchpad::instance()->monitor());
 	this->mSpecialShifting = true;
+	for (auto& [window, m]: this->managed) {
+		if (m.mode != TileMode::Normal && Scratchpad::holds(window) && this->floats(m))
+			this->markLayout(this->floatHome(m, true));
+	}
 	this->sync();
 	for (auto& [key, layout]: this->layouts) {
 		if (layout->special) this->apply(layout.get());
@@ -2927,11 +2950,18 @@ void TilingManager::setSpecialOffset(int offset) {
 	if (offset != 0 || !Scratchpad::instance()->shown()) return;
 	auto* covering = this->specialCoveringWindow();
 	auto found = this->managed.find(covering);
-	if (found != this->managed.end() && found->second.layout != nullptr) this->apply(found->second.layout);
+	if (found == this->managed.end()) return;
+	auto* layout = found->second.layout != nullptr ? found->second.layout : this->floatHome(found->second, false);
+	if (layout != nullptr) this->apply(layout);
 }
 
-QHash<HWND, QRect> TilingManager::specialFrames() const {
+QHash<HWND, QRect> TilingManager::specialFrames() {
 	QHash<HWND, QRect> frames;
+	for (auto& [window, m]: this->managed) {
+		if (m.mode == TileMode::Normal || !Scratchpad::holds(window) || !this->floats(m)) continue;
+		if (auto* layout = this->floatHome(m, true))
+			frames.insert(window->hwnd(), this->floatGoal(m, layout).translated(0, -this->mSpecialOffset));
+	}
 	for (const auto& [key, layout]: this->layouts) {
 		if (!layout->special) continue;
 		auto monitor = physicalMonitor(layout->screen);
@@ -3316,6 +3346,7 @@ void TilingManager::onActiveWindowChanged() {
 	this->restackTimer.start();
 
 	auto& m = iter->second;
+	WinPanelWindow::recheckFullscreenApp();
 	m.focusStamp = ++this->focusCounter;
 	this->yieldFullscreenTo(m);
 	if (m.layout == nullptr) {
@@ -3371,7 +3402,7 @@ void TilingManager::verify() {
 void TilingManager::giveUp(Managed& m, const QRect& frame) {
 	m.verifying = false;
 
-	if (m.offscreen) {
+	if (m.offscreen || Scratchpad::holds(m.window)) {
 		m.accepted = frame;
 		return;
 	}
@@ -3427,8 +3458,9 @@ void TilingManager::onDeadline() {
 			continue;
 		}
 
-		if (m.offscreen) {
+		if (m.offscreen || Scratchpad::holds(window)) {
 			m.verifying = false;
+			if (!m.offscreen) m.accepted = frame;
 			continue;
 		}
 
@@ -4261,8 +4293,7 @@ TrackedWindow* TilingManager::specialFullscreenWindow() const {
 
 TrackedWindow* TilingManager::specialMaximizedWindow() const {
 	for (const auto& [window, m]: this->managed) {
-		if (m.focusMaximized() && m.layout != nullptr && m.layout->special && !window->minimized())
-			return window;
+		if (m.focusMaximized() && Scratchpad::holds(window) && !window->minimized()) return window;
 	}
 	return nullptr;
 }
@@ -4272,11 +4303,38 @@ TrackedWindow* TilingManager::specialCoveringWindow() const {
 	return fullscreen != nullptr ? fullscreen : this->specialMaximizedWindow();
 }
 
+QRect TilingManager::settleFloat(TrackedWindow* window) {
+	auto found = this->managed.find(window);
+	if (found == this->managed.end()) return {};
+	auto& m = found->second;
+	if (m.layout != nullptr || m.mode != TileMode::Normal || !m.floatMoving || m.floatFrame.isNull()) return {};
+	m.floatMoving = false;
+	m.floatPending = false;
+	m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
+	return rawFor(window->hwnd(), m.floatFrame);
+}
+
+bool TilingManager::floatsInSpecial(TrackedWindow* window) const {
+	auto found = this->managed.find(window);
+	return found != this->managed.end() && Scratchpad::holds(window)
+	    && this->stateOf(found->second) == State::Out;
+}
+
+bool TilingManager::overSpecialCover(TrackedWindow* window) const {
+	auto* covering = this->specialCoveringWindow();
+	auto cover = this->managed.find(covering);
+	auto found = this->managed.find(window);
+	if (cover == this->managed.end() || found == this->managed.end() || window == covering) return false;
+	return found->second.layout == nullptr
+	    && (found->second.managedAt > cover->second.coveredAt
+	        || GetWindow(window->hwnd(), GW_OWNER) == covering->hwnd());
+}
+
 bool TilingManager::covers(TrackedWindow* window) const {
 	auto found = this->managed.find(window);
 	if (found == this->managed.end() || window->minimized()) return false;
 	const auto& m = found->second;
-	return m.mode != TileMode::Normal && (m.layout != nullptr || this->floats(m));
+	return m.mode != TileMode::Normal && (m.layout != nullptr || Scratchpad::holds(window) || this->floats(m));
 }
 
 void TilingManager::markCovering() {
@@ -4323,6 +4381,7 @@ void TilingManager::updateShellFullscreen() {
 	}
 	this->mNativeFullscreen = nativeFullscreen;
 	WinPanelWindow::setShellFullscreen(fullscreenMonitors, managedFullscreenWindows);
+	WinPanelWindow::recheckFullscreenApp();
 }
 
 bool TilingManager::toggleSplit(TrackedWindow* window) {

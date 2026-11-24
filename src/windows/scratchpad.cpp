@@ -276,6 +276,7 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		}
 		this->entries.append(Entry {.window = window, .hwnd = hwnd, .rect = visibleRect(hwnd)});
 		auto& entry = this->entries.last();
+		entry.floating = entry.rect;
 		remember(hwnd, entry.rect);
 		emit this->membershipChanged();
 
@@ -296,7 +297,9 @@ void Scratchpad::remove(TrackedWindow* window) {
 		auto& entry = this->entries[i];
 		if (entry.window != window) continue;
 
-		if (!entry.rect.isEmpty()) placeAt(entry.hwnd, HWND_NOTOPMOST, entry.rect);
+		this->rememberFloating();
+		auto rect = this->floats(entry) && !entry.floating.isEmpty() ? entry.floating : entry.rect;
+		if (!rect.isEmpty()) placeAt(entry.hwnd, HWND_NOTOPMOST, rect);
 		VirtualDesktops::instance()->pinWindow(entry.hwnd, false);
 		forget(entry.hwnd);
 		this->entries.removeAt(i);
@@ -353,6 +356,7 @@ void Scratchpad::enter() {
 }
 
 void Scratchpad::leave() {
+	this->rememberFloating();
 	this->hideDim();
 	if (TilingManager::active() == nullptr || this->entries.isEmpty()) {
 		this->handle(ScratchpadEvent::Settled);
@@ -368,6 +372,14 @@ void Scratchpad::waitForTakeoff(int generation, int tries) {
 	auto ready = tiling != nullptr;
 	for (const auto& entry: this->entries) {
 		RECT bounds {};
+		if (this->floats(entry)) {
+			RECT raw {};
+			if (IsIconic(entry.hwnd) || (GetWindowRect(entry.hwnd, &raw)
+			    && raw.top == entry.floating.y() + this->slideDistance() && raw.left == entry.floating.x()))
+				continue;
+			ready = false;
+			break;
+		}
 		if (!frames.contains(entry.hwnd)
 		    || FAILED(
 		        DwmGetWindowAttribute(entry.hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))
@@ -395,16 +407,30 @@ QList<HWND> Scratchpad::layerChain() const {
 	}
 
 	auto* first = GetForegroundWindow();
-	if (auto* tiling = TilingManager::active()) {
-		if (auto* fullscreen = tiling->specialFullscreenWindow()) first = fullscreen->hwnd();
-		else if (auto* maximized = tiling->specialMaximizedWindow()) first = maximized->hwnd();
-	}
 	if (windows.removeOne(first)) windows.prepend(first);
+	HWND covering = nullptr;
+	if (auto* tiling = TilingManager::active()) {
+		auto* tracker = WindowTracker::instance();
+		std::ranges::stable_partition(windows, [tiling, tracker](HWND hwnd) {
+			return !tiling->isTiled(tracker->windowFor(hwnd));
+		});
+		if (auto* window = tiling->specialCoveringWindow()) {
+			covering = window->hwnd();
+			std::ranges::stable_partition(windows, [tiling, tracker, covering](HWND hwnd) {
+				return hwnd != covering && tiling->overSpecialCover(tracker->windowFor(hwnd));
+			});
+			if (windows.removeOne(covering)) {
+				qsizetype over = 0;
+				while (over < windows.size() && tiling->overSpecialCover(tracker->windowFor(windows[over]))) over++;
+				windows.insert(over, covering);
+			}
+		}
+	}
 
 	auto* host = DwindleScene::specialHost();
 	if (host != nullptr) {
-		auto held = DwindleScene::holdsSpecial() && !windows.isEmpty();
-		windows.insert(held ? 1 : 0, host);
+		auto held = DwindleScene::holdsSpecial() && windows.contains(covering);
+		windows.insert(held ? windows.indexOf(covering) + 1 : 0, host);
 	}
 	if (this->cover != nullptr) windows.prepend(this->cover);
 	if (this->dim != nullptr && IsWindowVisible(this->dim)) windows.append(this->dim);
@@ -473,6 +499,45 @@ int Scratchpad::slideDistance() const {
 void Scratchpad::moveReal(int offset) {
 	this->realOffset = offset;
 	if (auto* tiling = TilingManager::active()) tiling->setSpecialOffset(offset);
+	this->placeFloating();
+}
+
+bool Scratchpad::floats(const Entry& entry) const {
+	auto* tiling = TilingManager::active();
+	return tiling != nullptr && tiling->floatsInSpecial(entry.window) && !tiling->covers(entry.window);
+}
+
+void Scratchpad::rememberFloating() {
+	if (this->realOffset != 0) return;
+	for (auto& entry: this->entries) {
+		if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !this->floats(entry)) continue;
+		auto rect = TilingManager::active()->settleFloat(entry.window);
+		if (rect.isEmpty()) rect = visibleRect(entry.hwnd);
+		if (!rect.isEmpty()) entry.floating = rect;
+	}
+}
+
+void Scratchpad::placeFloating() {
+	if (!this->shown()) return;
+	const auto rects = monitorRects(this->mMonitor);
+	if (!rects.valid) return;
+	for (auto& entry: this->entries) {
+		if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || IsZoomed(entry.hwnd) || !this->floats(entry))
+			continue;
+		if (entry.floating.isEmpty()) entry.floating = entry.rect;
+		if (entry.floating.isEmpty())
+			entry.floating = QRect(QPoint(), QSize(rects.work.width() * 3 / 5, rects.work.height() * 13 / 20));
+		if (!rects.monitor.intersects(entry.floating)) entry.floating.moveCenter(rects.work.center());
+		SetWindowPos(
+		    entry.hwnd,
+		    nullptr,
+		    entry.floating.x(),
+		    entry.floating.y() + this->realOffset,
+		    entry.floating.width(),
+		    entry.floating.height(),
+		    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS
+		);
+	}
 }
 
 void Scratchpad::jumpReal(int offset) {
@@ -482,7 +547,8 @@ void Scratchpad::jumpReal(int offset) {
 		auto* covering = tiling != nullptr && offset == 0 ? tiling->specialCoveringWindow() : nullptr;
 		for (const auto& entry: this->entries) {
 			RECT rect {};
-			if (covering != nullptr && entry.window != covering && tiling->isTiled(entry.window)) continue;
+			if (covering != nullptr && entry.window != covering && !tiling->overSpecialCover(entry.window))
+				continue;
 			if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !GetWindowRect(entry.hwnd, &rect))
 				continue;
 			SetWindowPos(
@@ -584,9 +650,11 @@ void Scratchpad::openCover(bool show) {
 	QList<CoverThumb> thumbs;
 	auto* focus = this->focusCandidate();
 	for (auto* hwnd: stack) {
-		if (maximized != nullptr && hwnd != maximized->hwnd() && frames.contains(hwnd)) continue;
+		if (maximized != nullptr && hwnd != maximized->hwnd()
+		    && !tiling->overSpecialCover(WindowTracker::instance()->windowFor(hwnd)))
+			continue;
 		QRect frame;
-		if (!show && maximized != nullptr && hwnd == maximized->hwnd())
+		if (!show && ((maximized != nullptr && hwnd == maximized->hwnd()) || !frames.contains(hwnd)))
 			frame = DwindleScene::frameForDrag(hwnd);
 		if (frame.isEmpty()) frame = frames.value(hwnd);
 		if (frame.isEmpty()) {
@@ -742,6 +810,7 @@ void Scratchpad::closeCover() {
 
 void Scratchpad::finishHide() {
 	this->slideGeneration++;
+	this->rememberFloating();
 	this->closeCover();
 	this->dimTimer.stop();
 	this->dimTarget = 0;
