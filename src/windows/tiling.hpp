@@ -147,9 +147,9 @@ public:
 	void edgeDrag(const QPoint& delta);
 	void endEdgeDrag();
 
-	static void resizeFloating(TrackedWindow* window, qint32 dx, qint32 dy, bool exact);
-	static void center(TrackedWindow* window);
-	void moveFloating(TrackedWindow* window, Edge direction) const;
+	void resizeFloating(TrackedWindow* window, qint32 dx, qint32 dy, bool exact);
+	void center(TrackedWindow* window);
+	void moveFloating(TrackedWindow* window, Edge direction);
 
 signals:
 	void enabledChanged();
@@ -305,6 +305,9 @@ private:
 	void floatTo(Managed& m, const QRect& raw);
 	void prepareFloatClose(Managed& m);
 	bool closeFloat(Managed& m);
+	[[nodiscard]] std::optional<QRect> floatBase(TrackedWindow* window) const;
+	[[nodiscard]] QRect floatArea(TrackedWindow* window, const QRect& around) const;
+	void placeFloat(TrackedWindow* window, const QRect& frame);
 	static void dropTopmost(Managed& m);
 	static void restoreTopmost(Managed& m);
 	void restoreFloat(Managed& m);

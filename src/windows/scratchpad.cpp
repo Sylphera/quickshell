@@ -1020,6 +1020,9 @@ void Scratchpad::onActiveWindowChanged() {
 	if (!this->shown() || GetTickCount64() - this->shownAt < FOCUS_GRACE_MS) return;
 	auto* active = WindowTracker::instance()->activeWindow();
 	if (active == nullptr || this->contains(active)) return;
+	if ((GetWindowLongPtrW(active->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0
+	    && VirtualDesktops::instance()->isWindowPinned(active->hwnd()))
+		return;
 	this->handle(ScratchpadEvent::Hide);
 }
 

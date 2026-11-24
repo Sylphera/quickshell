@@ -701,6 +701,18 @@ void Dispatcher::pin(TrackedWindow* window) {
 	const auto pin = !desktops->isWindowPinned(hwnd);
 	auto* tiling = TilingManager::active();
 	if (tiling != nullptr && !tiling->canPin(window)) return;
+	auto* scratchpad = Scratchpad::instance();
+	if (scratchpad->contains(window)) {
+		scratchpad->remove(window);
+		desktops->pinWindow(hwnd, true);
+		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+		             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+		return;
+	}
+	if (!pin && scratchpad->shown()) {
+		scratchpad->add(window, false);
+		return;
+	}
 	if (!desktops->pinWindow(hwnd, pin) || tiling == nullptr) return;
 	SetWindowPos(hwnd, pin ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
 	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
@@ -949,7 +961,7 @@ void Dispatcher::resizeActive(const QString& args) {
 		if (tiling->resizeTiled(window, dx, dy)) return;
 	}
 
-	TilingManager::resizeFloating(window, x, y, exact);
+	TilingManager::instance()->resizeFloating(window, x, y, exact);
 }
 
 void Dispatcher::centerWindow() {
@@ -962,7 +974,7 @@ void Dispatcher::centerWindow() {
 		return;
 	}
 
-	TilingManager::center(window);
+	TilingManager::instance()->center(window);
 }
 
 void Dispatcher::moveWindowPixel(TrackedWindow* window, const QString& x, const QString& y) {

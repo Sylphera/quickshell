@@ -436,7 +436,7 @@ QRect frameFor(HWND hwnd, const QRect& wanted) {
 	);
 }
 
-constexpr const wchar_t* FLOAT_SIZE_PROP = L"qs.floatsize";
+constexpr const wchar_t* FLOAT_SIZE_PROP = L"qs.floatsize2";
 constexpr const wchar_t* TOPMOST_PROP = L"qs.topmost";
 
 void rememberFloatSize(HWND hwnd, const QSize& size) {
@@ -1618,7 +1618,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	if (state == State::Out) {
 		if (m.layout == nullptr) {
 			m.fresh = false;
-			m.floated = true;
+			m.floated = this->floats(m);
 			if (m.mode != TileMode::Normal || m.floatMoving) this->markLayout(this->floatHome(m, true));
 			else if (onAnyMonitor(this->managedFrame(m))) m.floatSeen = this->managedFrame(m);
 			return;
@@ -2131,8 +2131,7 @@ void TilingManager::restoreTopmost(Managed& m) {
 
 bool TilingManager::canPin(TrackedWindow* window) const {
 	auto found = this->managed.find(window);
-	return found != this->managed.end() && found->second.mode == TileMode::Normal && !Scratchpad::holds(window)
-	    && this->floats(found->second);
+	return found != this->managed.end() && found->second.mode == TileMode::Normal && this->floats(found->second);
 }
 
 void TilingManager::floatTo(Managed& m, const QRect& raw) {
@@ -3050,9 +3049,9 @@ void TilingManager::restoreFloating(Managed& m, bool besideTile) {
 	if (!parkedAt.isNull()) raw = parkedAt;
 
 	if (besideTile) {
-		auto tileRect = toRECT(raw);
-		auto work = monitorRects(MonitorFromRect(&tileRect, MONITOR_DEFAULTTONEAREST)).work;
-		this->floatTo(m, floatingRect(raw, floatSizeOf(hwnd), work));
+		const auto area = this->floatArea(m.window, raw);
+		const auto frame = frameFor(hwnd, floatingRect(raw, floatSizeOf(hwnd), area));
+		this->floatTo(m, rawFor(hwnd, clampInto(frame, area)));
 		return;
 	}
 
@@ -4802,56 +4801,86 @@ void TilingManager::edgeDrag(const QPoint& delta) {
 
 void TilingManager::endEdgeDrag() { this->edgeDragState = EdgeDrag(); }
 
-void TilingManager::resizeFloating(TrackedWindow* window, qint32 dx, qint32 dy, bool exact) {
-	if (window == nullptr || window->screen() == nullptr) return;
+QRect TilingManager::floatArea(TrackedWindow* window, const QRect& around) const {
+	const auto native = toRECT(around);
+	auto* monitor = MonitorFromRect(&native, MONITOR_DEFAULTTONEAREST);
+	const auto work = monitorRects(monitor).work;
+	auto* screen = screenForMonitor(monitor);
+	if (!work.isValid() || screen == nullptr) return work;
+	const auto gap = toPhysical(
+	    Scratchpad::holds(window) ? SPECIAL_GAPS_OUT : this->mGapsOut,
+	    screen->devicePixelRatio()
+	);
+	return work.adjusted(gap, gap, -gap, -gap);
+}
 
+std::optional<QRect> TilingManager::floatBase(TrackedWindow* window) const {
+	if (window == nullptr || window->screen() == nullptr) return std::nullopt;
 	auto* hwnd = window->hwnd();
-	if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
+	if (IsIconic(hwnd) || IsZoomed(hwnd)) return std::nullopt;
+	auto found = this->managed.find(window);
+	if (found == this->managed.end()) return currentFrame(hwnd);
+	const auto& m = found->second;
+	if (m.mode != TileMode::Normal) return std::nullopt;
+	return m.layout == nullptr && m.floatMoving && !m.floatFrame.isNull() ? m.floatFrame : currentFrame(hwnd);
+}
+
+void TilingManager::placeFloat(TrackedWindow* window, const QRect& frame) {
+	auto* hwnd = window->hwnd();
+	auto found = this->managed.find(window);
+	if (found != this->managed.end() && this->mEnabled && this->mAnimateMoves && DwindleScene::enabled()) {
+		auto& m = found->second;
+		auto* home = this->floats(m) ? this->floatHome(m, true) : nullptr;
+		const auto hidden = !Scratchpad::holds(window) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+		if (home != nullptr && !hidden && this->sceneShows(home, this->desktops->currentIndex())) {
+			m.floatFrame = frame;
+			this->sendFloat(m);
+			return;
+		}
+	}
+	setFrame(hwnd, frame);
+}
+
+void TilingManager::resizeFloating(TrackedWindow* window, qint32 dx, qint32 dy, bool exact) {
+	const auto base = this->floatBase(window);
+	if (!base) return;
 
 	auto dpr = window->screen()->devicePixelRatio();
-	auto frame = currentFrame(hwnd);
 	auto width = toPhysical(dx, dpr);
 	auto height = toPhysical(dy, dpr);
 	if (!exact) {
-		width += frame.width();
-		height += frame.height();
+		width += base->width();
+		height += base->height();
 	}
 
 	const auto size = QSize(qMax(1, width), qMax(1, height));
-	const auto grown = size - frame.size();
-	setFrame(hwnd, QRect(frame.topLeft() - QPoint(grown.width() / 2, grown.height() / 2), size));
+	const auto grown = size - base->size();
+	this->placeFloat(window, QRect(base->topLeft() - QPoint(grown.width() / 2, grown.height() / 2), size));
 }
 
 void TilingManager::center(TrackedWindow* window) {
-	if (window == nullptr) return;
+	const auto base = this->floatBase(window);
+	if (!base) return;
 
-	auto* hwnd = window->hwnd();
-	if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
-
-	auto work = monitorRects(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).work;
+	auto work = monitorRects(MonitorFromWindow(window->hwnd(), MONITOR_DEFAULTTONEAREST)).work;
 	if (!work.isValid()) return;
 
-	auto frame = currentFrame(hwnd);
+	auto frame = *base;
 	frame.moveTo(
 	    work.left() + (work.width() - frame.width()) / 2,
 	    work.top() + (work.height() - frame.height()) / 2
 	);
-	setFrame(hwnd, frame);
+	this->placeFloat(window, frame);
 }
 
-void TilingManager::moveFloating(TrackedWindow* window, Edge direction) const {
-	if (window == nullptr || window->screen() == nullptr) return;
+void TilingManager::moveFloating(TrackedWindow* window, Edge direction) {
+	const auto base = this->floatBase(window);
+	if (!base) return;
 
-	auto* hwnd = window->hwnd();
-	if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
-
-	auto work = monitorRects(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).work;
+	const auto work = this->floatArea(window, *base);
 	if (!work.isValid()) return;
 
-	auto gap = toPhysical(this->mGapsOut, window->screen()->devicePixelRatio());
-	work.adjust(gap, gap, -gap, -gap);
-
-	auto frame = currentFrame(hwnd);
+	auto frame = *base;
 	switch (direction) {
 	case Edge::Left: frame.moveLeft(work.left()); break;
 	case Edge::Right: frame.moveRight(work.right()); break;
@@ -4859,7 +4888,7 @@ void TilingManager::moveFloating(TrackedWindow* window, Edge direction) const {
 	case Edge::Bottom: frame.moveBottom(work.bottom()); break;
 	}
 
-	setFrame(hwnd, frame);
+	this->placeFloat(window, frame);
 }
 
 Tiling::Tiling(QObject* parent): QObject(parent) {
