@@ -95,6 +95,7 @@ class WindowManager: public QObject {
 	Q_PROPERTY(qint32 warpOnChangeWorkspace READ warpOnChangeWorkspace WRITE setWarpOnChangeWorkspace NOTIFY warpOnChangeWorkspaceChanged);
 	Q_PROPERTY(bool hideDesktopPopup READ hideDesktopPopup WRITE setHideDesktopPopup NOTIFY hideDesktopPopupChanged);
 	Q_PROPERTY(bool removeEmptyDesktops READ removeEmptyDesktops WRITE setRemoveEmptyDesktops NOTIFY removeEmptyDesktopsChanged);
+	Q_PROPERTY(bool windowRules READ windowRules WRITE setWindowRules NOTIFY windowRulesChanged);
 	// clang-format on
 
 public:
@@ -121,6 +122,8 @@ public:
 	void setHideDesktopPopup(bool enabled);
 	[[nodiscard]] bool removeEmptyDesktops() const;
 	void setRemoveEmptyDesktops(bool enabled);
+	[[nodiscard]] bool windowRules() const;
+	void setWindowRules(bool enabled);
 
 signals:
 	void bordersChanged();
@@ -133,6 +136,7 @@ signals:
 	void warpOnChangeWorkspaceChanged();
 	void hideDesktopPopupChanged();
 	void removeEmptyDesktopsChanged();
+	void windowRulesChanged();
 };
 
 } // namespace qs::windows
