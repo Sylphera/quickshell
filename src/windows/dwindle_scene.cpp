@@ -417,6 +417,13 @@ struct Tile: AnimatedFrame {
 	QPoint diagnosticOffset;
 };
 
+struct FloatingCopy {
+	Thumbnail source;
+	ComPtr<IDCompositionVisual> container;
+	ComPtr<IDCompositionRectangleClip> clip;
+	QRect shown;
+};
+
 struct CloseFrame {
 	QImage pixels;
 	QRect bounds;
@@ -513,6 +520,10 @@ private:
 	QRect visibleWork;
 	bool prepare(const QList<DwindleTile>& plan);
 	bool addUnderlay(const QList<DwindleTile>& plan);
+	[[nodiscard]] QList<HWND> floatingWindows() const;
+	void copyFloating();
+	bool followFloating(HWND window, FloatingCopy& copy);
+	void dropFloating();
 	[[nodiscard]] bool staysAbove(HWND hwnd) const;
 	bool updateFullscreenBar(HWND window);
 	void publishDragScene() const;
@@ -564,6 +575,7 @@ private:
 	Thumbnail backdrop;
 	std::unique_ptr<Thumbnail> fullscreenBar;
 	std::map<HWND, std::unique_ptr<Thumbnail>> underlay;
+	std::map<HWND, std::unique_ptr<FloatingCopy>> floats;
 	ComPtr<IDCompositionVisual> dimVisual;
 	ComPtr<IDCompositionEffectGroup> dimFade;
 	ComPtr<IDCompositionSurface> dimColor;
@@ -1410,6 +1422,8 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 		this->hide();
 		return false;
 	}
+	if (fullscreen == nullptr) this->copyFloating();
+	else this->dropFloating();
 	if (!succeeded(this->device->Commit(), "Commit")) return false;
 	if (fresh && !this->raise()) return false;
 	this->publishDragScene();
@@ -1440,6 +1454,86 @@ bool Scene::showFront() {
 	found->second->opacityStart = 0;
 	DwmFlush();
 	return true;
+}
+
+QList<HWND> Scene::floatingWindows() const {
+	QList<HWND> windows;
+	if (this->dim != nullptr) return windows;
+	auto* tracker = WindowTracker::instance();
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && hwnd != this->backdropWindow;
+	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
+	{
+		if (hwnd == this->host || this->tiles.contains(hwnd) || isOwnProcessWindow(hwnd)) continue;
+		if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd) || cloaked(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		auto* window = tracker->windowFor(hwnd);
+		auto* owner = GetWindow(hwnd, GW_OWNER);
+		const auto dialog = owner != nullptr && tracker->windowFor(GetAncestor(owner, GA_ROOTOWNER)) != nullptr
+		                 && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
+		if ((window == nullptr && !dialog) || Scratchpad::holds(window)) continue;
+		if (frame(hwnd).intersects(this->visibleWork)) windows.prepend(hwnd);
+	}
+	return windows;
+}
+
+bool Scene::followFloating(HWND window, FloatingCopy& copy) {
+	const auto bounds = frame(window);
+	if (bounds.isEmpty()) return false;
+	if (bounds == copy.shown && copy.source.sourceCrop.size() == bounds.size()) return true;
+	const auto radius = windowRadius(window);
+	if (!this->setNativeSize(copy.source, window)
+	    || FAILED(copy.source.visual->SetOffsetX(static_cast<float>(copy.source.contentOffset.x())))
+	    || FAILED(copy.source.visual->SetOffsetY(static_cast<float>(copy.source.contentOffset.y())))
+	    || FAILED(copy.container->SetOffsetX(static_cast<float>(bounds.x() - this->work.x())))
+	    || FAILED(copy.container->SetOffsetY(static_cast<float>(bounds.y() - this->work.y())))
+	    || FAILED(copy.clip->SetLeft(0.0f)) || FAILED(copy.clip->SetTop(0.0f))
+	    || FAILED(copy.clip->SetRight(static_cast<float>(bounds.width())))
+	    || FAILED(copy.clip->SetBottom(static_cast<float>(bounds.height())))
+	    || FAILED(copy.clip->SetTopLeftRadiusX(radius)) || FAILED(copy.clip->SetTopLeftRadiusY(radius))
+	    || FAILED(copy.clip->SetTopRightRadiusX(radius)) || FAILED(copy.clip->SetTopRightRadiusY(radius))
+	    || FAILED(copy.clip->SetBottomLeftRadiusX(radius)) || FAILED(copy.clip->SetBottomLeftRadiusY(radius))
+	    || FAILED(copy.clip->SetBottomRightRadiusX(radius))
+	    || FAILED(copy.clip->SetBottomRightRadiusY(radius)))
+		return false;
+	copy.shown = bounds;
+	return true;
+}
+
+void Scene::copyFloating() {
+	const auto windows = this->floatingWindows();
+	for (auto it = this->floats.begin(); it != this->floats.end();) {
+		if (windows.contains(it->first)) {
+			++it;
+			continue;
+		}
+		this->root->RemoveVisual(it->second->container.Get());
+		it = this->floats.erase(it);
+	}
+	for (auto* hwnd: windows) {
+		auto found = this->floats.find(hwnd);
+		if (found == this->floats.end()) {
+			auto copy = std::make_unique<FloatingCopy>();
+			if (!this->addSource(copy->source, hwnd)
+			    || FAILED(this->device->CreateVisual(copy->container.GetAddressOf()))
+			    || FAILED(this->device->CreateRectangleClip(copy->clip.GetAddressOf()))
+			    || FAILED(copy->container->SetClip(copy->clip.Get()))
+			    || FAILED(copy->container->AddVisual(copy->source.visual.Get(), FALSE, nullptr))
+			    || !this->followFloating(hwnd, *copy))
+				continue;
+			found = this->floats.emplace(hwnd, std::move(copy)).first;
+		} else {
+			this->followFloating(hwnd, *found->second);
+			this->root->RemoveVisual(found->second->container.Get());
+		}
+		this->root->AddVisual(found->second->container.Get(), FALSE, nullptr);
+	}
+}
+
+void Scene::dropFloating() {
+	if (this->floats.empty()) return;
+	for (auto& [hwnd, copy]: this->floats) this->root->RemoveVisual(copy->container.Get());
+	this->floats.clear();
+	this->device->Commit();
 }
 
 bool Scene::staysAbove(HWND hwnd) const {
@@ -1603,7 +1697,9 @@ void Scene::refresh() {
 	}
 	const auto foreground = GetForegroundWindow();
 	const auto intersecting = this->visibleWork.intersects(frame(foreground));
-	if (foreground != nullptr && intersecting && !this->tiles.contains(foreground)) {
+	if (foreground != nullptr && intersecting && !this->tiles.contains(foreground)
+	    && !this->floats.contains(foreground))
+	{
 		if (foreground != this->stranger) {
 			this->stranger = foreground;
 			this->strangerSince = now;
@@ -1616,6 +1712,9 @@ void Scene::refresh() {
 		this->stranger = nullptr;
 	}
 	bool changed = this->removeFinishedClosingTiles(now);
+	for (auto& [hwnd, copy]: this->floats) {
+		if (IsWindow(hwnd) && frame(hwnd) != copy->shown) changed |= this->followFloating(hwnd, *copy);
+	}
 	for (auto& [hwnd, tile]: this->tiles) {
 		if (tile->closeSourceUntil != 0) {
 			if (now < tile->closeSourceUntil || !IsWindowVisible(hwnd)) continue;
@@ -1733,6 +1832,7 @@ void Scene::settle() {
 			SetWindowPos(this->host, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
 		if (GetWindow(this->focused, GW_HWNDNEXT) != this->host)
 			SetWindowPos(this->host, this->focused, 0, 0, 0, 0, flags);
+		this->dropFloating();
 		this->hideFront();
 		this->sample.stop();
 		this->idle.start(250);
@@ -1772,6 +1872,7 @@ void Scene::hide() {
 	this->backdrop.visual.Reset();
 	this->fullscreenBar.reset();
 	this->underlay.clear();
+	this->floats.clear();
 	this->dimVisual.Reset();
 	this->dimFade.Reset();
 	this->dimColor.Reset();

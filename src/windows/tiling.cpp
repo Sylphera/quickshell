@@ -2035,11 +2035,20 @@ bool TilingManager::dwindlePlan(
 		    || participants.contains(window->hwnd()) || !IsWindowVisible(window->hwnd())
 		    || (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
 			continue;
+		if (this->floatsFreely(window)) continue;
 		QRect raw;
 		QRect actual;
 		if (!layout->special && readFrame(window->hwnd(), raw, actual) && actual.intersects(work)) return false;
 	}
 	return true;
+}
+
+bool TilingManager::floatsFreely(TrackedWindow* window) const {
+	auto found = this->managed.find(window);
+	if (found == this->managed.end()) return false;
+	const auto& m = found->second;
+	return m.layout == nullptr && !m.fullscreen() && !m.appFullscreen && !window->maximized()
+	    && !window->fullscreen() && !window->borderlessFullscreen() && this->stateOf(m) == State::Out;
 }
 
 void TilingManager::coverNewWindow(HWND hwnd) {

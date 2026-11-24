@@ -279,6 +279,7 @@ private:
 	void dropEmptyLayouts();
 	void apply(Layout* layout);
 	bool dwindlePlan(Layout* layout, const QRect& work, QList<DwindleTile>& plan, bool& changed, bool still);
+	[[nodiscard]] bool floatsFreely(TrackedWindow* window) const;
 	void coverNewWindow(HWND hwnd);
 	void stage(Managed& m, const QRect& tile);
 	void finishMaximize(Managed& m);
