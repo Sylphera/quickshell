@@ -84,3 +84,11 @@ target_link_libraries(scratchpad_phase_test PRIVATE Qt6::Core Qt6::Test)
 qt_add_executable(dim_plan_test dim_plan_test.cpp ${QS_WINDOWS_SRC}/dim_plan.cpp)
 target_include_directories(dim_plan_test PRIVATE ${QS_WINDOWS_SRC})
 target_link_libraries(dim_plan_test PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+
+qt_add_executable(dwindle_fuzz_test
+	dwindle_fuzz_test.cpp
+	${QS_WINDOWS_SRC}/tiling_layout.cpp
+)
+
+target_include_directories(dwindle_fuzz_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(dwindle_fuzz_test PRIVATE Qt6::Core Qt6::Test)
