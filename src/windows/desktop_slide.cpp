@@ -259,6 +259,13 @@ bool DesktopSlide::begin(qsizetype from, qsizetype to) {
 	return this->overlay != nullptr;
 }
 
+bool DesktopSlide::beginOverJump(qsizetype from, qsizetype to) {
+	this->hurried = true;
+	auto started = this->begin(from, to);
+	this->hurried = false;
+	return started;
+}
+
 void DesktopSlide::goBack(qsizetype to, qsizetype from) {
 	if (this->overlay != nullptr && !this->swiping && this->target == to) this->retarget(from);
 }
@@ -384,7 +391,7 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	auto dpr = GetDpiForWindow(this->overlay) / 96.0;
 	this->travel = this->monitor.width() + static_cast<int>(std::lround(WORKSPACE_GAP * dpr));
 
-	this->findPinned();
+	if (!this->hurried) this->findPinned();
 	this->prepareBackdrop();
 	WinPanelWindow::setCoverActive(true);
 	this->raised = WinPanelWindow::raiseDemoted();
@@ -520,6 +527,7 @@ void DesktopSlide::warmLiveThumbs() {
 	if (monitor.isEmpty()) return;
 	const auto windows = topLevelWindows();
 	if (!this->prepareLiveOverlay(monitor, windows)) return;
+	this->findPinned();
 
 	for (auto iter = this->liveThumbnails.begin(); iter != this->liveThumbnails.end();) {
 		if (tracker->windowFor(iter.key()) != nullptr) {
@@ -895,7 +903,8 @@ void DesktopSlide::prepareBackdrop() {
 
 	RECT fill {0, 0, width, height};
 	FillRect(this->wallDc, &fill, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-	if (auto* desktop = GetShellWindow()) {
+	auto covered = this->hurried && !this->liveBackdropSources.isEmpty();
+	if (auto* desktop = covered ? nullptr : GetShellWindow()) {
 		RECT r {};
 		GetWindowRect(desktop, &r);
 		auto* full = CreateCompatibleDC(screen);

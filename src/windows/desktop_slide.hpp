@@ -35,6 +35,7 @@ public:
 	Q_DISABLE_COPY_MOVE(DesktopSlide);
 
 	bool begin(qsizetype from, qsizetype to);
+	bool beginOverJump(qsizetype from, qsizetype to);
 	void goBack(qsizetype to, qsizetype from);
 
 	void swipeUpdate(double offset);
@@ -111,6 +112,7 @@ private:
 	int settleRetries = 0;
 	QList<HWND> raised;
 	QSet<HWND> pinned;
+	bool hurried = false;
 	HDC wallDc = nullptr;
 	HBITMAP wallBitmap = nullptr;
 };

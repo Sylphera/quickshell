@@ -258,14 +258,13 @@ void WorkspaceBehavior::onForeground(HWND hwnd) {
 	auto busy = slide->busy() || this->tracker->activationPending()
 	         || this->desktops->shownIndex() != from;
 	auto settling = this->sinceSwitch.isValid() && this->sinceSwitch.elapsed() < FOREIGN_SETTLE_MS;
-	if (busy || settling || this->desktops->isWindowPinned(hwnd)) return;
+	if (busy || settling) return;
 
-	auto to = this->desktops->windowDesktopIndex(hwnd);
-	if (to < 0 || to == from) return;
-	auto late = this->desktops->nativeCurrentIndex() != from;
-	auto started = slide->begin(from, to);
+	auto to = static_cast<qsizetype>(window->desktop());
+	if (to < 0 || to == from || to >= this->desktops->count()) return;
+	auto started = slide->beginOverJump(from, to);
 	qCDebug(logWorkspace) << "Windows goes from desktop" << from << "to" << to << "for" << hwnd
-	                      << "already there" << late << "slide" << started;
+	                      << "slide" << started;
 	if (!started) return;
 	QTimer::singleShot(FOREIGN_LIMIT_MS, this, [this, slide, from, to] {
 		if (this->desktops->nativeCurrentIndex() != to) slide->goBack(to, from);
