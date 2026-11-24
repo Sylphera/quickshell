@@ -3959,6 +3959,11 @@ bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint
 	return true;
 }
 
+bool TilingManager::coversScreen(TrackedWindow* window) const {
+	const auto iter = this->managed.find(window);
+	return iter != this->managed.end() && (iter->second.fullscreen() || iter->second.focusMaximized());
+}
+
 bool TilingManager::beginGestureMove(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end() || iter->second.fullscreen() || this->dragging != nullptr) return false;
@@ -4913,6 +4918,7 @@ bool TilingManager::beginEdgeDrag(TrackedWindow* window, bool left, bool top) {
 	if (iter == this->managed.end() || iter->second.layout == nullptr) return false;
 
 	auto& m = iter->second;
+	if (m.fullscreen() || m.focusMaximized()) return false;
 	if (this->stateOf(m) != State::Tiled) return false;
 	this->clearMaximized(m.layout, nullptr, true);
 

@@ -218,6 +218,11 @@ void warpToFocusChange(WindowTracker* tracker) {
 	QTimer::singleShot(WARP_FOCUS_TIMEOUT_MS, context, [context]() { context->deleteLater(); });
 }
 
+bool coversScreen(TrackedWindow* window) {
+	auto* tiling = TilingManager::active();
+	return window != nullptr && tiling != nullptr && tiling->coversScreen(window);
+}
+
 bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
 	auto special = Scratchpad::holds(window);
 	for (auto* other: tracker->windows()) {
@@ -853,6 +858,7 @@ void Dispatcher::moveWindow(const QString& direction) {
 	auto* tiling = TilingManager::active();
 	if (tiling != nullptr && edge) {
 		auto* active = this->ipc->tracker()->activeWindow();
+		if (active != nullptr && tiling->coversScreen(active)) return;
 		if (!tiling->moveDirection(*edge)) tiling->moveFloating(active, *edge);
 		warpToWindowLater(active, WARP_AFTER_MOVE_MS);
 		return;
@@ -875,6 +881,7 @@ void Dispatcher::swapWindow(const QString& direction) {
 		this->unsupported("swapwindow (without tiling)");
 		return;
 	}
+	if (auto* active = this->ipc->tracker()->activeWindow(); active != nullptr && tiling->coversScreen(active)) return;
 
 	tiling->swapDirection(*edge);
 }
@@ -981,6 +988,7 @@ void Dispatcher::layoutMessage(const QString& message) {
 
 void Dispatcher::resizeActive(const QString& args) {
 	auto* window = this->ipc->tracker()->activeWindow();
+	if (coversScreen(window)) return;
 	if (window == nullptr || window->screen() == nullptr) return;
 
 	auto parts = args.split(' ', Qt::SkipEmptyParts);
@@ -1021,6 +1029,7 @@ void Dispatcher::resizeActive(const QString& args) {
 void Dispatcher::centerWindow() {
 	auto* tiling = TilingManager::active();
 	auto* window = tiling != nullptr ? tiling->focusedWindow() : this->ipc->tracker()->activeWindow();
+	if (coversScreen(window)) return;
 	if (window == nullptr) return;
 
 	if (tiling != nullptr && tiling->isTiled(window)) {
@@ -1032,6 +1041,7 @@ void Dispatcher::centerWindow() {
 }
 
 void Dispatcher::moveWindowPixel(TrackedWindow* window, const QString& x, const QString& y) {
+	if (coversScreen(window)) return;
 	if (window == nullptr) return;
 
 	auto* screen = window->screen();

@@ -43,7 +43,8 @@ bool TouchpadMove::begin() {
 	}
 	if (movable && this->window != nullptr) {
 		auto* tiling = TilingManager::active();
-		if (tiling != nullptr && tiling->isTiled(this->window)) {
+		if (tiling != nullptr && tiling->coversScreen(this->window)) movable = false;
+		else if (tiling != nullptr && tiling->isTiled(this->window)) {
 			this->tiled = tiling->beginGestureMove(this->window);
 			movable = this->tiled;
 		}
