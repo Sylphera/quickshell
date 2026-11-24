@@ -10,6 +10,8 @@
 #include <qloggingcategory.h>
 #include <qobject.h>
 #include <qpointer.h>
+#include <qset.h>
+#include <qstring.h>
 #include <qtimer.h>
 #include <qtypes.h>
 
@@ -23,9 +25,9 @@ namespace {
 
 Q_LOGGING_CATEGORY(logTrimmer, "quickshell.windows.trimmer", QtWarningMsg);
 
-constexpr int SETTLE_MS = 1000;
-constexpr int BUSY_RETRY_MS = 250;
-constexpr int NEXT_MS = 100;
+constexpr int SETTLE_MS = 200;
+constexpr int BUSY_RETRY_MS = 100;
+constexpr int NEXT_MS = 10;
 constexpr qint64 STARTUP_GRACE_MS = 15000;
 constexpr int CLASS_LENGTH = 64;
 
@@ -73,7 +75,13 @@ void DesktopTrimmer::setEnabled(bool enabled) {
 	if (enabled && !this->watching) {
 		this->watching = true;
 		auto changed = &DesktopTrimmer::schedule;
-		QObject::connect(this->desktops, &VirtualDesktops::desktopsChanged, this, changed);
+		QObject::connect(
+		    this->desktops,
+		    &VirtualDesktops::desktopsChanged,
+		    this,
+		    &DesktopTrimmer::onDesktopsChanged
+		);
+		this->onDesktopsChanged();
 		QObject::connect(this->desktops, &VirtualDesktops::currentChanged, this, changed);
 		QObject::connect(this->desktops, &VirtualDesktops::accessorReady, this, changed);
 		auto* tracker = WindowTracker::instance();
@@ -88,6 +96,18 @@ void DesktopTrimmer::setEnabled(bool enabled) {
 	emit this->enabledChanged();
 }
 
+void DesktopTrimmer::onDesktopsChanged() {
+	QSet<QString> ids;
+	for (const auto& desktop: this->desktops->desktops()) {
+		ids.insert(VirtualDesktops::guidToString(desktop.id));
+	}
+	if (!this->known.isEmpty() && !this->desktops->creating() && taskViewOpen()) {
+		this->openedInTaskView.unite(ids - this->known);
+	}
+	this->known = ids;
+	this->schedule();
+}
+
 void DesktopTrimmer::schedule() {
 	if (!this->mEnabled) return;
 	auto grace = STARTUP_GRACE_MS - this->uptime.elapsed();
@@ -97,7 +117,7 @@ void DesktopTrimmer::schedule() {
 bool DesktopTrimmer::busy() const {
 	return DesktopSlide::instance()->busy() || this->desktops->creating()
 	    || this->desktops->shownIndex() != this->desktops->currentIndex()
-	    || this->desktops->nativeCurrentIndex() != this->desktops->currentIndex() || taskViewOpen();
+	    || this->desktops->nativeCurrentIndex() != this->desktops->currentIndex();
 }
 
 qsizetype DesktopTrimmer::lastOccupied() const {
@@ -125,6 +145,13 @@ void DesktopTrimmer::trim() {
 	auto current = this->desktops->currentIndex();
 	if (last <= std::max(current, this->lastOccupied())) {
 		this->timer.stop();
+		return;
+	}
+
+	if (!taskViewOpen()) this->openedInTaskView.clear();
+	auto id = VirtualDesktops::guidToString(this->desktops->desktops().at(last).id);
+	if (this->openedInTaskView.contains(id)) {
+		this->timer.start(BUSY_RETRY_MS);
 		return;
 	}
 

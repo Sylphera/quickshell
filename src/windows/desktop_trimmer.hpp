@@ -2,6 +2,8 @@
 
 #include <qelapsedtimer.h>
 #include <qobject.h>
+#include <qset.h>
+#include <qstring.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
 #include <qtmetamacros.h>
@@ -30,6 +32,7 @@ private:
 
 	void schedule();
 	void trim();
+	void onDesktopsChanged();
 	[[nodiscard]] bool busy() const;
 	[[nodiscard]] qsizetype lastOccupied() const;
 
@@ -38,6 +41,8 @@ private:
 	QElapsedTimer uptime;
 	bool mEnabled = false;
 	bool watching = false;
+	QSet<QString> known;
+	QSet<QString> openedInTaskView;
 };
 
 }
