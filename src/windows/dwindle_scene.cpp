@@ -2179,6 +2179,12 @@ void DwindleScene::prepareClose(HMONITOR monitor, const QRect& work, HWND window
 	scene->acceptCachedClose(window, std::move(snapshot));
 }
 
+bool DwindleScene::hasCloseFrame(HWND window) {
+	auto& cache = closeCache();
+	auto lock = std::lock_guard(cache.mutex);
+	return cache.frames.contains(window);
+}
+
 void DwindleScene::holdCloseSource(HMONITOR monitor, HWND window) {
 	const auto found = scenes().find(monitor);
 	if (found != scenes().end()) found->second->holdCloseSource(window);

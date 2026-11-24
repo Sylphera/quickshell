@@ -32,6 +32,7 @@ public:
 	static bool cacheCloseFrame(HWND window, const QRect& bounds);
 	static void prepareClose(HMONITOR monitor, const QRect& work, HWND window, quint32 pid,
 	                         const QRect& bounds, bool removed);
+	static bool hasCloseFrame(HWND window);
 	static void holdCloseSource(HMONITOR monitor, HWND window);
 	static void clearCloseCache();
 	static bool hasClosingTile(HMONITOR monitor, const QRect& work);

@@ -1273,6 +1273,7 @@ void TilingManager::unmanage(TrackedWindow* window) {
 			closing = DwindleScene::hasClosingTile(monitor, rects.work);
 		}
 	}
+	if (from == nullptr) closing = this->closeFloat(iter->second);
 	auto refocus = from != nullptr && from->lastFocused == window
 	            && TilingManager::scrollingOf(from) != nullptr;
 
@@ -1582,14 +1583,16 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 	auto state = this->stateOf(m);
 	if (state != State::Tiled) {
-		releaseEarlyPark(window->hwnd());
+		if (state != State::Out || !this->openFloat(m)) releaseEarlyPark(window->hwnd());
 		m.verifying = false;
 		this->restoreTinyCorners(m);
 	}
 
 	if (state == State::Out) {
 		if (m.layout == nullptr) {
+			m.fresh = false;
 			if (m.mode != TileMode::Normal || m.floatMoving) this->markLayout(this->floatHome(m, true));
+			else if (onAnyMonitor(this->managedFrame(m))) m.floatSeen = this->managedFrame(m);
 			return;
 		}
 
@@ -1606,6 +1609,9 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	if (!special && index >= this->desktops->count()) return;
 	auto desktop = special ? SPECIAL_DESKTOP : this->desktops->desktops().at(index).id;
 
+	const auto fromFloat = m.layout == nullptr && !m.fresh && state == State::Tiled && IsWindowVisible(window->hwnd())
+	                    && onAnyMonitor(this->managedFrame(m));
+	const auto floatFrame = fromFloat ? this->managedFrame(m) : QRect();
 	Layout* want = nullptr;
 	POINT pointer {};
 	bool hasPointer = false;
@@ -1668,6 +1674,10 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 		const QPoint cursor(pointer.x, pointer.y);
 		const auto firstOpening = want->tree->isEmpty();
 		this->insertInto(m, want, nullptr, hasPointer ? &cursor : nullptr);
+		if (fromFloat) {
+			m.target = floatFrame;
+			m.fullscreenToggled = true;
+		}
 		if (!transferred && m.fresh && remembersFullscreen(window)) {
 			QTimer::singleShot(0, this, [this, tracked = QPointer(window)] {
 				if (tracked == nullptr) return;
@@ -1814,6 +1824,10 @@ void TilingManager::prepareClose(TrackedWindow* window) {
 	}
 
 	auto& m = found->second;
+	if (this->floats(m)) {
+		this->prepareFloatClose(m);
+		return;
+	}
 	auto* layout = m.layout;
 	if (layout == nullptr || !this->layoutAlive(layout)
 	    || layout->tree->kind() != tiling::Kind::Dwindle
@@ -1851,6 +1865,17 @@ void TilingManager::cacheNextCloseFrame() {
 		auto found = this->managed.find(window);
 		if (found == this->managed.end()) continue;
 		const auto& m = found->second;
+		if (this->floats(m)) {
+			const auto special = Scratchpad::holds(window);
+			if (m.mode != TileMode::Normal || m.floatMoving || m.staged()
+			    || (special ? this->mSpecialOffset != 0 || this->mSpecialShifting
+			                : window->desktop() != this->desktops->shownIndex()
+			                      || (GetWindowLongPtrW(window->hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+			    || DwindleScene::presenting(monitorForScreen(window->screen())))
+				continue;
+			if (DwindleScene::cacheCloseFrame(window->hwnd(), this->managedFrame(m))) return;
+			continue;
+		}
 		auto* layout = m.layout;
 		if (layout == nullptr || !this->layoutAlive(layout)
 		    || layout->tree->kind() != tiling::Kind::Dwindle
@@ -1981,6 +2006,15 @@ void TilingManager::applyFloats(Layout* layout, bool presenting) {
 			if (!m->fullscreen()) m->fullscreenTileRadius.reset();
 		}
 		const auto goal = this->floatGoal(*m, layout);
+		if (m->floatOpening && presenting) {
+			m->floatPending = false;
+			continue;
+		}
+		if (std::exchange(m->floatOpening, false)) {
+			m->placement = nextPlacement(m->placement, TilePlacementEvent::Release);
+			this->forgetStage(*m);
+			m->floatPending = true;
+		}
 		const auto actual = this->managedFrame(*m);
 		const auto astray = layout->special && !presenting && goal != actual;
 		const auto pending = std::exchange(m->floatPending, false) || goal != m->floatFrame || astray;
@@ -2042,6 +2076,105 @@ void TilingManager::coverOthers(Managed& m) {
 	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
 }
 
+void TilingManager::floatTo(Managed& m, const QRect& raw) {
+	auto* hwnd = m.window->hwnd();
+	auto* home = this->floats(m) ? this->floatHome(m, true) : nullptr;
+	if (!this->mAnimateMoves || !DwindleScene::enabled() || home == nullptr
+	    || !this->sceneShows(home, this->desktops->currentIndex()))
+	{
+		setRawRect(hwnd, raw);
+		return;
+	}
+	m.floatFrame = frameFor(hwnd, raw);
+	this->sendFloat(m);
+}
+
+bool TilingManager::openFloat(Managed& m) {
+	auto* hwnd = m.window->hwnd();
+	if (m.layout != nullptr || !m.fresh || !isEarlyParked(hwnd) || !this->mAnimateMoves || !DwindleScene::enabled()
+	    || !startup::settled() || this->dragging != nullptr || this->edgeDragState.window != nullptr
+	    || this->desktops->shownIndex() != this->desktops->currentIndex() || !IsWindowVisible(hwnd)
+	    || !this->floats(m))
+		return false;
+	auto* home = this->floatHome(m, true);
+	if (home == nullptr || home->tree->kind() != tiling::Kind::Dwindle
+	    || !this->sceneShows(home, this->desktops->currentIndex()))
+		return false;
+	auto raw = takeEarlyPark(hwnd);
+	if (raw.isEmpty()) return false;
+	const auto rects = monitorRects(monitorForScreen(home->screen));
+	if (rects.valid) {
+		raw.moveCenter(rects.work.center());
+		raw = clampInto(raw, rects.work);
+	}
+	rememberParked(hwnd, raw);
+	m.stageNoted = true;
+	m.placement = nextPlacement(m.placement, TilePlacementEvent::Stage);
+	m.floatFrame = frameFor(hwnd, raw);
+	m.floatSeen = m.floatFrame;
+	m.floatOpening = true;
+	if (!this->healTimer.isActive()) this->healTimer.start();
+	this->sendFloat(m);
+	return true;
+}
+
+void TilingManager::prepareFloatClose(Managed& m) {
+	auto* window = m.window;
+	auto* hwnd = window->hwnd();
+	auto* home = this->floatHome(m, true);
+	if (home == nullptr || home->tree->kind() != tiling::Kind::Dwindle || m.fullscreen() || m.staged()
+	    || !this->sceneShows(home, this->desktops->currentIndex())
+	    || (!home->special && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0))
+		return;
+	auto* monitor = monitorForScreen(home->screen);
+	const auto rects = monitorRects(monitor);
+	const auto frame = this->managedFrame(m);
+	if (!rects.valid || frame.isEmpty()) return;
+	DwindleScene::snapshotClose(monitor, rects.work, hwnd);
+	DwindleScene::prepareClose(monitor, rects.work, hwnd, window->pid(), frame, false);
+	if (m.mode != TileMode::Normal) return;
+	if (!m.floatMoving) {
+		m.floatFrame = frame;
+		m.floatPending = false;
+		m.floatMoving = true;
+	}
+	QList<DwindleTile> plan;
+	bool changed = false;
+	if (this->dwindlePlan(home, rects.work, plan, changed, true))
+		DwindleScene::present(monitor, rects.work, plan, true);
+	DwindleScene::holdCloseSource(monitor, hwnd);
+	this->markLayout(home);
+}
+
+bool TilingManager::closeFloat(Managed& m) {
+	auto* window = m.window;
+	auto* hwnd = window->hwnd();
+	if (m.layout != nullptr || m.fullscreen() || m.floatSeen.isEmpty() || !DwindleScene::enabled()
+	    || !this->mAnimateMoves || window->minimized() || (IsWindow(hwnd) && IsWindowVisible(hwnd))
+	    || this->desktops->shownIndex() != this->desktops->currentIndex())
+		return false;
+	auto* pad = Scratchpad::instance();
+	const auto special = Scratchpad::holds(window);
+	if (!special && window->desktop() != this->desktops->currentIndex()) return false;
+	if (special && !pad->shown()) return false;
+	const auto native = toRECT(m.floatSeen);
+	auto* screen = screenForMonitor(MonitorFromRect(&native, MONITOR_DEFAULTTONEAREST));
+	auto* home = special
+	               ? this->layoutAt(SPECIAL_DESKTOP, screen, true)
+	               : this->layoutAt(this->desktops->desktops().at(this->desktops->currentIndex()).id, screen, true);
+	if (home == nullptr || home->tree->kind() != tiling::Kind::Dwindle
+	    || !this->sceneShows(home, this->desktops->currentIndex()))
+		return false;
+	auto* monitor = monitorForScreen(screen);
+	const auto rects = monitorRects(monitor);
+	if (!rects.valid) return false;
+	if (DwindleScene::hasCloseFrame(hwnd))
+		DwindleScene::prepareClose(monitor, rects.work, hwnd, window->pid(), m.floatSeen, true);
+	if (!DwindleScene::hasClosingTile(monitor, rects.work)) return false;
+	this->markLayout(home);
+	return true;
+}
+
 void TilingManager::sendFloat(Managed& m) {
 	m.floatPending = true;
 	m.floatMoving = true;
@@ -2054,6 +2187,7 @@ void TilingManager::forgetFloat(Managed& m) {
 	m.floatFrame = QRect();
 	m.floatPending = false;
 	m.floatMoving = false;
+	m.floatOpening = false;
 	m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
 	unmarkFullscreen(m.window->hwnd());
 	for (auto& [key, layout]: this->layouts) {
@@ -2194,7 +2328,16 @@ void TilingManager::releaseStaged(const QList<HWND>& windows) {
 			m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
 			m.unplacedSince = 0;
 			m.floatMoving = false;
-			if (held && !m.floatFrame.isNull() && IsWindow(window->hwnd())) setFrame(window->hwnd(), m.floatFrame);
+			const auto opening = std::exchange(m.floatOpening, false);
+			if (opening) {
+				this->forgetStage(m);
+				if (Scratchpad::holds(window)) Scratchpad::raiseWindow(window->hwnd());
+				else
+					SetWindowPos(window->hwnd(), HWND_TOP, 0, 0, 0, 0,
+					             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+			}
+			if ((held || opening) && !m.floatFrame.isNull() && IsWindow(window->hwnd()))
+				setFrame(window->hwnd(), m.floatFrame);
 			continue;
 		}
 		if (!m.staged() && !m.contractionHeld()) continue;
@@ -2277,8 +2420,8 @@ bool TilingManager::dwindlePlan(
 		const auto fullscreen = m->fullscreen() ? DwindleFullscreen::Active
 		                        : leaving ? DwindleFullscreen::Leaving : DwindleFullscreen::None;
 		if (still && (m->floatPending || goal != m->floatFrame)) return false;
-		const auto previous = still ? goal : this->managedFrame(*m);
-		if (goal.isEmpty() || previous.isEmpty()) return false;
+		const auto previous = still ? goal : m->floatOpening ? QRect() : this->managedFrame(*m);
+		if (goal.isEmpty() || (previous.isEmpty() && !m->floatOpening)) return false;
 		changed |= m->floatPending || goal != m->floatFrame;
 		plan.append({hwnd, previous, goal, true, {}, fullscreen, radius, true});
 		participants.insert(hwnd);
@@ -2857,7 +3000,7 @@ void TilingManager::restoreFloating(Managed& m, bool besideTile) {
 	if (besideTile) {
 		auto tileRect = toRECT(raw);
 		auto work = monitorRects(MonitorFromRect(&tileRect, MONITOR_DEFAULTTONEAREST)).work;
-		setRawRect(hwnd, floatingRect(raw, previous, work));
+		this->floatTo(m, floatingRect(raw, previous, work));
 		return;
 	}
 
@@ -2872,7 +3015,7 @@ void TilingManager::restoreFloating(Managed& m, bool besideTile) {
 		rect = clampInto(rect, monitorRects(now).work);
 	}
 
-	setRawRect(hwnd, onScreen(rect));
+	this->floatTo(m, onScreen(rect));
 }
 
 tiling::ScrollingLayout* TilingManager::scrollingOf(const Layout* layout) {
@@ -3107,9 +3250,11 @@ void TilingManager::bringBack(Managed& m) {
 
 	auto* hwnd = m.window->hwnd();
 	if (!m.offscreen) forgetParked(hwnd);
-	if (m.target.isNull() || !IsWindow(hwnd)) return;
-	if (IsIconic(hwnd) || IsZoomed(hwnd)) restorePlacement(hwnd, onScreen(m.target));
-	else setFrame(hwnd, onScreen(m.target));
+	m.floatOpening = false;
+	const auto target = m.layout == nullptr ? m.floatFrame : m.target;
+	if (target.isNull() || !IsWindow(hwnd)) return;
+	if (IsIconic(hwnd) || IsZoomed(hwnd)) restorePlacement(hwnd, onScreen(target));
+	else setFrame(hwnd, onScreen(target));
 }
 
 void TilingManager::auditTrees() {
@@ -3376,7 +3521,11 @@ void TilingManager::onRectChanged(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 
-	const auto& m = iter->second;
+	auto& m = iter->second;
+	if (m.layout == nullptr && !m.floatMoving && this->floats(m)) {
+		const auto frame = this->managedFrame(m);
+		if (onAnyMonitor(frame)) m.floatSeen = frame;
+	}
 	if (m.layout == nullptr || m.target.isNull()) return;
 
 	this->unverified.insert(window);
@@ -4310,6 +4459,8 @@ QRect TilingManager::settleFloat(TrackedWindow* window) {
 	if (m.layout != nullptr || m.mode != TileMode::Normal || !m.floatMoving || m.floatFrame.isNull()) return {};
 	m.floatMoving = false;
 	m.floatPending = false;
+	m.floatOpening = false;
+	this->forgetStage(m);
 	m.placement = nextPlacement(m.placement, TilePlacementEvent::Release);
 	return rawFor(window->hwnd(), m.floatFrame);
 }

@@ -708,6 +708,17 @@ void claimEarlyPark(HWND hwnd) {
 	gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
 }
 
+QRect takeEarlyPark(HWND hwnd) {
+	if (gEarlyParkCount.load() == 0) return {};
+	auto lock = std::lock_guard(gParkMutex);
+	auto found = gEarlyParked.find(hwnd);
+	if (found == gEarlyParked.end()) return {};
+	const auto rect = found->second.first;
+	gEarlyParked.erase(found);
+	gEarlyParkCount.store(static_cast<int>(gEarlyParked.size()));
+	return {rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top};
+}
+
 bool isEarlyParked(HWND hwnd) {
 	if (gEarlyParkCount.load() == 0) return false;
 	auto lock = std::lock_guard(gParkMutex);

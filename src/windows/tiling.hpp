@@ -251,6 +251,8 @@ private:
 		QRect floatFrame;
 		bool floatPending = false;
 		bool floatMoving = false;
+		bool floatOpening = false;
+		QRect floatSeen;
 		qint64 coveredAt = 0;
 
 		[[nodiscard]] bool focusMaximized() const { return this->mode == TileMode::Maximized; }
@@ -296,6 +298,10 @@ private:
 	void coverOthers(Managed& m);
 	void markCovering();
 	void sendFloat(Managed& m);
+	bool openFloat(Managed& m);
+	void floatTo(Managed& m, const QRect& raw);
+	void prepareFloatClose(Managed& m);
+	bool closeFloat(Managed& m);
 	void restoreFloat(Managed& m);
 	void forgetFloat(Managed& m);
 	void uncoverFor(const Managed& m);

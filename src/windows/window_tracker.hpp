@@ -218,6 +218,7 @@ private:
 
 void setParkNewWindows(bool park);
 void claimEarlyPark(HWND hwnd);
+QRect takeEarlyPark(HWND hwnd);
 bool isEarlyParked(HWND hwnd);
 void releaseEarlyPark(HWND hwnd);
 void releaseEarlyParks();
