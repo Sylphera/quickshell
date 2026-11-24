@@ -49,7 +49,7 @@ public:
 		QString name;
 	};
 
-	static constexpr qsizetype MAX_DESKTOPS = 100;
+	static constexpr qsizetype MAX_DESKTOPS = 1000;
 
 	static VirtualDesktops* instance();
 
