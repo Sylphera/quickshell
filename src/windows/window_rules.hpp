@@ -40,9 +40,14 @@ private:
 	void onForeground(HWND hwnd);
 	void watch(HWND hwnd);
 	[[nodiscard]] static Kind kindOf(HWND hwnd);
-	static void apply(HWND hwnd, Kind kind);
+	void apply(HWND hwnd, Kind kind);
+	void pin(HWND hwnd, int attemptsLeft);
+	void watchCorners(TrackedWindow* window);
+	void roundCorners(TrackedWindow* window);
+	void restoreCorners();
 
 	QSet<HWND> seenDialogs;
+	QSet<HWND> rounded;
 
 	bool mEnabled = false;
 	bool watching = false;

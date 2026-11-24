@@ -3,8 +3,10 @@
 #include <cmath>
 #include <cwchar>
 #include <memory>
+#include <utility>
 
 #include <qt_windows.h>
+#include <dwmapi.h>
 
 #include <qcoreapplication.h>
 #include <qlogging.h>
@@ -38,6 +40,8 @@ constexpr double PICTURE_SIZE = 0.25;
 constexpr double PICTURE_X = 0.73;
 constexpr double PICTURE_Y = 0.72;
 constexpr LONG SHARING_MARGIN = 12;
+constexpr int PIN_RETRY_MS = 250;
+constexpr int PIN_ATTEMPTS = 20;
 
 bool hasClass(HWND hwnd, const wchar_t* name) {
 	wchar_t cls[CLASS_LENGTH] {};
@@ -85,6 +89,17 @@ const QRegularExpression& sharingTitle() {
 	return expression;
 }
 
+void setCorner(HWND hwnd, DWM_WINDOW_CORNER_PREFERENCE corner) {
+	DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+}
+
+bool squareByDefault(HWND hwnd) {
+	if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) return false;
+	auto corner = DWM_WINDOW_CORNER_PREFERENCE {};
+	auto hr = DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+	return SUCCEEDED(hr) && corner == DWMWCP_DEFAULT;
+}
+
 void place(HWND hwnd, LONG x, LONG y, LONG width, LONG height, bool resize) {
 	auto flags = UINT(SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 	if (!resize) flags |= SWP_NOSIZE;
@@ -99,11 +114,32 @@ WindowRules* WindowRules::instance() {
 	return rules.data();
 }
 
-WindowRules::WindowRules(QObject* parent): QObject(parent) {}
+WindowRules::WindowRules(QObject* parent): QObject(parent) {
+	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
+		this->restoreCorners();
+	});
+}
+
+void WindowRules::roundCorners(TrackedWindow* window) {
+	auto* hwnd = window->hwnd();
+	auto covers = window->fullscreen() || window->borderlessFullscreen();
+	if (covers && this->rounded.remove(hwnd)) setCorner(hwnd, DWMWCP_DEFAULT);
+	if (covers || !this->mEnabled || isOwnProcessWindow(hwnd) || !squareByDefault(hwnd)) return;
+	setCorner(hwnd, DWMWCP_ROUND);
+	this->rounded.insert(hwnd);
+}
+
+void WindowRules::restoreCorners() {
+	for (auto* hwnd: std::as_const(this->rounded)) {
+		if (IsWindow(hwnd)) setCorner(hwnd, DWMWCP_DEFAULT);
+	}
+	this->rounded.clear();
+}
 
 void WindowRules::setEnabled(bool enabled) {
 	if (enabled == this->mEnabled) return;
 	this->mEnabled = enabled;
+	if (!enabled) this->restoreCorners();
 	if (enabled && !this->watching) {
 		this->watching = true;
 		EnumWindows(
@@ -117,10 +153,21 @@ void WindowRules::setEnabled(bool enabled) {
 		QObject::connect(tracker, &WindowTracker::windowAdded, this, &WindowRules::onWindowAdded);
 		QObject::connect(tracker, &WindowTracker::foregroundChanged, this, &WindowRules::onForeground);
 	}
+	if (enabled) {
+		for (auto* window: WindowTracker::instance()->windows()) this->watchCorners(window);
+	}
 	emit this->enabledChanged();
 }
 
+void WindowRules::watchCorners(TrackedWindow* window) {
+	auto update = [this, window] { this->roundCorners(window); };
+	QObject::disconnect(window, &TrackedWindow::fullscreenChanged, this, nullptr);
+	QObject::connect(window, &TrackedWindow::fullscreenChanged, this, update);
+	update();
+}
+
 void WindowRules::onWindowAdded(TrackedWindow* window) {
+	this->watchCorners(window);
 	if (window->desktop() != VirtualDesktops::instance()->currentIndex()) return;
 	if (hasClass(window->hwnd(), DIALOG_CLASS)) this->onForeground(window->hwnd());
 	else this->watch(window->hwnd());
@@ -146,7 +193,7 @@ void WindowRules::watch(HWND hwnd) {
 			auto kind = WindowRules::kindOf(hwnd);
 			if (kind == Kind::None || kind <= *applied) return;
 			*applied = kind;
-			WindowRules::apply(hwnd, kind);
+			this->apply(hwnd, kind);
 		});
 	}
 }
@@ -214,9 +261,23 @@ void WindowRules::apply(HWND hwnd, Kind kind) {
 		auto y = std::min<LONG>(monitor.bottom - height - SHARING_MARGIN, work.bottom - height);
 		place(hwnd, x, y, width, height, false);
 	}
-	if (!VirtualDesktops::instance()->pinWindow(hwnd, true)) {
-		qCDebug(logRules) << "Could not pin" << titleOf(hwnd);
+	this->pin(hwnd, PIN_ATTEMPTS);
+}
+
+void WindowRules::pin(HWND hwnd, int attemptsLeft) {
+	if (!IsWindow(hwnd)) return;
+	auto* desktops = VirtualDesktops::instance();
+	if (desktops->pinWindow(hwnd, true) && desktops->isWindowPinned(hwnd)) {
+		qCDebug(logRules) << "Pinned" << titleOf(hwnd) << "with" << attemptsLeft << "attempts left";
+		return;
 	}
+	if (attemptsLeft <= 0) {
+		qCDebug(logRules) << "Could not pin" << titleOf(hwnd);
+		return;
+	}
+	QTimer::singleShot(PIN_RETRY_MS, this, [this, hwnd, attemptsLeft] {
+		this->pin(hwnd, attemptsLeft - 1);
+	});
 }
 
 }
