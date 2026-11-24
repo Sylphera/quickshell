@@ -687,6 +687,11 @@ void TilingManager::setExcluded(const QStringList& excluded) {
 	if (excluded == this->mExcluded) return;
 	this->mExcluded = excluded;
 
+	QSet<TrackedWindow*> before;
+	for (const auto& [window, m]: this->managed) {
+		if (this->isExcluded(window)) before.insert(window);
+	}
+
 	this->excludedPatterns.clear();
 	this->excludedTitles.clear();
 
@@ -706,6 +711,10 @@ void TilingManager::setExcluded(const QStringList& excluded) {
 
 		if (byTitle) this->excludedTitles.append(expression);
 		else this->excludedPatterns.append(expression);
+	}
+
+	for (auto& [window, m]: this->managed) {
+		if (this->isExcluded(window) != before.contains(window)) m.override = Override::None;
 	}
 
 	this->markAll();
@@ -1546,7 +1555,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);
-		if (floated) this->restoreFloating(m, m.override == Override::Float);
+		if (floated) this->restoreFloating(m, m.override == Override::Float || this->isExcluded(window));
 		else this->unpark(m);
 		return;
 	}
