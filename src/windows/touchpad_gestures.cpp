@@ -104,6 +104,8 @@ void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double ti
 		this->move.update(step.dx, step.dy);
 	} else if (step.action == TouchpadSwipe::Action::MoveEnd) {
 		this->move.end(step.dx, step.dy, step.cancelled);
+	} else if (step.action == TouchpadSwipe::Action::Pinch && !step.cancelled) {
+		emit this->pinched();
 	}
 	if (this->swipe.swiping() || this->swipe.moving()) this->watchdog.start();
 	else this->watchdog.stop();

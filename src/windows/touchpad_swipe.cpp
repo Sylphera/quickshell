@@ -18,6 +18,11 @@ constexpr double SWIPE_FORCE_SPEED = 5;
 constexpr double SWIPE_MINIMUM = 2;
 constexpr double START_THRESHOLD = 5;
 constexpr double MOVE_START_THRESHOLD = 16;
+constexpr double PINCH_START_RATIO = 0.1;
+constexpr double PINCH_DELTA_SCALE = 400;
+constexpr double PINCH_CLOSING_FACTOR = 1.6;
+constexpr double PINCH_DISTANCE = 250;
+constexpr double PINCH_COMPLETION = 0.2;
 constexpr double DIRECTION_LOCK_THRESHOLD = 10;
 constexpr double RETURN_THRESHOLD = 35;
 constexpr double FINGER_SWITCH_MS = 100;
@@ -64,7 +69,8 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 	auto before = std::exchange(this->previous, contacts);
 	if (this->fingersSwitched(contacts.length(), timeMs)) {
 		auto step = this->finish();
-		if (step.action == Action::MoveEnd && contacts.length() > this->fingers) step.cancelled = true;
+		auto threeFingered = step.action == Action::MoveEnd || step.action == Action::Pinch;
+		if (threeFingered && contacts.length() > this->fingers) step.cancelled = true;
 		if (step.action != Action::None) this->spent = true;
 		this->reset();
 		this->previous = contacts;
@@ -83,7 +89,9 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 		dy += contact.y - old->y;
 		matched++;
 	}
-	if (!this->enabledFor(this->fingers) || matched == 0 || (dx == 0 && dy == 0)) return {};
+	if (!this->enabledFor(this->fingers) || matched == 0) return {};
+	if (contacts.length() == MOVE_FINGERS && this->fingers == MOVE_FINGERS) this->trackPinch();
+	if (dx == 0 && dy == 0) return {};
 	dx *= UNITS_PER_MM / matched;
 	dy *= UNITS_PER_MM / matched;
 
@@ -125,7 +133,22 @@ bool TouchpadSwipe::enabledFor(qsizetype count) const {
 TouchpadSwipe::State TouchpadSwipe::startMoving() const {
 	auto moved = std::hypot(this->totalX, this->totalY);
 	if (moved < MOVE_START_THRESHOLD) return State::Waiting;
-	return std::abs(spreadOf(this->previous) - this->startSpread) > moved ? State::Ignored : State::Moving;
+	return std::abs(spreadOf(this->previous) - this->startSpread) > moved ? State::Waiting : State::Moving;
+}
+
+void TouchpadSwipe::trackPinch() {
+	if (this->startSpread <= 0) return;
+	auto spread = spreadOf(this->previous);
+	auto ratio = spread / this->startSpread;
+	if (this->state == State::Waiting) {
+		auto moved = std::hypot(this->totalX, this->totalY);
+		if (std::abs(ratio - 1) < PINCH_START_RATIO || std::abs(spread - this->startSpread) <= moved) return;
+		this->state = State::Pinching;
+		this->opening = ratio > 1;
+	}
+	if (this->state != State::Pinching) return;
+	auto change = this->opening ? ratio - 1 : (1 - ratio) * PINCH_CLOSING_FACTOR;
+	this->pinchProgress = change * PINCH_DELTA_SCALE / PINCH_DISTANCE;
 }
 
 void TouchpadSwipe::reset() {
@@ -134,6 +157,8 @@ void TouchpadSwipe::reset() {
 	this->fingers = 0;
 	this->pendingFingers = -1;
 	this->startSpread = 0;
+	this->opening = false;
+	this->pinchProgress = 0;
 	this->moveX = 0;
 	this->moveY = 0;
 	this->totalX = 0;
@@ -148,6 +173,9 @@ void TouchpadSwipe::reset() {
 
 TouchpadSwipe::Step TouchpadSwipe::finish() const {
 	if (this->state == State::Vertical) return {.action = Action::Vertical};
+	if (this->state == State::Pinching) {
+		return {.action = Action::Pinch, .cancelled = this->pinchProgress < PINCH_COMPLETION};
+	}
 	if (this->state == State::Moving) {
 		return {.action = Action::MoveEnd, .dx = this->moveX, .dy = this->moveY};
 	}

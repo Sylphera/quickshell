@@ -254,22 +254,43 @@ private slots:
 		QCOMPARE(hand.ends, 0);
 	}
 
-	void aPinchIsNotAMove() {
+	void pinchesToggleOnce_data() {
+		QTest::addColumn<QList<double>>("radii");
+		QTest::addColumn<bool>("toggles");
+		QTest::newRow("opening") << QList<double> {20, 30} << true;
+		QTest::newRow("closing") << QList<double> {20, 12} << true;
+		QTest::newRow("opening a little") << QList<double> {20, 22.2} << false;
+		QTest::newRow("opening and back") << QList<double> {20, 30, 20} << false;
+		QTest::newRow("closing and back") << QList<double> {20, 12, 20} << false;
+		QTest::newRow("resting") << QList<double> {20, 20.5} << false;
+	}
+
+	void pinchesToggleOnce() {
+		QFETCH(QList<double>, radii);
+		QFETCH(bool, toggles);
 		auto swipe = TouchpadSwipe([](int) { return true; });
 		auto time = 0.0;
-		auto action = Action::None;
-		for (auto i = 0; i <= 40; i++) {
-			auto open = i * 0.5;
+		auto toggled = 0;
+		auto others = 0;
+		auto frame = [&](const QList<TouchpadContact>& contacts) {
 			time += FRAME_MS;
-			auto step = swipe.frame(
-			    {{.id = 0, .x = 60 - open, .y = 30},
-			     {.id = 1, .x = 75 + open, .y = 30},
-			     {.id = 2, .x = 67 + open * 0.4, .y = 45 + open}},
-			    time
-			);
-			if (step.action != Action::None) action = step.action;
+			auto step = swipe.frame(contacts, time);
+			if (step.action == Action::Pinch) toggled += step.cancelled ? 0 : 1;
+			else if (step.action != Action::None) others++;
+		};
+		for (auto i = 1; i < radii.length(); i++) {
+			for (auto j = 0; j <= 30; j++) {
+				auto radius = radii[i - 1] + (radii[i] - radii[i - 1]) * j / 30;
+				frame(
+				    {{.id = 0, .x = 60 - radius, .y = 40 + j * 0.03},
+				     {.id = 1, .x = 60 + radius, .y = 40 + j * 0.03},
+				     {.id = 2, .x = 60, .y = 40 - radius + j * 0.03}}
+				);
+			}
 		}
-		QCOMPARE(action, Action::None);
+		frame({});
+		QCOMPARE(toggled, toggles ? 1 : 0);
+		QCOMPARE(others, 0);
 	}
 
 	void onlyFourFingersSwipe() {

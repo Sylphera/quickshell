@@ -38,6 +38,7 @@ signals:
 	void swipeEnabledChanged();
 	void moveEnabledChanged();
 	void verticalSwiped();
+	void pinched();
 
 private:
 	void step();

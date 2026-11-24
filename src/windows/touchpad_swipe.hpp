@@ -29,6 +29,7 @@ public:
 		Vertical,
 		Move,
 		MoveEnd,
+		Pinch,
 	};
 
 	struct Step {
@@ -55,12 +56,13 @@ private:
 		Horizontal,
 		Vertical,
 		Moving,
-		Ignored,
+		Pinching,
 	};
 
 	[[nodiscard]] Step finish() const;
 	[[nodiscard]] bool enabledFor(qsizetype count) const;
 	[[nodiscard]] State startMoving() const;
+	void trackPinch();
 	[[nodiscard]] bool fingersSwitched(qsizetype count, double timeMs);
 	void advance(double moved);
 	void trackReturn();
@@ -73,6 +75,8 @@ private:
 	bool threeFingers = true;
 	bool spent = false;
 	double startSpread = 0;
+	bool opening = false;
+	double pinchProgress = 0;
 	double moveX = 0;
 	double moveY = 0;
 	qsizetype pendingFingers = -1;
