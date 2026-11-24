@@ -82,7 +82,9 @@ void setWindowShadowsSuppressed(bool suppress) {
 using tiling::Edge;
 
 void setFullscreenLook(HWND hwnd, bool fullscreen);
-void markFullscreen(HWND hwnd, const QRect& raw, bool maximized);
+enum class LeftMark : quint8 { None, Fullscreen, FullscreenOverMaximized, Maximized };
+
+void markFullscreen(HWND hwnd, const QRect& raw, LeftMark mark);
 void unmarkFullscreen(HWND hwnd);
 
 bool framelessWindow(HWND hwnd) {
@@ -1089,10 +1091,7 @@ bool TilingManager::start() {
 		DwindleScene::dismissAll();
 		this->updateEarlyParking();
 		this->updateShellFullscreen();
-		for (auto& [window, m]: this->managed) {
-			if (m.mode == TileMode::Normal) continue;
-			this->markLayout(m.layout != nullptr ? m.layout : this->floatHome(m, true));
-		}
+		this->markCovering();
 	}));
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::desktopsChanged, this, [this]() {
 		this->markAll();
@@ -1102,14 +1101,13 @@ bool TilingManager::start() {
 			this->warnFullscreenConflict(nullptr, this->desktops->shownIndex());
 			return;
 		}
-		for (auto& [window, m]: this->managed) {
-			if (m.focusMaximized() && m.layout != nullptr) this->markLayout(m.layout);
-		}
+		this->markCovering();
 	}));
 
 	c.append(QObject::connect(this->desktops, &VirtualDesktops::currentChanged, this, [this] {
 		DwindleScene::dismissAll();
 		this->updateEarlyParking();
+		this->markCovering();
 	}));
 
 	if (auto* app = qobject_cast<QGuiApplication*>(QGuiApplication::instance())) {
@@ -2074,6 +2072,7 @@ bool TilingManager::toggleFloatMaximize(Managed& m) {
 	if (m.fullscreen()) {
 		m.mode = nextMode(m.mode, TileModeEvent::LeaveFullscreen);
 		rememberFullscreen(window, false);
+		markFullscreen(hwnd, m.fullscreenRestore, LeftMark::Maximized);
 		this->updateFullscreenLook(m);
 	} else {
 		QRect raw;
@@ -2081,7 +2080,7 @@ bool TilingManager::toggleFloatMaximize(Managed& m) {
 		if (!readFrame(hwnd, raw, frame)) return false;
 		if (m.floatMoving && !m.floatFrame.isNull()) raw = rawFor(hwnd, m.floatFrame);
 		m.fullscreenRestore = raw;
-		markFullscreen(hwnd, raw, false);
+		markFullscreen(hwnd, raw, LeftMark::Maximized);
 		for (auto& [other, existing]: this->managed) {
 			if (existing.fullscreen() && !Scratchpad::holds(other) && other->desktop() == window->desktop()
 			    && other->screen() == window->screen())
@@ -2933,6 +2932,10 @@ void TilingManager::setSpecialOffset(int offset) {
 		if (layout->special) this->apply(layout.get());
 	}
 	this->mSpecialShifting = false;
+	if (offset != 0 || !Scratchpad::instance()->shown()) return;
+	auto* covering = this->specialCoveringWindow();
+	auto found = this->managed.find(covering);
+	if (found != this->managed.end() && found->second.layout != nullptr) this->apply(found->second.layout);
 }
 
 QHash<HWND, QRect> TilingManager::specialFrames() const {
@@ -3449,7 +3452,7 @@ void TilingManager::onDeadline() {
 }
 
 void TilingManager::onMoveSizeStarted(TrackedWindow* window) {
-	DwindleScene::dismissAll();
+	DwindleScene::dismissFor(window->hwnd());
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 	if (iter->second.layout == nullptr) {
@@ -4108,8 +4111,8 @@ int valueOf(HWND hwnd, const wchar_t* name) {
 	return static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, name))); // NOLINT
 }
 
-void markFullscreen(HWND hwnd, const QRect& raw, bool maximized) {
-	SetPropW(hwnd, FULLSCREEN_PROP, propOf(maximized ? 2 : 1));
+void markFullscreen(HWND hwnd, const QRect& raw, LeftMark mark) {
+	SetPropW(hwnd, FULLSCREEN_PROP, propOf(static_cast<int>(mark)));
 	SetPropW(hwnd, FULLSCREEN_X, propOf(raw.x()));
 	SetPropW(hwnd, FULLSCREEN_Y, propOf(raw.y()));
 	SetPropW(hwnd, FULLSCREEN_W, propOf(raw.width()));
@@ -4141,7 +4144,7 @@ void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {
 	qCInfo(logTiling) << "Window" << window->addressHex() << window->appId()
 	                  << "was left fullscreen by a previous shell; putting it back.";
 	if (!raw.isEmpty()) setRawRect(hwnd, raw);
-	if (mark == 2) ShowWindowAsync(hwnd, SW_MAXIMIZE);
+	if (mark == static_cast<int>(LeftMark::FullscreenOverMaximized)) ShowWindowAsync(hwnd, SW_MAXIMIZE);
 }
 
 bool TilingManager::toggleFullscreen(TrackedWindow* window) {
@@ -4181,7 +4184,7 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		auto tiled = m.layout != nullptr && (wasMaximized || this->stateOf(m) == State::Tiled);
 		m.fullscreenRestore = tiled ? QRect() : before;
 		m.fullscreenWasMaximized = wasMaximized;
-		markFullscreen(hwnd, before, wasMaximized);
+		markFullscreen(hwnd, before, wasMaximized ? LeftMark::FullscreenOverMaximized : LeftMark::Fullscreen);
 		auto frame = fullscreenFrame(hwnd, rects.monitor);
 		if (special) frame.translate(0, this->mSpecialOffset);
 		if (!tiled && !floating) setFrame(hwnd, frame);
@@ -4270,6 +4273,25 @@ TrackedWindow* TilingManager::specialMaximizedWindow() const {
 			return window;
 	}
 	return nullptr;
+}
+
+TrackedWindow* TilingManager::specialCoveringWindow() const {
+	auto* fullscreen = this->specialFullscreenWindow();
+	return fullscreen != nullptr ? fullscreen : this->specialMaximizedWindow();
+}
+
+bool TilingManager::covers(TrackedWindow* window) const {
+	auto found = this->managed.find(window);
+	if (found == this->managed.end() || window->minimized()) return false;
+	const auto& m = found->second;
+	return m.mode != TileMode::Normal && (m.layout != nullptr || this->floats(m));
+}
+
+void TilingManager::markCovering() {
+	for (auto& [window, m]: this->managed) {
+		if (m.mode == TileMode::Normal) continue;
+		this->markLayout(m.layout != nullptr ? m.layout : this->floatHome(m, true));
+	}
 }
 
 void TilingManager::updateShellFullscreen() {

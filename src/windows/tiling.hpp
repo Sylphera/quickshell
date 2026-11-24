@@ -130,6 +130,8 @@ public:
 	bool toggleFullscreen(TrackedWindow* window);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	[[nodiscard]] TrackedWindow* specialMaximizedWindow() const;
+	[[nodiscard]] TrackedWindow* specialCoveringWindow() const;
+	[[nodiscard]] bool covers(TrackedWindow* window) const;
 	void updateShellFullscreen();
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
@@ -289,6 +291,7 @@ private:
 	[[nodiscard]] QList<Managed*> sceneFloats(Layout* layout);
 	[[nodiscard]] QRect floatGoal(const Managed& m, const Layout* layout) const;
 	void coverOthers(Managed& m);
+	void markCovering();
 	void sendFloat(Managed& m);
 	void restoreFloat(Managed& m);
 	void forgetFloat(Managed& m);

@@ -27,6 +27,7 @@
 #include "layer_order.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
+#include "tiling.hpp"
 #include "util.hpp"
 #include "window_tracker.hpp"
 
@@ -567,6 +568,7 @@ private:
 	bool raise();
 	void hideFront();
 	bool showFront();
+	bool holdNow();
 	[[nodiscard]] HWND coveringHost() const;
 	[[nodiscard]] QList<HWND> occludingTiles() const;
 	bool parkOccluders(qint64 now);
@@ -681,6 +683,9 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 		return false;
 
 	QList<HWND> windows;
+	auto* tiling = TilingManager::active();
+	auto* tracker = WindowTracker::instance();
+	auto covered = false;
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && hwnd != this->backdropWindow;
 	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
 	{
@@ -688,7 +693,7 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 			windows.prepend(hwnd);
 			continue;
 		}
-		if (hwnd == this->host || !IsWindowVisible(hwnd) || IsIconic(hwnd) || cloaked(hwnd)) continue;
+		if (covered || hwnd == this->host || !IsWindowVisible(hwnd) || IsIconic(hwnd) || cloaked(hwnd)) continue;
 		if (Scratchpad::instance()->containsWindow(hwnd)) continue;
 		if (std::ranges::any_of(plan, [hwnd](const auto& tile) { return tile.window == hwnd; })) continue;
 		DWORD pid = 0;
@@ -697,7 +702,9 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 		RECT raw {};
 		if (!GetWindowRect(hwnd, &raw)) continue;
 		const QRect bounds(raw.left, raw.top, raw.right - raw.left, raw.bottom - raw.top);
-		if (bounds.intersects(this->work)) windows.prepend(hwnd);
+		if (!bounds.intersects(this->work)) continue;
+		windows.prepend(hwnd);
+		covered = tiling != nullptr && tiling->covers(tracker->windowFor(hwnd));
 	}
 	for (auto* hwnd: windows) {
 		if (hwnd == this->dim) {
@@ -1446,6 +1453,8 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 	const auto uncovering = !continuing && (leavingFullscreen != nullptr || (instant && fadeAround != nullptr));
 	this->copyFloating(start, fadeAround, uncovering);
 	if (!succeeded(this->device->Commit(), "Commit")) return false;
+	if (fresh && instant && !continuing && this->focused != nullptr && this->focused == fadeAround)
+		return this->holdNow();
 	if (fresh && !this->raise()) return false;
 	this->publishDragScene();
 	this->retries = 0;
@@ -1455,6 +1464,23 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 	this->idle.start(static_cast<int>((plan.isEmpty() ? PopOutDuration : Duration) * 1000) + SettleMs);
 	this->sample.start();
 	qCDebug(logDwindleScene) << "Animating" << plan.size() << "tiles in" << this->work;
+	return true;
+}
+
+bool Scene::holdNow() {
+	this->dropFloating();
+	this->hideFront();
+	if (this->hiddenFront != this->focused) return false;
+	this->publishDragScene();
+	this->retries = 0;
+	this->released = true;
+	this->finishing = false;
+	this->hurrying = false;
+	if (SetWindowPos(this->host, this->focused, 0, 0, 0, 0,
+	                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW) == FALSE)
+		return false;
+	this->idle.start(250);
+	qCDebug(logDwindleScene) << "Covering the others under" << this->focused;
 	return true;
 }
 
@@ -2203,6 +2229,12 @@ bool DwindleScene::animating() {
 void DwindleScene::dismissAll() {
 	scenes().clear();
 	keptScenes().clear();
+}
+
+void DwindleScene::dismissFor(HWND window) {
+	std::erase_if(scenes(), [window](const auto& entry) {
+		return entry.second == nullptr || !entry.second->held() || entry.second->focusedWindow() == window;
+	});
 }
 
 void DwindleScene::drop(HMONITOR monitor) {

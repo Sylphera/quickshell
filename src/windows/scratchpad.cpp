@@ -478,8 +478,11 @@ void Scratchpad::moveReal(int offset) {
 void Scratchpad::jumpReal(int offset) {
 	auto delta = offset - this->realOffset;
 	if (delta != 0) {
+		auto* tiling = TilingManager::active();
+		auto* covering = tiling != nullptr && offset == 0 ? tiling->specialCoveringWindow() : nullptr;
 		for (const auto& entry: this->entries) {
 			RECT rect {};
+			if (covering != nullptr && entry.window != covering && tiling->isTiled(entry.window)) continue;
 			if (!IsWindow(entry.hwnd) || IsIconic(entry.hwnd) || !GetWindowRect(entry.hwnd, &rect))
 				continue;
 			SetWindowPos(
@@ -535,7 +538,7 @@ void Scratchpad::openCover(bool show) {
 	if (!rects.valid) return;
 	auto* tiling = TilingManager::active();
 	auto frames = tiling != nullptr ? tiling->specialFrames() : QHash<HWND, QRect>();
-	auto* maximized = tiling != nullptr ? tiling->specialMaximizedWindow() : nullptr;
+	auto* maximized = tiling != nullptr ? tiling->specialCoveringWindow() : nullptr;
 
 	static auto registered = false; // NOLINT
 	auto* instance = GetModuleHandleW(nullptr);

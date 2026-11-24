@@ -45,6 +45,7 @@ public:
 	static void onOcclusion(std::function<bool(HWND)> stage);
 	static void onRelease(std::function<void(const QList<HWND>&)> release);
 	static void dismissAll();
+	static void dismissFor(HWND window);
 	static void drop(HMONITOR monitor);
 	static HWND coverUnder(HWND window);
 	static HWND specialHost();

@@ -23,6 +23,7 @@
 
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
+#include "tiling.hpp"
 #include "touchpad_swipe.hpp"
 #include "virtual_desktops.hpp"
 #include "window_motion.hpp"
@@ -644,6 +645,7 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 	}
 
 	QList<HWND> sources;
+	auto* tiling = TilingManager::active();
 	const auto viewport = QRect(QPoint(), this->monitor.size());
 	const auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
@@ -654,6 +656,11 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		if (window == nullptr || window->minimized() || window->desktop() != desktop) continue;
 		auto rect = rectOf(hwnd);
 		if (!rect.intersects(this->monitor)) continue;
+		if (tiling != nullptr && tiling->covers(window)) {
+			sources.removeIf([tracker, window](HWND under) {
+				return tracker->windowFor(under)->screen() == window->screen();
+			});
+		}
 		if (!existing.contains(hwnd)) sources.append(hwnd);
 	}
 
@@ -712,7 +719,8 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 			continue;
 		}
 		auto* tracked = tracker->windowFor(hwnd);
-		auto fullscreen = GetPropW(hwnd, L"qs.fullscreen") != nullptr
+		auto mark = reinterpret_cast<INT_PTR>(GetPropW(hwnd, L"qs.fullscreen"));
+		auto fullscreen = mark == 1 || mark == 2
 		               || (tracked != nullptr && tracked->borderlessFullscreen());
 		added.append({
 		    .thumbnail = thumbnail,
@@ -730,7 +738,34 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 
 void DesktopSlide::layoutThumbs(double camera) {
 	const auto viewport = QRect(QPoint(), this->monitor.size());
+	auto panelsLeft = 0;
+	auto panelsRight = viewport.width();
+	for (const auto& thumb: this->thumbs) {
+		if (thumb.desktop < 0 || !thumb.fullscreen) continue;
+		auto base = this->bases.constFind(thumb.desktop);
+		if (base == this->bases.cend()) continue;
+		auto left = static_cast<int>(std::lround(base.value() - camera));
+		auto right = left + viewport.width();
+		if (right <= 0 || left >= viewport.width()) continue;
+		if (left <= 0) panelsLeft = std::max(panelsLeft, right);
+		else panelsRight = std::min(panelsRight, left);
+	}
+	const auto panelsArea = QRect(panelsLeft, 0, std::max(0, panelsRight - panelsLeft), viewport.height());
 	for (auto& thumb: this->thumbs) {
+		if (thumb.desktop == -1 && thumb.window == nullptr) {
+			auto visible = thumb.rect.intersected(panelsArea);
+			if (visible == thumb.visible) continue;
+			DWM_THUMBNAIL_PROPERTIES props {};
+			props.dwFlags = DWM_TNP_VISIBLE;
+			props.fVisible = visible.isEmpty() ? FALSE : TRUE;
+			if (props.fVisible) {
+				props.dwFlags |= DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE;
+				props.rcDestination = toRect(visible);
+				props.rcSource = toRect(visible.translated(-thumb.rect.topLeft()));
+			}
+			if (SUCCEEDED(DwmUpdateThumbnailProperties(thumb.thumbnail, &props))) thumb.visible = visible;
+			continue;
+		}
 		if (thumb.desktop < 0) continue;
 		auto base = this->bases.constFind(thumb.desktop);
 		if (base == this->bases.cend()) continue;
