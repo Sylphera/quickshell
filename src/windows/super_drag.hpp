@@ -66,6 +66,11 @@ private:
 	bool mFocusFollowsMouse = false;
 	std::function<void(int, WheelBind)> workspaceWheel;
 	GuiDrag guiDrag;
+
+	void onNativeDragStarted(HWND hwnd);
+	void onNativeDragEnded(HWND hwnd);
+	HWND nativeDrag = nullptr;
+	RECT nativeDragOrigin {};
 };
 
 class SuperDrag: public QObject {

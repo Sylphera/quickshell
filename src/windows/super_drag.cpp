@@ -25,6 +25,7 @@
 #include "window_motion.hpp"
 #include "virtual_desktops.hpp"
 #include "util.hpp"
+#include "window_snap.hpp"
 #include "window_tracker.hpp"
 
 #include <dwmapi.h>
@@ -56,6 +57,7 @@ constexpr LPARAM FLAG_TOP = 4;
 
 constexpr LRESULT STARTED_TILED_RESIZE = 1;
 constexpr LRESULT STARTED_WATCHED = 2;
+constexpr LRESULT STARTED_TILED_MOVE = 4;
 
 constexpr UINT GUI_TIMEOUT_MS = 250;
 constexpr DWORD IN_FLIGHT_TIMEOUT_MS = 50;
@@ -82,6 +84,8 @@ std::atomic<bool> gWheelColumns = false; // NOLINT
 std::atomic<bool> gWheelWorkspaces = false; // NOLINT
 std::atomic<bool> gFocusFollows = false;    // NOLINT
 std::atomic<bool> gHoverPending = false;    // NOLINT
+std::atomic<int> gSnapGapsIn = 0;           // NOLINT
+std::atomic<int> gSnapGapsOut = 0;          // NOLINT
 
 struct HookState {
 	bool active = false;
@@ -213,6 +217,8 @@ struct Drag {
 	bool resize = false;
 	bool tiled = false;
 	bool watched = false;
+	bool snaps = false;
+	bool held = false;
 	bool left = false;
 	bool top = false;
 	bool inFlight = false;
@@ -227,7 +233,89 @@ struct Drag {
 	LONG minHeight = 1;
 	LONG maxWidth = LONG_MAX;
 	LONG maxHeight = LONG_MAX;
+	QList<QRect> snapWindows;
+	QMargins frameInsets;
 };
+
+QRect asQRect(const RECT& rect) { return {rect.left, rect.top, widthOf(rect), heightOf(rect)}; }
+
+RECT toRect(const QRect& rect) {
+	return {rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height()};
+}
+
+RECT frameOf(HWND hwnd) {
+	RECT frame {};
+	auto hr = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame));
+	if (FAILED(hr) && GetWindowRect(hwnd, &frame) == FALSE) return {};
+	return frame;
+}
+
+void prepareSnap(Drag& drag) {
+	RECT raw {};
+	if (!GetWindowRect(drag.hwnd, &raw)) return;
+	auto frame = frameOf(drag.hwnd);
+	drag.frameInsets = QMargins(
+	    frame.left - raw.left,
+	    frame.top - raw.top,
+	    raw.right - frame.right,
+	    raw.bottom - frame.bottom
+	);
+
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    auto* drag = reinterpret_cast<Drag*>(param);
+		    if (hwnd == drag->hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+		    if (isOwnProcessWindow(hwnd) || isShellWindow(hwnd)) return TRUE;
+
+		    auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+		    if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) != 0) return TRUE;
+		    DWORD cloaked = 0;
+		    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+		    if (cloaked != 0 || coversMonitor(hwnd)) return TRUE;
+
+		    auto frame = asQRect(frameOf(hwnd));
+		    if (!frame.isEmpty()) drag->snapWindows.append(frame);
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&drag)
+	);
+	drag.snaps = true;
+}
+
+RECT snapped(const Drag& drag, const RECT& target) {
+	MONITORINFO info {};
+	info.cbSize = sizeof(info);
+	if (!GetMonitorInfoW(MonitorFromRect(&target, MONITOR_DEFAULTTONEAREST), &info)) return target;
+
+	auto dpi = GetDpiForWindow(drag.hwnd);
+	auto area = SnapArea {
+	    .windows = drag.snapWindows,
+	    .work = asQRect(info.rcWork),
+	    .reserved = QMargins(
+	        info.rcWork.left - info.rcMonitor.left,
+	        info.rcWork.top - info.rcMonitor.top,
+	        info.rcMonitor.right - info.rcWork.right,
+	        info.rcMonitor.bottom - info.rcWork.bottom
+	    ),
+	    .scale = dpi == 0 ? 1 : static_cast<double>(dpi) / USER_DEFAULT_SCREEN_DPI,
+	    .gapsIn = gSnapGapsIn.load(),
+	    .gapsOut = gSnapGapsOut.load(),
+	};
+
+	auto frame = asQRect(target).marginsRemoved(drag.frameInsets);
+	if (drag.resize) {
+		auto edges = SnapEdges {
+		    .left = drag.left,
+		    .right = !drag.left,
+		    .top = drag.top,
+		    .bottom = !drag.top,
+		};
+		frame = snapResized(frame, area, edges);
+	} else {
+		frame = snapMoved(frame, area);
+	}
+	return toRect(frame.marginsAdded(drag.frameInsets));
+}
 
 template <typename Predicate>
 bool settle(Predicate done) {
@@ -344,6 +432,7 @@ void beginDrag(Drag& drag, HWND hwnd, bool resize, POINT point) {
 	drag.maxHeight =
 	    std::max(static_cast<LONG>(GetSystemMetricsForDpi(SM_CYMAXTRACK, dpi)), drag.minHeight);
 
+	auto tiledMove = false;
 	if (auto* gui = gGuiWindow.load()) {
 		auto flags =
 		    (resize ? FLAG_RESIZE : 0) | (drag.left ? FLAG_LEFT : 0) | (drag.top ? FLAG_TOP : 0);
@@ -363,6 +452,7 @@ void beginDrag(Drag& drag, HWND hwnd, bool resize, POINT point) {
 		if (sent != 0) {
 			drag.tiled = (result & STARTED_TILED_RESIZE) != 0;
 			drag.watched = (result & STARTED_WATCHED) != 0;
+			tiledMove = (result & STARTED_TILED_MOVE) != 0;
 		}
 
 		if (GetWindowRect(hwnd, &drag.origin)) drag.requested = drag.origin;
@@ -378,6 +468,7 @@ void beginDrag(Drag& drag, HWND hwnd, bool resize, POINT point) {
 	}
 
 	if (maximized && !restoreUnderCursor(drag)) return;
+	if (!drag.tiled && !tiledMove && !maximized) prepareSnap(drag);
 	drag.alive = true;
 }
 
@@ -465,6 +556,14 @@ void updateDrag(Drag& drag, POINT point, bool force) {
 		}
 	}
 
+	if (drag.snaps) {
+		auto wanted = target;
+		target = snapped(drag, wanted);
+		auto held = EqualRect(&wanted, &target) == FALSE;
+		if (held && !drag.held) qCDebug(logSuperDrag) << "Snapped" << drag.hwnd << "to" << asQRect(target);
+		drag.held = held;
+	}
+
 	if (matchesRequest(drag, target)) {
 		drag.dirty = false;
 		return;
@@ -535,6 +634,16 @@ SuperDragManager* SuperDragManager::instance() {
 }
 
 SuperDragManager::SuperDragManager(QObject* parent): QObject(parent) {
+	QTimer::singleShot(0, this, [this] {
+		auto* tracker = WindowTracker::instance();
+		QObject::connect(tracker, &WindowTracker::moveSizeStarted, this, [this](TrackedWindow* window) {
+			this->onNativeDragStarted(window->hwnd());
+		});
+		QObject::connect(tracker, &WindowTracker::moveSizeEnded, this, [this](TrackedWindow* window) {
+			this->onNativeDragEnded(window->hwnd());
+		});
+	});
+
 	WNDCLASSW wndClass {};
 	wndClass.lpfnWndProc = &SuperDragManager::messageWindowProc;
 	wndClass.hInstance = GetModuleHandleW(nullptr);
@@ -914,15 +1023,48 @@ SuperDragManager::messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 	}
 }
 
+void SuperDragManager::onNativeDragStarted(HWND hwnd) {
+	this->nativeDrag = nullptr;
+	if (hwnd == this->guiDrag.hwnd) return;
+	auto* tiling = TilingManager::active();
+	auto* window = WindowTracker::instance()->windowFor(hwnd);
+	if (tiling != nullptr && window != nullptr && tiling->isTiled(window)) return;
+	if (IsZoomed(hwnd) || !GetWindowRect(hwnd, &this->nativeDragOrigin)) return;
+	this->nativeDrag = hwnd;
+	gSnapGapsIn.store(TilingManager::instance()->gapsIn());
+	gSnapGapsOut.store(TilingManager::instance()->gapsOut());
+}
+
+void SuperDragManager::onNativeDragEnded(HWND hwnd) {
+	if (hwnd != std::exchange(this->nativeDrag, nullptr) || IsZoomed(hwnd) || IsIconic(hwnd)) return;
+
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return;
+	auto resized = widthOf(rect) != widthOf(this->nativeDragOrigin)
+	            || heightOf(rect) != heightOf(this->nativeDragOrigin);
+	if (resized || EqualRect(&rect, &this->nativeDragOrigin)) return;
+
+	Drag drag;
+	drag.hwnd = hwnd;
+	prepareSnap(drag);
+	auto target = snapped(drag, rect);
+	if (EqualRect(&rect, &target)) return;
+	qCDebug(logSuperDrag) << "Snapped" << hwnd << "to" << asQRect(target) << "when let go";
+	setPosition(hwnd, target.left, target.top);
+}
+
 LRESULT SuperDragManager::onStarted(HWND hwnd, LPARAM flags) {
 	this->finishGuiDrag(nullptr);
 
+	gSnapGapsIn.store(TilingManager::instance()->gapsIn());
+	gSnapGapsOut.store(TilingManager::instance()->gapsOut());
 	auto* tiling = TilingManager::active();
 	if (tiling == nullptr) return 0;
 	tiling->haltMotion(hwnd, (flags & FLAG_RESIZE) != 0);
 
 	auto* tracker = WindowTracker::instance();
 	this->guiDrag.hwnd = hwnd;
+	this->nativeDrag = nullptr;
 
 	if ((flags & FLAG_RESIZE) != 0) {
 		auto* window = tracker->windowFor(hwnd);
@@ -935,9 +1077,11 @@ LRESULT SuperDragManager::onStarted(HWND hwnd, LPARAM flags) {
 		}
 	}
 
+	auto* window = tracker->windowFor(hwnd);
+	auto tiled = window != nullptr && tiling->isTiled(window);
 	tracker->noteMoveSize(hwnd, true);
 	this->guiDrag.notified = true;
-	return STARTED_WATCHED;
+	return STARTED_WATCHED | (tiled ? STARTED_TILED_MOVE : 0);
 }
 
 void SuperDragManager::onTiledResize() {

@@ -60,3 +60,11 @@ qt_add_executable(vpn_connections_test
 
 target_include_directories(vpn_connections_test PRIVATE ${QS_WINDOWS_SRC}/system)
 target_link_libraries(vpn_connections_test PRIVATE Qt6::Core Qt6::Qml Qt6::Test rasapi32)
+
+qt_add_executable(window_snap_test
+	window_snap_test.cpp
+	${QS_WINDOWS_SRC}/window_snap.cpp
+)
+
+target_include_directories(window_snap_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(window_snap_test PRIVATE Qt6::Core Qt6::Test)
