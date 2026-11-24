@@ -514,15 +514,18 @@ qsizetype Dispatcher::resolveWorkspace(const QString& arg, bool& create) const {
 	}
 
 	auto relative = a;
-	if (relative.startsWith('e') || relative.startsWith('r') || relative.startsWith('m')) {
-		relative = relative.mid(1);
-	}
+	auto onlyExisting = a.startsWith('e') || a.startsWith('m');
+	if (onlyExisting || a.startsWith('r')) relative = a.mid(1);
 
 	if (relative.startsWith('+') || relative.startsWith('-')) {
 		auto ok = false;
 		auto delta = relative.toInt(&ok);
 		if (!ok) return -1;
-		return qBound(qsizetype(0), current + delta, qMax(count - 1, qsizetype(0)));
+		if (onlyExisting) return this->existingWorkspace(current, delta);
+
+		create = true;
+		constexpr auto last = qs::windows::VirtualDesktops::MAX_DESKTOPS - 1;
+		return qBound(qsizetype(0), current + delta, qsizetype(last));
 	}
 
 	auto ok = false;
@@ -531,6 +534,20 @@ qsizetype Dispatcher::resolveWorkspace(const QString& arg, bool& create) const {
 
 	create = true;
 	return number - 1;
+}
+
+qsizetype Dispatcher::existingWorkspace(qsizetype current, int delta) const {
+	QList<qsizetype> existing;
+	for (qsizetype i = 0; i < this->ipc->desktops()->count(); i++) {
+		auto* workspace = this->ipc->workspaceById(static_cast<qint32>(i + 1));
+		auto occupied = workspace != nullptr && !workspace->toplevels()->valueList().isEmpty();
+		if (i == current || occupied) existing.append(i);
+	}
+
+	auto position = existing.indexOf(current);
+	if (position == -1) return -1;
+	auto count = existing.length();
+	return existing[((position + delta) % count + count) % count];
 }
 
 TrackedWindow* Dispatcher::resolveWindow(const QString& arg) const {
@@ -579,19 +596,6 @@ TrackedWindow* Dispatcher::resolveWindow(const QString& arg) const {
 	return nullptr;
 }
 
-void Dispatcher::focusWorkspaceFromWheel(int steps) {
-	auto* desktops = this->ipc->desktops();
-	auto count = desktops->count();
-	if (steps > 0 && count > 0 && count < qs::windows::VirtualDesktops::MAX_DESKTOPS
-	    && desktops->shownIndex() == count - 1)
-	{
-		this->focusWorkspace(QString::number(count + 1));
-		return;
-	}
-
-	this->focusWorkspace(QString(steps > 0 ? "+%1" : "-%1").arg(qAbs(steps)));
-}
-
 void Dispatcher::focusWorkspace(const QString& arg) {
 	auto create = false;
 	auto index = this->resolveWorkspace(arg, create);
@@ -621,7 +625,7 @@ void Dispatcher::focusWorkspace(const QString& arg) {
 			if (!ok) return;
 			WorkspaceBehavior::instance()->prepareWarp(index);
 			WorkspaceBehavior::instance()->expectFocus(index);
-			desktops->switchTo(index);
+			desktops->switchToAsync(index);
 		});
 
 		return;

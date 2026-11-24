@@ -17,7 +17,6 @@ public:
 	explicit Dispatcher(HyprlandIpc* ipc): ipc(ipc) {}
 
 	void dispatch(const QString& request);
-	void focusWorkspaceFromWheel(int steps);
 
 private:
 	struct LuaCall {
@@ -35,6 +34,7 @@ private:
 	void dispatchClassic(const QString& name, const QString& args);
 
 	[[nodiscard]] qsizetype resolveWorkspace(const QString& arg, bool& create) const;
+	[[nodiscard]] qsizetype existingWorkspace(qsizetype current, int delta) const;
 	[[nodiscard]] qs::windows::TrackedWindow* resolveWindow(const QString& arg) const;
 
 	void focusWorkspace(const QString& arg);
