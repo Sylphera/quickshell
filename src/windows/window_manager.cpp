@@ -18,6 +18,7 @@
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
+#include "inactive_dim.hpp"
 #include "window_rules.hpp"
 #include "window_tracker.hpp"
 
@@ -440,6 +441,7 @@ WindowManager::WindowManager(QObject* parent): QObject(parent) {
 	QObject::connect(behavior, &WorkspaceBehavior::hideSwitchPopupChanged, this, &WindowManager::hideDesktopPopupChanged);
 	QObject::connect(DesktopTrimmer::instance(), &DesktopTrimmer::enabledChanged, this, &WindowManager::removeEmptyDesktopsChanged);
 	QObject::connect(WindowRules::instance(), &WindowRules::enabledChanged, this, &WindowManager::windowRulesChanged);
+	QObject::connect(InactiveDim::instance(), &InactiveDim::enabledChanged, this, &WindowManager::dimInactiveChanged);
 	// clang-format on
 }
 
@@ -508,5 +510,7 @@ void WindowManager::setRemoveEmptyDesktops(bool enabled) {
 
 bool WindowManager::windowRules() const { return WindowRules::instance()->enabled(); }
 void WindowManager::setWindowRules(bool enabled) { WindowRules::instance()->setEnabled(enabled); }
+bool WindowManager::dimInactive() const { return InactiveDim::instance()->enabled(); }
+void WindowManager::setDimInactive(bool enabled) { InactiveDim::instance()->setEnabled(enabled); }
 
 } // namespace qs::windows

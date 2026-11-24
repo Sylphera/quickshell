@@ -80,3 +80,7 @@ target_link_libraries(layer_plan_test PRIVATE Qt6::Core Qt6::Test)
 qt_add_executable(scratchpad_phase_test scratchpad_phase_test.cpp)
 target_include_directories(scratchpad_phase_test PRIVATE ${QS_WINDOWS_SRC})
 target_link_libraries(scratchpad_phase_test PRIVATE Qt6::Core Qt6::Test)
+
+qt_add_executable(dim_plan_test dim_plan_test.cpp ${QS_WINDOWS_SRC}/dim_plan.cpp)
+target_include_directories(dim_plan_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(dim_plan_test PRIVATE Qt6::Core Qt6::Gui Qt6::Test)

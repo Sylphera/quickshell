@@ -31,6 +31,9 @@ public:
 	Q_DISABLE_COPY_MOVE(Scratchpad);
 
 	[[nodiscard]] bool shown() const { return this->phase != ScratchpadPhase::Hidden; }
+	[[nodiscard]] bool moving() const {
+		return this->shown() && this->phase != ScratchpadPhase::Shown;
+	}
 	[[nodiscard]] HMONITOR monitor() const { return this->mMonitor; }
 	[[nodiscard]] HWND dimWindow() const { return this->dim; }
 	[[nodiscard]] int dimLevel() const { return this->dimAlpha; }

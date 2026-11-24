@@ -99,6 +99,7 @@ class WindowManager: public QObject {
 	Q_PROPERTY(bool hideDesktopPopup READ hideDesktopPopup WRITE setHideDesktopPopup NOTIFY hideDesktopPopupChanged);
 	Q_PROPERTY(bool removeEmptyDesktops READ removeEmptyDesktops WRITE setRemoveEmptyDesktops NOTIFY removeEmptyDesktopsChanged);
 	Q_PROPERTY(bool windowRules READ windowRules WRITE setWindowRules NOTIFY windowRulesChanged);
+	Q_PROPERTY(bool dimInactive READ dimInactive WRITE setDimInactive NOTIFY dimInactiveChanged);
 	// clang-format on
 
 public:
@@ -127,6 +128,8 @@ public:
 	void setRemoveEmptyDesktops(bool enabled);
 	[[nodiscard]] bool windowRules() const;
 	void setWindowRules(bool enabled);
+	[[nodiscard]] bool dimInactive() const;
+	void setDimInactive(bool enabled);
 
 signals:
 	void bordersChanged();
@@ -140,6 +143,7 @@ signals:
 	void hideDesktopPopupChanged();
 	void removeEmptyDesktopsChanged();
 	void windowRulesChanged();
+	void dimInactiveChanged();
 };
 
 } // namespace qs::windows

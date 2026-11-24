@@ -19,6 +19,8 @@ qt_add_library(quickshell-windows STATIC
 	window_decorations.cpp
 	window_manager.cpp
 	window_rules.cpp
+	inactive_dim.cpp
+	dim_plan.cpp
 	window_snap.cpp
 	layer_order.cpp
 	layer_plan.cpp

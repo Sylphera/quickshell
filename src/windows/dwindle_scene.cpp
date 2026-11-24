@@ -2038,6 +2038,12 @@ bool DwindleScene::holdsSpecial() {
 	return false;
 }
 
+bool DwindleScene::animating() {
+	return std::ranges::any_of(scenes(), [](const auto& entry) {
+		return entry.second != nullptr && entry.second->visible() && !entry.second->held();
+	});
+}
+
 void DwindleScene::dismissAll() {
 	scenes().clear();
 	keptScenes().clear();
