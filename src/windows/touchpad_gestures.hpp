@@ -32,6 +32,7 @@ public:
 
 signals:
 	void swipeEnabledChanged();
+	void verticalSwiped();
 
 private:
 	void step();

@@ -74,6 +74,8 @@ void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double ti
 		auto release = step.forced ? SwipeRelease::Force : SwipeRelease::Settle;
 		if (step.cancelled) release = SwipeRelease::Cancel;
 		DesktopSlide::instance()->swipeEnd(release);
+	} else if (step.action == TouchpadSwipe::Action::Vertical) {
+		emit this->verticalSwiped();
 	}
 	if (this->swipe.active()) this->watchdog.start();
 	else this->watchdog.stop();

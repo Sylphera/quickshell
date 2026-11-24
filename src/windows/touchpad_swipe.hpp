@@ -26,6 +26,7 @@ public:
 		None,
 		Update,
 		End,
+		Vertical,
 	};
 
 	struct Step {
@@ -46,7 +47,7 @@ private:
 	enum class State : quint8 {
 		Waiting,
 		Horizontal,
-		Ignored,
+		Vertical,
 	};
 
 	[[nodiscard]] Step finish() const;

@@ -23,6 +23,7 @@ struct Hand {
 	TouchpadSwipe::Step last;
 	TouchpadSwipe::Step end;
 	int ends = 0;
+	int verticals = 0;
 
 	explicit Hand(bool left = true, bool right = true)
 	    : swipe([left, right](int way) { return way < 0 ? left : right; }) {}
@@ -34,6 +35,7 @@ struct Hand {
 		}
 		this->time += FRAME_MS;
 		this->last = this->swipe.frame(contacts, this->time);
+		if (this->last.action == Action::Vertical) this->verticals++;
 		if (this->last.action != Action::End) return;
 		this->end = this->last;
 		this->ends++;
@@ -155,17 +157,37 @@ private slots:
 		QVERIFY(hand.last.offset > 0.25);
 	}
 
-	void verticalIsIgnoredUntilTheFingersLift() {
+	void verticalTriggersOnceWhenTheFingersLift() {
 		auto hand = Hand();
 		hand.frame(4);
 		hand.move(0, 10, 20);
 		hand.move(-30, 0, 20);
+		QCOMPARE(hand.verticals, 0);
 		hand.lift();
+		QCOMPARE(hand.verticals, 1);
 		QCOMPARE(hand.ends, 0);
 		hand.frame(4);
 		hand.move(-30, 0, 20);
 		hand.lift();
 		QCOMPARE(hand.ends, 1);
+		QCOMPARE(hand.verticals, 1);
+	}
+
+	void aRestingHandIsNotAVerticalSwipe() {
+		auto hand = Hand();
+		hand.frame(4);
+		hand.move(0, 0.4, 20);
+		hand.lift();
+		QCOMPARE(hand.verticals, 0);
+	}
+
+	void losingAFingerDoesNotRepeatTheVerticalSwipe() {
+		auto hand = Hand();
+		hand.frame(4);
+		hand.move(0, -10, 20);
+		hand.move(0, -5, 20, 3);
+		hand.lift();
+		QCOMPARE(hand.verticals, 1);
 	}
 
 	void onlyFourFingersSwipe() {
@@ -173,8 +195,10 @@ private slots:
 			auto hand = Hand();
 			hand.frame(fingers);
 			hand.move(-30, 0, 30, fingers);
+			hand.move(0, 30, 30, fingers);
 			hand.lift();
 			QCOMPARE(hand.ends, 0);
+			QCOMPARE(hand.verticals, 0);
 		}
 	}
 

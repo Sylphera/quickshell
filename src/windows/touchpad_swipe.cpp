@@ -75,9 +75,9 @@ TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts,
 		auto horizontal = std::abs(this->totalX);
 		auto vertical = std::abs(this->totalY);
 		if (std::max(horizontal, vertical) < START_THRESHOLD) return {};
-		this->state = horizontal > vertical ? State::Horizontal : State::Ignored;
+		this->state = horizontal > vertical ? State::Horizontal : State::Vertical;
 	}
-	if (this->state == State::Ignored) return {};
+	if (this->state == State::Vertical) return {};
 
 	this->advance(-dx);
 	this->trackReturn();
@@ -100,6 +100,7 @@ void TouchpadSwipe::reset() {
 }
 
 TouchpadSwipe::Step TouchpadSwipe::finish() const {
+	if (this->state == State::Vertical) return {.action = Action::Vertical};
 	if (this->state != State::Horizontal) return {};
 	return {
 	    .action = Action::End,
