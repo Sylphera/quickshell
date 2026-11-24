@@ -697,7 +697,13 @@ void Dispatcher::pin(TrackedWindow* window) {
 		return;
 	}
 
-	desktops->pinWindow(window->hwnd(), !desktops->isWindowPinned(window->hwnd()));
+	auto* hwnd = window->hwnd();
+	const auto pin = !desktops->isWindowPinned(hwnd);
+	auto* tiling = TilingManager::active();
+	if (tiling != nullptr && !tiling->canPin(window)) return;
+	if (!desktops->pinWindow(hwnd, pin) || tiling == nullptr) return;
+	SetWindowPos(hwnd, pin ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
 }
 
 void Dispatcher::moveFocus(const QString& direction) {

@@ -2167,12 +2167,13 @@ void DwindleScene::prepareClose(HMONITOR monitor, const QRect& work, HWND window
 	if (snapshot.pixels.isNull() && !removed) return;
 
 	const auto viewport = sceneViewport(monitor, work);
-	auto& scene = scenes()[monitor];
-	if (scene != nullptr && scene->work == viewport) {
-		const auto shown = scene->frameForDrag(window);
+	const auto known = scenes().find(monitor);
+	if (known != scenes().end() && known->second->work == viewport) {
+		const auto shown = known->second->frameForDrag(window);
 		if (!shown.isEmpty()) snapshot.bounds = shown;
 	}
 	if (snapshot.bounds.isEmpty() || !viewport.contains(snapshot.bounds)) return;
+	auto& scene = scenes()[monitor];
 	if (scene == nullptr || scene->work != viewport || scene->dim != underlayDim(monitor))
 		scene = std::make_unique<Scene>(viewport, underlayDim(monitor));
 	snapshot.captured = now;
@@ -2200,7 +2201,8 @@ void DwindleScene::clearCloseCache() {
 
 bool DwindleScene::hasClosingTile(HMONITOR monitor, const QRect& work) {
 	auto found = scenes().find(monitor);
-	return found != scenes().end() && found->second->work == sceneViewport(monitor, work) && found->second->hasClosingTile();
+	return found != scenes().end() && found->second != nullptr && found->second->work == sceneViewport(monitor, work)
+	    && found->second->hasClosingTile();
 }
 
 void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed,

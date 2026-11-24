@@ -135,6 +135,7 @@ public:
 	[[nodiscard]] bool floatsInSpecial(TrackedWindow* window) const;
 	[[nodiscard]] bool overSpecialCover(TrackedWindow* window) const;
 	QRect settleFloat(TrackedWindow* window);
+	[[nodiscard]] bool canPin(TrackedWindow* window) const;
 	void updateShellFullscreen();
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
@@ -252,6 +253,8 @@ private:
 		bool floatPending = false;
 		bool floatMoving = false;
 		bool floatOpening = false;
+		bool wasTopmost = false;
+		bool floated = false;
 		QRect floatSeen;
 		qint64 coveredAt = 0;
 
@@ -302,6 +305,8 @@ private:
 	void floatTo(Managed& m, const QRect& raw);
 	void prepareFloatClose(Managed& m);
 	bool closeFloat(Managed& m);
+	static void dropTopmost(Managed& m);
+	static void restoreTopmost(Managed& m);
 	void restoreFloat(Managed& m);
 	void forgetFloat(Managed& m);
 	void uncoverFor(const Managed& m);
@@ -328,7 +333,7 @@ private:
 	void send(Managed& m, const QRect& frame, bool refreshNativeFrame = false);
 	void armDeadline();
 	void restoreFloating(Managed& m, bool besideTile = false);
-	[[nodiscard]] static QRect floatingRect(const QRect& tile, const QRect& previous, const QRect& work);
+	[[nodiscard]] static QRect floatingRect(const QRect& tile, QSize size, const QRect& work);
 	void restack();
 	void collectLayers(QSet<HWND>& blocking, QSet<HWND>& tiled, QSet<HWND>& skipped) const;
 
@@ -406,6 +411,9 @@ private:
 	QSet<TrackedWindow*> unverified;
 	TrackedWindow* dragging = nullptr;
 	QRect dragOrigin;
+	QPointer<TrackedWindow> regrab;
+	QSize regrabSize;
+	QPointF regrabAt;
 	void placeMoving(Managed& m, const Layout* layout, const QRect& tile);
 	[[nodiscard]] bool canAnimate(const Managed& m, const Layout* layout, const QRect& tile) const;
 	void onMotionLanded(HWND hwnd, const QRect& frame);
