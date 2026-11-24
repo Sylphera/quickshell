@@ -9,11 +9,13 @@ using qs::windows::isHeld;
 using qs::windows::isStaged;
 using qs::windows::nextMode;
 using qs::windows::nextPlacement;
+using qs::windows::placeTile;
 using qs::windows::TILE_ANIMATION_MS;
 using qs::windows::TILE_WAIT_MS;
 using Heal = qs::windows::TileHeal;
 using Mode = qs::windows::TileMode;
 using ModeEvent = qs::windows::TileModeEvent;
+using Step = qs::windows::TileStep;
 using Placement = qs::windows::TilePlacement;
 using PlacementEvent = qs::windows::TilePlacementEvent;
 
@@ -22,6 +24,19 @@ namespace {
 constexpr Mode MODES[] = {Mode::Normal, Mode::Maximized, Mode::Fullscreen};
 constexpr Placement PLACEMENTS[] =
     {Placement::Placed, Placement::Staged, Placement::Held, Placement::StagedHeld};
+
+Step placedBefore(bool moved, bool refresh, bool inPlace, bool accepted, bool waiting, bool exhausted) {
+	if (moved) {
+		if (inPlace && !refresh) return Step::Settled;
+		return Step::Send;
+	}
+	if (refresh) return Step::Send;
+	if (inPlace) return Step::Settled;
+	if (accepted) return Step::Leave;
+	if (waiting) return Step::Leave;
+	if (exhausted) return Step::GiveUp;
+	return Step::Correct;
+}
 
 }
 
@@ -120,6 +135,21 @@ private slots:
 					}
 				}
 			}
+		}
+	}
+
+	void placingDecidesWhatItAlwaysDid() {
+		for (auto bits = 0; bits < 64; bits++) {
+			auto moved = (bits & 1) != 0;
+			auto refresh = (bits & 2) != 0;
+			auto inPlace = (bits & 4) != 0;
+			auto accepted = (bits & 8) != 0;
+			auto waiting = (bits & 16) != 0;
+			auto exhausted = (bits & 32) != 0;
+			QCOMPARE(
+			    placeTile({moved, refresh, inPlace, accepted, waiting, exhausted}),
+			    placedBefore(moved, refresh, inPlace, accepted, waiting, exhausted)
+			);
 		}
 	}
 

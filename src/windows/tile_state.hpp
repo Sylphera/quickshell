@@ -56,6 +56,25 @@ enum class TilePlacementEvent : quint8 {
 	return placement;
 }
 
+enum class TileStep : quint8 { Settled, Leave, Send, Correct, GiveUp };
+
+struct TileFrame {
+	bool moved = false;
+	bool refresh = false;
+	bool inPlace = false;
+	bool accepted = false;
+	bool waiting = false;
+	bool exhausted = false;
+};
+
+[[nodiscard]] constexpr TileStep placeTile(const TileFrame& frame) {
+	if (frame.refresh) return TileStep::Send;
+	if (frame.inPlace) return TileStep::Settled;
+	if (frame.moved) return TileStep::Send;
+	if (frame.accepted || frame.waiting) return TileStep::Leave;
+	return frame.exhausted ? TileStep::GiveUp : TileStep::Correct;
+}
+
 enum class TileHeal : quint8 { None, Wait, Release, EndAnimation, Replace };
 
 struct TileHealth {

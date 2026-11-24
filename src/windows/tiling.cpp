@@ -2356,40 +2356,35 @@ void TilingManager::place(Managed& m, const QRect& tile) {
 	this->updateTinyCorners(m, frame);
 	const auto refreshNativeFrame = this->needsNativeFrameRefresh(m);
 
-	if (tile != m.target) {
+	const auto moved = tile != m.target;
+	if (moved) {
 		m.target = tile;
 		m.accepted = QRect();
 		m.corrections = 0;
-
-		if (frame == tile && !refreshNativeFrame) m.verifying = false;
-		else this->send(m, frame, refreshNativeFrame);
-		return;
 	}
 
-	if (refreshNativeFrame) {
-		this->send(m, frame, true);
-		return;
-	}
-
-	if (frame == tile) {
-		m.verifying = false;
-		return;
-	}
-
-	if (!m.accepted.isNull() && frame == m.accepted) return;
-	if (m.verifying && frame == m.before) return;
-
-	auto now = QDateTime::currentMSecsSinceEpoch();
+	const auto now = QDateTime::currentMSecsSinceEpoch();
 	if (now - m.lastCorrection > CORRECTION_RESET_MS) m.corrections = 0;
 
-	if (m.corrections >= MAX_CORRECTIONS) {
-		this->giveUp(m, frame);
-		return;
+	switch (placeTile({
+	    .moved = moved,
+	    .refresh = refreshNativeFrame,
+	    .inPlace = frame == tile,
+	    .accepted = !m.accepted.isNull() && frame == m.accepted,
+	    .waiting = m.verifying && frame == m.before,
+	    .exhausted = m.corrections >= MAX_CORRECTIONS,
+	}))
+	{
+	case TileStep::Settled: m.verifying = false; break;
+	case TileStep::Leave: break;
+	case TileStep::Send: this->send(m, frame, refreshNativeFrame); break;
+	case TileStep::Correct:
+		m.corrections++;
+		m.lastCorrection = now;
+		this->send(m, frame);
+		break;
+	case TileStep::GiveUp: this->giveUp(m, frame); break;
 	}
-
-	m.corrections++;
-	m.lastCorrection = now;
-	this->send(m, frame);
 }
 
 void TilingManager::send(Managed& m, const QRect& frame, bool refreshNativeFrame) {
