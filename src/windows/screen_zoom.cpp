@@ -2,6 +2,7 @@
 #include "cursor_image.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -99,7 +100,7 @@ public:
 
 	bool invalid() const { return this->displayChanged || this->closed->load(); }
 
-	void render(float level, POINT cursor, bool hidden, bool held) {
+	void render(float level, POINT anchor, POINT cursor, bool hidden, bool held) {
 		if (auto frame = this->pool.TryGetNextFrame()) {
 			const auto frameSize = frame.ContentSize();
 			if (frameSize.Width != this->size.Width || frameSize.Height != this->size.Height)
@@ -135,20 +136,20 @@ public:
 			return;
 		}
 
-		const auto transformChanged = level != this->lastLevel || cursor.x != this->lastCursor.x
-		    || cursor.y != this->lastCursor.y;
+		const auto transformChanged = level != this->lastLevel || anchor.x != this->lastCursor.x
+		    || anchor.y != this->lastCursor.y;
 		const auto cursorChanged = this->updateCursor(cursor);
 		if (cursorChanged && !transformChanged) winrt::check_hresult(this->composition->Commit());
 		if (transformChanged) {
 			D2D_MATRIX_3X2_F transform {};
 			transform._11 = level;
 			transform._22 = level;
-			transform._31 = (cursor.x - this->bounds.left) * (1.0f - level);
-			transform._32 = (cursor.y - this->bounds.top) * (1.0f - level);
+			transform._31 = (anchor.x - this->bounds.left) * (1.0f - level);
+			transform._32 = (anchor.y - this->bounds.top) * (1.0f - level);
 			winrt::check_hresult(this->visual->SetTransform(transform));
 			winrt::check_hresult(this->composition->Commit());
 			this->lastLevel = level;
-			this->lastCursor = cursor;
+			this->lastCursor = anchor;
 			this->offset = {transform._31, transform._32};
 		}
 
@@ -163,6 +164,7 @@ public:
 	}
 
 	bool shown() const { return IsWindowVisible(this->host) != FALSE; }
+	POINT viewCursor() const { return this->lastCursor; }
 
 private:
 	bool hasShellWindowAbove() const {
@@ -398,6 +400,7 @@ public:
 	void suspend() {
 		this->frozen.invalidate();
 		this->suspended = this->surface != nullptr;
+		if (this->surface) this->anchorFrom = this->surface->viewCursor();
 	}
 
 	void resume() {
@@ -460,7 +463,7 @@ private:
 				return;
 			}
 			try {
-				this->surface->render(1.0001f, cursor, false, false);
+				this->surface->render(1.0001f, cursor, cursor, false, false);
 			} catch (const winrt::hresult_error& error) {
 				this->reset();
 			}
@@ -469,7 +472,13 @@ private:
 		this->leaving.invalidate();
 		try {
 			const auto held = this->suspended || (this->resumed.isValid() && !this->resumed.hasExpired(60));
-			this->surface->render(zoom, cursor, this->suspended, held);
+			auto anchor = cursor;
+			if (this->resumed.isValid() && !this->resumed.hasExpired(360)) {
+				const auto t = animationLevel(0.0f, 1.0f, std::max<qint64>(0, this->resumed.elapsed() - 60));
+				anchor.x = this->anchorFrom.x + std::lround((cursor.x - this->anchorFrom.x) * t);
+				anchor.y = this->anchorFrom.y + std::lround((cursor.y - this->anchorFrom.y) * t);
+			}
+			this->surface->render(zoom, anchor, cursor, this->suspended, held);
 			const auto shown = this->surface->shown() && !this->suspended;
 			if (!shown) this->shownSince.invalidate();
 			else if (!this->shownSince.isValid()) this->shownSince.start();
@@ -485,6 +494,7 @@ private:
 	QElapsedTimer frozen;
 	QElapsedTimer resumed;
 	QElapsedTimer leaving;
+	POINT anchorFrom {};
 	POINT leftAt {};
 	std::unique_ptr<ZoomSurface> surface;
 	float from = 1.0f;

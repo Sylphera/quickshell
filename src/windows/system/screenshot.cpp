@@ -228,6 +228,7 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 }
 
 void Screenshot::freezeZoom() { freezeScreenZoom(); }
+
 void Screenshot::suspendZoom() { suspendScreenZoom(); }
 void Screenshot::resumeZoom() { resumeScreenZoom(); }
 
