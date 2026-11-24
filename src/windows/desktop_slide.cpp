@@ -23,6 +23,7 @@
 
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
+#include "touchpad_swipe.hpp"
 #include "virtual_desktops.hpp"
 #include "window_motion.hpp"
 #include "window_tracker.hpp"
@@ -266,8 +267,8 @@ void DesktopSlide::swipeUpdate(double offset) {
 	}
 	auto from = this->swipeFrom;
 	auto way = offset > 0 ? 1 : (offset < 0 ? -1 : 0);
-	auto to = from + way;
-	if (way == 0 || to < 0 || to >= desktops->count()) {
+	auto to = way == 0 ? -1 : this->swipeTarget(way);
+	if (to < 0) {
 		to = from;
 		offset = 0;
 	}
@@ -290,9 +291,37 @@ void DesktopSlide::swipeUpdate(double offset) {
 }
 
 bool DesktopSlide::swipeCanGo(int way) const {
+	return this->swipeTarget(way) >= 0;
+}
+
+qsizetype DesktopSlide::swipeTarget(int way) const {
+	auto* tracker = WindowTracker::instance();
 	auto* desktops = VirtualDesktops::instance();
-	auto to = (this->swiping ? this->swipeFrom : desktops->shownIndex()) + way;
-	return to >= 0 && to < desktops->count();
+	if (tracker == nullptr) return -1;
+
+	QSet<qsizetype> occupied;
+	for (auto* window: tracker->windows()) {
+		if (!Scratchpad::holds(window)) occupied.insert(window->desktop());
+	}
+	auto from = this->swiping ? this->swipeFrom : desktops->shownIndex();
+	auto to = swipeDestination(from, way, desktops->count(), [&occupied](qsizetype desktop) {
+		return occupied.contains(desktop);
+	});
+	return to < VirtualDesktops::MAX_DESKTOPS ? to : -1;
+}
+
+void DesktopSlide::goTo(qsizetype to) {
+	auto* desktops = VirtualDesktops::instance();
+	if (to < desktops->count()) {
+		desktops->switchToAsync(to);
+		return;
+	}
+	qCDebug(logSlide) << "Swipe creates desktop" << to;
+	desktops->ensureCount(to + 1, [this, desktops, to, from = this->swipeFrom](bool created) {
+		if (this->swiping || (this->overlay != nullptr && this->target != to)) return;
+		if (created) desktops->switchToAsync(to);
+		else if (this->overlay != nullptr) this->retarget(from);
+	});
 }
 
 void DesktopSlide::swipeEnd(SwipeRelease release) {
@@ -305,7 +334,8 @@ void DesktopSlide::swipeEnd(SwipeRelease release) {
 	};
 	if (this->overlay == nullptr) {
 		if (this->swipeOffset != 0 && goesBy(this->swipeOffset)) {
-			VirtualDesktops::instance()->switchToAsync(this->swipeFrom + (this->swipeOffset > 0 ? 1 : -1));
+			auto to = this->swipeTarget(this->swipeOffset > 0 ? 1 : -1);
+			if (to >= 0) this->goTo(to);
 		}
 		return;
 	}
@@ -328,7 +358,7 @@ void DesktopSlide::swipeEnd(SwipeRelease release) {
 		this->commitSent = false;
 		this->manual = false;
 	}
-	if (to != this->swipeFrom) VirtualDesktops::instance()->switchToAsync(to);
+	if (to != this->swipeFrom) this->goTo(to);
 }
 
 bool DesktopSlide::start(qsizetype from, qsizetype to) {

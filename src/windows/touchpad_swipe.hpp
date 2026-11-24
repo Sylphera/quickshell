@@ -13,6 +13,13 @@ struct TouchpadContact {
 	double y = 0;
 };
 
+[[nodiscard]] qsizetype swipeDestination(
+    qsizetype from,
+    int way,
+    qsizetype count,
+    const std::function<bool(qsizetype)>& occupied
+);
+
 class TouchpadSwipe {
 public:
 	enum class Action : quint8 {

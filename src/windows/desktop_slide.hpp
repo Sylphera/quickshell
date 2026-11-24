@@ -53,6 +53,8 @@ private:
 		bool fullscreen = false;
 	};
 
+	[[nodiscard]] qsizetype swipeTarget(int way) const;
+	void goTo(qsizetype to);
 	bool start(qsizetype from, qsizetype to);
 	void retarget(qsizetype to);
 	bool addLiveDesktop(qsizetype desktop);

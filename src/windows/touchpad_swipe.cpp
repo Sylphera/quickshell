@@ -25,6 +25,18 @@ constexpr double UNITS_PER_MM = 1000 / 25.4 * LIBINPUT_BASELINE * LIBINPUT_TOUCH
 
 }
 
+qsizetype swipeDestination(
+    qsizetype from,
+    int way,
+    qsizetype count,
+    const std::function<bool(qsizetype)>& occupied
+) {
+	for (auto to = from + way; to >= 0 && to < count; to += way) {
+		if (occupied(to)) return to;
+	}
+	return way > 0 && occupied(from) ? from + 1 : -1;
+}
+
 TouchpadSwipe::TouchpadSwipe(std::function<bool(int)> canGo): canGo(std::move(canGo)) {}
 
 TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts, double timeMs) {

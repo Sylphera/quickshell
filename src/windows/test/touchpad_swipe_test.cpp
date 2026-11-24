@@ -6,6 +6,7 @@
 
 #include "touchpad_swipe.hpp"
 
+using qs::windows::swipeDestination;
 using qs::windows::TouchpadContact;
 using qs::windows::TouchpadSwipe;
 using Action = TouchpadSwipe::Action;
@@ -208,6 +209,32 @@ private slots:
 		QCOMPARE(hand.ends, 0);
 		hand.move(-20, 0, 40);
 		QVERIFY(hand.last.offset < 0.31);
+	}
+
+	void swipingSkipsEmptyDesktops() {
+		auto occupied = [](qsizetype desktop) { return desktop == 0 || desktop == 3; };
+		QCOMPARE(swipeDestination(0, 1, 4, occupied), 3);
+		QCOMPARE(swipeDestination(3, -1, 4, occupied), 0);
+		QCOMPARE(swipeDestination(1, 1, 4, occupied), 3);
+		QCOMPARE(swipeDestination(2, -1, 4, occupied), 0);
+	}
+
+	void swipingPastTheLastOccupiedDesktopGoesToANewOne() {
+		auto occupied = [](qsizetype desktop) { return desktop <= 2; };
+		QCOMPARE(swipeDestination(2, 1, 3, occupied), 3);
+		QCOMPARE(swipeDestination(2, 1, 10, occupied), 3);
+	}
+
+	void swipingPastAnEmptyDesktopGoesNowhere() {
+		auto occupied = [](qsizetype desktop) { return desktop <= 2; };
+		QCOMPARE(swipeDestination(3, 1, 4, occupied), -1);
+		QCOMPARE(swipeDestination(3, 1, 10, occupied), -1);
+		QCOMPARE(swipeDestination(3, -1, 4, occupied), 2);
+	}
+
+	void swipingBeforeTheFirstDesktopGoesNowhere() {
+		QCOMPARE(swipeDestination(0, -1, 3, [](qsizetype) { return true; }), -1);
+		QCOMPARE(swipeDestination(2, -1, 3, [](qsizetype desktop) { return desktop == 2; }), -1);
 	}
 
 	void theOffsetStopsAtOneDesktop() {
