@@ -22,6 +22,7 @@ qt_add_library(quickshell-windows STATIC
 	inactive_dim.cpp
 	kill_mode.cpp
 	screen_zoom.cpp
+	cursor_image.cpp
 	dim_plan.cpp
 	window_snap.cpp
 	layer_order.cpp
@@ -148,6 +149,8 @@ target_link_libraries(quickshell-windows PRIVATE
 	shell32
 	dwmapi
 	dcomp
+	d3dcompiler
+	magnification
 	gdi32
 	advapi32
 	bcrypt

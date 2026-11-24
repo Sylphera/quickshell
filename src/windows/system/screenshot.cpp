@@ -228,6 +228,8 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 }
 
 void Screenshot::freezeZoom() { freezeScreenZoom(); }
+void Screenshot::suspendZoom() { suspendScreenZoom(); }
+void Screenshot::resumeZoom() { resumeScreenZoom(); }
 
 QVariantMap Screenshot::captureZoom(const QString& path) const {
 	const auto capture = this->captures.constFind(QFileInfo(localPath(path)).absoluteFilePath());
@@ -240,13 +242,6 @@ QVariantMap Screenshot::captureZoom(const QString& path) const {
 	    {"width", capture->image.width()},
 	    {"height", capture->image.height()},
 	};
-}
-
-void Screenshot::finishZoomPreview(const QString& path) {
-	auto capture = this->captures.find(QFileInfo(localPath(path)).absoluteFilePath());
-	if (capture == this->captures.end() || !capture->zoomPreview.monitor) return;
-	capture->zoomPreview = {};
-	resetScreenZoom();
 }
 
 void Screenshot::finishCaptureRequest(int requestId, bool ok, const QImage& image, const ScreenZoomView& zoomPreview) {

@@ -1,4 +1,5 @@
 #include "screen_zoom.hpp"
+#include "cursor_image.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,7 @@
 #include <dcomp.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
+#include <magnification.h>
 #include <inspectable.h>
 #include <unknwn.h>
 
@@ -97,7 +99,7 @@ public:
 
 	bool invalid() const { return this->displayChanged || this->closed->load(); }
 
-	void render(float level, POINT cursor) {
+	void render(float level, POINT cursor, bool hidden, bool held) {
 		if (auto frame = this->pool.TryGetNextFrame()) {
 			const auto frameSize = frame.ContentSize();
 			if (frameSize.Width != this->size.Width || frameSize.Height != this->size.Height)
@@ -110,9 +112,14 @@ public:
 			winrt::check_hresult(this->swapChain->GetBuffer(
 			    0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
 			this->context->CopyResource(backBuffer.get(), texture.get());
+			this->frameDirty = true;
+		}
+
+		if (this->frameDirty && !held) {
 			const auto present = this->swapChain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
 			if (present != DXGI_ERROR_WAS_STILL_DRAWING) {
 				winrt::check_hresult(present);
+				this->frameDirty = false;
 				this->hasFrame = true;
 				this->captureTime.restart();
 			}
@@ -120,7 +127,7 @@ public:
 
 		if (!this->hasFrame && this->captureTime.hasExpired(1500))
 			winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
-		if (!this->hasFrame || level <= 1.0f || !PtInRect(&this->bounds, cursor)) {
+		if (hidden || !this->hasFrame || level <= 1.0f || !PtInRect(&this->bounds, cursor)) {
 			if (IsWindowVisible(this->host)) {
 				ShowWindow(this->host, SW_HIDE);
 				setVisibleView({});
@@ -130,6 +137,8 @@ public:
 
 		const auto transformChanged = level != this->lastLevel || cursor.x != this->lastCursor.x
 		    || cursor.y != this->lastCursor.y;
+		const auto cursorChanged = this->updateCursor(cursor);
+		if (cursorChanged && !transformChanged) winrt::check_hresult(this->composition->Commit());
 		if (transformChanged) {
 			D2D_MATRIX_3X2_F transform {};
 			transform._11 = level;
@@ -152,6 +161,8 @@ public:
 		}
 		if (!visible || transformChanged) setVisibleView({this->monitor, level, this->offset});
 	}
+
+	bool shown() const { return IsWindowVisible(this->host) != FALSE; }
 
 private:
 	bool hasShellWindowAbove() const {
@@ -242,13 +253,58 @@ private:
 		winrt::check_hresult(this->composition->CreateVisual(this->visual.put()));
 		winrt::check_hresult(this->visual->SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR));
 		winrt::check_hresult(this->visual->SetContent(this->swapChain.get()));
+		winrt::check_hresult(this->composition->CreateVisual(this->cursorVisual.put()));
+		winrt::check_hresult(this->visual->AddVisual(this->cursorVisual.get(), TRUE, nullptr));
 		winrt::check_hresult(this->target->SetRoot(this->visual.get()));
 		winrt::check_hresult(this->composition->Commit());
+	}
+
+	bool updateCursor(POINT cursor) {
+		auto changed = false;
+		const auto handle = currentCursorHandle();
+		if (handle != nullptr && handle != this->cursorHandle) {
+			this->cursorHandle = handle;
+			const auto shape = cursorImage(handle);
+			if (!shape.image.isNull()) {
+				const auto width = static_cast<UINT>(shape.image.width());
+				const auto height = static_cast<UINT>(shape.image.height());
+				winrt::com_ptr<IDCompositionSurface> surface;
+				winrt::check_hresult(this->composition->CreateSurface(
+				    width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, surface.put()));
+				winrt::com_ptr<IDXGISurface> drawing;
+				POINT at {};
+				winrt::check_hresult(surface->BeginDraw(nullptr, winrt::guid_of<IDXGISurface>(), drawing.put_void(), &at));
+				const D3D11_BOX box {static_cast<UINT>(at.x), static_cast<UINT>(at.y), 0,
+				    static_cast<UINT>(at.x) + width, static_cast<UINT>(at.y) + height, 1};
+				this->context->UpdateSubresource(drawing.as<ID3D11Texture2D>().get(), 0, &box,
+				    shape.image.constBits(), static_cast<UINT>(shape.image.bytesPerLine()), 0);
+				winrt::check_hresult(surface->EndDraw());
+				winrt::check_hresult(this->cursorVisual->SetContent(surface.get()));
+				this->cursorSurface = surface;
+				this->cursorHotspot = shape.hotspot;
+				changed = true;
+			}
+		}
+
+		if (changed || cursor.x != this->cursorAt.x || cursor.y != this->cursorAt.y) {
+			winrt::check_hresult(this->cursorVisual->SetOffsetX(
+			    static_cast<float>(cursor.x - this->bounds.left - this->cursorHotspot.x())));
+			winrt::check_hresult(this->cursorVisual->SetOffsetY(
+			    static_cast<float>(cursor.y - this->bounds.top - this->cursorHotspot.y())));
+			this->cursorAt = cursor;
+			changed = true;
+		}
+		return changed;
 	}
 
 	HWND host = nullptr;
 	HMONITOR monitor = nullptr;
 	QPointF offset;
+	winrt::com_ptr<IDCompositionVisual> cursorVisual;
+	winrt::com_ptr<IDCompositionSurface> cursorSurface;
+	HCURSOR cursorHandle = nullptr;
+	QPoint cursorHotspot;
+	POINT cursorAt {-1, -1};
 	RECT bounds {};
 	winrt::Windows::Graphics::SizeInt32 size {};
 	winrt::com_ptr<ID3D11Device> device;
@@ -265,6 +321,7 @@ private:
 	POINT lastCursor {};
 	float lastLevel = 1.0f;
 	bool hasFrame = false;
+	bool frameDirty = false;
 	bool displayChanged = false;
 };
 
@@ -294,6 +351,7 @@ public:
 	}
 
 	void adjust(int steps) {
+		if (this->suspended) return;
 		const auto next = std::clamp(this->target + steps * 3, 10, 30);
 		if (next == this->target) return;
 		if (!this->surface) {
@@ -322,6 +380,11 @@ public:
 	void reset() {
 		this->frames.stop();
 		this->frozen.invalidate();
+		this->resumed.invalidate();
+		this->suspended = false;
+		this->hideCursor(false);
+		this->shownSince.invalidate();
+		this->leaving.invalidate();
 		setVisibleView({});
 		this->surface.reset();
 		this->animation.invalidate();
@@ -332,7 +395,32 @@ public:
 		if (this->surface) this->frozen.start();
 	}
 
+	void suspend() {
+		this->frozen.invalidate();
+		this->suspended = this->surface != nullptr;
+	}
+
+	void resume() {
+		this->frozen.invalidate();
+		if (!this->suspended) return;
+		this->suspended = false;
+		this->resumed.start();
+	}
+
 private:
+	void hideCursor(bool hide) {
+		if (hide == this->cursorHidden) return;
+		if (hide && !this->magnifier) this->magnifier = MagInitialize() != FALSE;
+		if (!this->magnifier) return;
+		if (!MagShowSystemCursor(hide ? FALSE : TRUE)) return;
+		this->cursorHidden = hide;
+		POINT cursor {};
+		if (!hide && GetCursorPos(&cursor)) {
+			SetCursorPos(cursor.x + 1, cursor.y);
+			SetCursorPos(cursor.x, cursor.y);
+		}
+	}
+
 	float level() const {
 		return animationLevel(this->from, this->target / 10.0f, this->animation.elapsed());
 	}
@@ -350,14 +438,42 @@ private:
 			this->frozen.invalidate();
 		}
 
-		const auto zoom = this->level();
+		auto zoom = this->level();
 		POINT cursor {};
-		if ((zoom <= 1.0f && this->target == 10) || !GetCursorPos(&cursor)) {
+		if (!GetCursorPos(&cursor)) {
 			this->reset();
 			return;
 		}
+		if (zoom <= 1.0f && this->target == 10) {
+			if (this->cursorHidden && !this->leaving.isValid()) {
+				this->hideCursor(false);
+				this->leaving.start();
+				this->leftAt = cursor;
+			}
+			CURSORINFO info {};
+			info.cbSize = sizeof(info);
+			const auto showing = GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING) != 0;
+			const auto moved = cursor.x != this->leftAt.x || cursor.y != this->leftAt.y;
+			if (!this->leaving.isValid() || (showing && this->leaving.hasExpired(50)) || moved
+			    || this->leaving.hasExpired(10000)) {
+				this->reset();
+				return;
+			}
+			try {
+				this->surface->render(1.0001f, cursor, false, false);
+			} catch (const winrt::hresult_error& error) {
+				this->reset();
+			}
+			return;
+		}
+		this->leaving.invalidate();
 		try {
-			this->surface->render(zoom, cursor);
+			const auto held = this->suspended || (this->resumed.isValid() && !this->resumed.hasExpired(60));
+			this->surface->render(zoom, cursor, this->suspended, held);
+			const auto shown = this->surface->shown() && !this->suspended;
+			if (!shown) this->shownSince.invalidate();
+			else if (!this->shownSince.isValid()) this->shownSince.start();
+			this->hideCursor(this->shownSince.isValid() && this->shownSince.hasExpired(60));
 		} catch (const winrt::hresult_error& error) {
 			qWarning() << "Screen zoom rendering failed:" << Qt::hex << error.code().value;
 			this->reset();
@@ -367,10 +483,17 @@ private:
 	QTimer frames {this};
 	QElapsedTimer animation;
 	QElapsedTimer frozen;
+	QElapsedTimer resumed;
+	QElapsedTimer leaving;
+	POINT leftAt {};
 	std::unique_ptr<ZoomSurface> surface;
 	float from = 1.0f;
 	int target = 10;
 	bool apartment = false;
+	bool suspended = false;
+	bool magnifier = false;
+	bool cursorHidden = false;
+	QElapsedTimer shownSince;
 };
 
 class ZoomThread: public QObject {
@@ -394,6 +517,16 @@ public:
 
 	void freeze() {
 		QMetaObject::invokeMethod(this->zoom, [worker = this->zoom] { worker->freeze(); },
+		    Qt::QueuedConnection);
+	}
+
+	void suspend() {
+		QMetaObject::invokeMethod(this->zoom, [worker = this->zoom] { worker->suspend(); },
+		    Qt::QueuedConnection);
+	}
+
+	void resume() {
+		QMetaObject::invokeMethod(this->zoom, [worker = this->zoom] { worker->resume(); },
 		    Qt::QueuedConnection);
 	}
 
@@ -426,6 +559,14 @@ void adjustScreenZoom(bool increase) {
 
 void freezeScreenZoom() {
 	if (auto* thread = zoomThread(false)) thread->freeze();
+}
+
+void suspendScreenZoom() {
+	if (auto* thread = zoomThread(false)) thread->suspend();
+}
+
+void resumeScreenZoom() {
+	if (auto* thread = zoomThread(false)) thread->resume();
 }
 
 void resetScreenZoom() {

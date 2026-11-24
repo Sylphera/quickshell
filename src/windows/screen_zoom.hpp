@@ -15,6 +15,8 @@ ScreenZoomView screenZoomView();
 
 void adjustScreenZoom(bool increase);
 void freezeScreenZoom();
+void suspendScreenZoom();
+void resumeScreenZoom();
 void resetScreenZoom();
 
 }
