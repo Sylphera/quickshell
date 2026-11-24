@@ -21,6 +21,7 @@
 #include "../keyboard_hook.hpp"
 #include "../kill_mode.hpp"
 #include "../scratchpad.hpp"
+#include "../screen_zoom.hpp"
 #include "../tiling.hpp"
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
@@ -477,6 +478,9 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		Scratchpad::instance()->toggle();
 	} else if (name == "kill") {
 		KillMode::instance()->start();
+	} else if (name == "screenzoom") {
+		if (args == "in" || args == "out") adjustScreenZoom(args == "in");
+		else if (args == "reset") resetScreenZoom();
 	} else if (name == "pseudo" || name == "focusmonitor"
 	           || name == "cyclenext" || name == "movecurrentworkspacetomonitor"
 	           || name == "swapnext" || name == "togglegroup" || name == "submap")

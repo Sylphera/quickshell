@@ -37,6 +37,21 @@ QString localPath(const QString& path) {
 	if (path.startsWith("file:", Qt::CaseInsensitive)) return QUrl(path).toLocalFile();
 	return path;
 }
+QImage grabScreenshot(HMONITOR monitor, const ScreenZoomView& view) {
+	auto image = capture::CaptureThread::instance()->grabMonitor(monitor, CAPTURE_TIMEOUT_MS);
+	if (image.isNull() || monitor != view.monitor) return image;
+
+	auto zoomed = QImage(image.size(), image.format());
+	if (zoomed.isNull()) return {};
+	zoomed.fill(Qt::black);
+	QPainter painter(&zoomed);
+	painter.translate(view.offset);
+	painter.scale(view.factor, view.factor);
+	painter.drawImage(QPoint(), image);
+	painter.end();
+	return zoomed;
+}
+
 } // namespace
 
 Screenshot::Screenshot(QObject* parent): QObject(parent) {
@@ -66,6 +81,7 @@ bool Screenshot::captureScreen(const QString& screenName, const QString& path) {
 
 	QList<Shot> shots;
 	QRect bounds;
+	const auto zoomView = screenZoomView();
 
 	for (auto* screen: screens) {
 		auto* monitor = monitorForScreen(screen);
@@ -76,7 +92,8 @@ bool Screenshot::captureScreen(const QString& screenName, const QString& path) {
 			return false;
 		}
 
-		auto image = capture::CaptureThread::instance()->grabMonitor(monitor, CAPTURE_TIMEOUT_MS);
+		if (monitor == zoomView.monitor) resetScreenZoom();
+		auto image = grabScreenshot(monitor, zoomView);
 		if (image.isNull()) {
 			qCWarning(logScreenshot) << "Capturing" << screen->name() << "timed out or failed";
 			return false;
@@ -114,7 +131,7 @@ bool Screenshot::captureScreen(const QString& screenName, const QString& path) {
 	return true;
 }
 
-int Screenshot::captureScreenAsync(const QString& screenName, const QString& path) {
+int Screenshot::captureScreenAsync(const QString& screenName, const QString& path, bool keepZoom) {
 	struct Target {
 		HMONITOR monitor = nullptr;
 		QPoint topLeft;
@@ -141,9 +158,18 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 	}
 
 	capture::CaptureThread::instance();
+	const auto zoomView = screenZoomView();
+	ScreenZoomView zoomPreview;
+	for (const auto& target: targets) {
+		if (target.monitor == zoomView.monitor) {
+			if (keepZoom) zoomPreview = zoomView;
+			else resetScreenZoom();
+			break;
+		}
+	}
 	auto job = this->jobs.start(localPath(path));
 
-	QThreadPool::globalInstance()->start([self = QPointer(this), job, targets]() {
+	QThreadPool::globalInstance()->start([self = QPointer(this), job, targets, zoomView, zoomPreview]() {
 		QImage result;
 		QRect bounds;
 		QList<QPair<QPoint, QImage>> shots;
@@ -155,7 +181,7 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 				break;
 			}
 
-			auto image = capture::CaptureThread::instance()->grabMonitor(target.monitor, CAPTURE_TIMEOUT_MS);
+			auto image = grabScreenshot(target.monitor, zoomView);
 			if (image.isNull()) {
 				qCWarning(logScreenshot) << "Capturing" << target.name << "timed out or failed";
 				ok = false;
@@ -189,8 +215,8 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 
 		QMetaObject::invokeMethod(
 		    app,
-		    [self, job, ok, result]() {
-			    if (self) self->finishCaptureRequest(job.id, ok, result);
+		    [self, job, ok, result, zoomPreview]() {
+			    if (self) self->finishCaptureRequest(job.id, ok, result, zoomPreview);
 			    else QFile::remove(job.partPath);
 		    },
 		    Qt::QueuedConnection
@@ -200,9 +226,29 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 	return job.id;
 }
 
-void Screenshot::finishCaptureRequest(int requestId, bool ok, const QImage& image) {
+QVariantMap Screenshot::captureZoom(const QString& path) const {
+	const auto capture = this->captures.constFind(QFileInfo(localPath(path)).absoluteFilePath());
+	if (capture == this->captures.cend() || !capture->zoomPreview.monitor) return {};
+	const auto& view = capture->zoomPreview;
+	return {
+	    {"factor", view.factor},
+	    {"x", view.offset.x()},
+	    {"y", view.offset.y()},
+	    {"width", capture->image.width()},
+	    {"height", capture->image.height()},
+	};
+}
+
+void Screenshot::finishZoomPreview(const QString& path) {
+	auto capture = this->captures.find(QFileInfo(localPath(path)).absoluteFilePath());
+	if (capture == this->captures.end() || !capture->zoomPreview.monitor) return;
+	capture->zoomPreview = {};
+	resetScreenZoom();
+}
+
+void Screenshot::finishCaptureRequest(int requestId, bool ok, const QImage& image, const ScreenZoomView& zoomPreview) {
 	auto path = this->jobs.finish(requestId, ok);
-	if (!path.isEmpty()) this->keepCapture(path, image);
+	if (!path.isEmpty()) this->keepCapture(path, image, zoomPreview);
 	emit this->captureFinished(requestId, !path.isEmpty());
 }
 
@@ -288,12 +334,12 @@ QString Screenshot::pixelAt(const QString& path, int x, int y) {
 	return QColor::fromRgb(this->pixels.pixel(x, y)).name(QColor::HexRgb);
 }
 
-void Screenshot::keepCapture(const QString& path, const QImage& image) {
+void Screenshot::keepCapture(const QString& path, const QImage& image, const ScreenZoomView& zoomPreview) {
 	auto info = QFileInfo(path);
 
 	this->captures.insert(
 	    info.absoluteFilePath(),
-	    {.image = image, .modified = info.lastModified(), .size = info.size()}
+	    {.image = image, .modified = info.lastModified(), .size = info.size(), .zoomPreview = zoomPreview}
 	);
 
 	this->capturesExpiry.start();

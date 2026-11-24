@@ -21,6 +21,7 @@ qt_add_library(quickshell-windows STATIC
 	window_rules.cpp
 	inactive_dim.cpp
 	kill_mode.cpp
+	screen_zoom.cpp
 	dim_plan.cpp
 	window_snap.cpp
 	layer_order.cpp

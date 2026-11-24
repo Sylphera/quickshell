@@ -10,7 +10,9 @@
 #include <qtimer.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+#include <qvariant.h>
 
+#include "../screen_zoom.hpp"
 #include "screenshot_jobs.hpp"
 
 namespace qs::windows::sys {
@@ -24,7 +26,9 @@ public:
 	explicit Screenshot(QObject* parent = nullptr);
 
 	Q_INVOKABLE bool captureScreen(const QString& screenName, const QString& path);
-	Q_INVOKABLE int captureScreenAsync(const QString& screenName, const QString& path);
+	Q_INVOKABLE int captureScreenAsync(const QString& screenName, const QString& path, bool keepZoom = false);
+	Q_INVOKABLE QVariantMap captureZoom(const QString& path) const;
+	Q_INVOKABLE void finishZoomPreview(const QString& path);
 	Q_INVOKABLE void cancelCapture(int requestId);
 
 	Q_INVOKABLE bool
@@ -43,11 +47,12 @@ private:
 		QImage image;
 		QDateTime modified;
 		qint64 size = -1;
+		ScreenZoomView zoomPreview;
 	};
 
-	void finishCaptureRequest(int requestId, bool ok, const QImage& image);
+	void finishCaptureRequest(int requestId, bool ok, const QImage& image, const ScreenZoomView& zoomPreview = {});
 	bool loadPixels(const QString& path);
-	void keepCapture(const QString& path, const QImage& image);
+	void keepCapture(const QString& path, const QImage& image, const ScreenZoomView& zoomPreview = {});
 	QImage takeCapture(const QFileInfo& info);
 
 	QString pixelsPath;
