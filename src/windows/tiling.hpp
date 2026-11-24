@@ -140,6 +140,7 @@ public:
 	void warnFullscreenConflict(TrackedWindow* source, qsizetype desktop = -1);
 	void restoreLeftFullscreen(TrackedWindow* window);
 
+	bool detachTile(TrackedWindow* window);
 	bool beginGestureMove(TrackedWindow* window);
 	void endGestureMove(TrackedWindow* window, std::optional<Edge> direction);
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
@@ -368,6 +369,7 @@ private:
 	void verify();
 	void onDeadline();
 	void drop(Managed& m, const QPoint& cursor);
+	bool insertAtCursor(Managed& m, const GUID& desktop, const QPoint& cursor);
 	void giveUp(Managed& m, const QRect& frame);
 	void markAll();
 
@@ -417,6 +419,8 @@ private:
 	QSet<TrackedWindow*> unverified;
 	TrackedWindow* dragging = nullptr;
 	QRect dragOrigin;
+	QPointer<TrackedWindow> detached;
+	Override detachedOverride = Override::None;
 	QPointer<TrackedWindow> regrab;
 	QSize regrabSize;
 	QPointF regrabAt;

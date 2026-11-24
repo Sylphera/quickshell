@@ -56,6 +56,11 @@ constexpr int ArrivalRetries = 90;
 constexpr double OcclusionMoveGrace = 0.05;
 constexpr double OcclusionStageLimit = 0.33;
 
+bool& sceneDuringDrag() {
+	static auto during = false;
+	return during;
+}
+
 std::function<bool(HWND)>& occlusionStager() {
 	static auto* stage = new std::function<bool(HWND)>();
 	return *stage;
@@ -1850,7 +1855,7 @@ void Scene::refresh() {
 		}
 		qCDebug(logDwindleScene) << "Scene host raised again; put back in the normal band" << over;
 	}
-	if (this->focused == nullptr && (GetAsyncKeyState(VK_LBUTTON) < 0 || GetAsyncKeyState(VK_RBUTTON) < 0
+	if (this->focused == nullptr && !sceneDuringDrag() && (GetAsyncKeyState(VK_LBUTTON) < 0 || GetAsyncKeyState(VK_RBUTTON) < 0
 	    || GetAsyncKeyState(VK_MBUTTON) < 0))
 	{
 		this->finish();
@@ -2329,6 +2334,8 @@ bool DwindleScene::animating() {
 		return entry.second != nullptr && entry.second->visible() && !entry.second->held();
 	});
 }
+
+void DwindleScene::setDuringDrag(bool during) { sceneDuringDrag() = during; }
 
 void DwindleScene::dismissAll() {
 	scenes().clear();

@@ -1110,6 +1110,7 @@ LRESULT SuperDragManager::onStarted(HWND hwnd, LPARAM flags) {
 
 	auto* window = tracker->windowFor(hwnd);
 	auto tiled = window != nullptr && tiling->isTiled(window);
+	if (tiled && (flags & FLAG_RESIZE) == 0) tiling->detachTile(window);
 	tracker->noteMoveSize(hwnd, true);
 	this->guiDrag.notified = true;
 	return STARTED_WATCHED | (tiled ? STARTED_TILED_MOVE : 0);

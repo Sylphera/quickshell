@@ -45,6 +45,7 @@ public:
 	static QRect frameForDrag(HWND window);
 	static void onOcclusion(std::function<bool(HWND)> stage);
 	static void onRelease(std::function<void(const QList<HWND>&)> release);
+	static void setDuringDrag(bool during);
 	static void dismissAll();
 	static void dismissFor(HWND window);
 	static void drop(HMONITOR monitor);

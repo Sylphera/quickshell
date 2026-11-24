@@ -120,6 +120,7 @@ constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
 constexpr int HUNG_RETRY_MS = 500;
 constexpr int HEAL_MS = 500;
+constexpr double DETACHED_SIZE = 0.8489;
 constexpr int UNMAXIMIZE_LIMIT = 6;
 constexpr qint64 UNMAXIMIZE_RESET_MS = 500;
 constexpr int UNMAXIMIZE_SETTLE_MS = 400;
@@ -1326,6 +1327,10 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	this->dirtyWindows.remove(window);
 	this->unverified.remove(window);
 	if (this->dragging == window) this->dragging = nullptr;
+	if (this->detached == window) {
+		this->detached = nullptr;
+		DwindleScene::setDuringDrag(false);
+	}
 
 	for (auto& [key, layout]: this->layouts) {
 		if (layout->lastFocused == window) layout->lastFocused = nullptr;
@@ -3757,6 +3762,23 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 			return;
 		}
 	}
+	if (window != nullptr && this->detached == window) {
+		this->detached = nullptr;
+		DwindleScene::setDuringDrag(false);
+		auto found = this->managed.find(window);
+		if (found == this->managed.end()) return;
+		auto& m = found->second;
+		m.override = this->detachedOverride;
+		const auto index = window->desktop();
+		const auto special = Scratchpad::holds(window);
+		if (!special && (index < 0 || index >= this->desktops->count())) {
+			this->markWindow(window);
+			return;
+		}
+		const auto desktop = special ? SPECIAL_DESKTOP : this->desktops->desktops().at(index).id;
+		if (!this->insertAtCursor(m, desktop, cursorPos())) this->markWindow(window);
+		return;
+	}
 	if (window != this->dragging) return;
 	this->dragging = nullptr;
 	const auto origin = std::exchange(this->dragOrigin, QRect());
@@ -3810,6 +3832,66 @@ void TilingManager::onMoveSizeEnded(TrackedWindow* window) {
 	this->markLayout(layout);
 }
 
+bool TilingManager::detachTile(TrackedWindow* window) {
+	auto iter = this->managed.find(window);
+	if (iter == this->managed.end() || this->detached != nullptr || this->dragging != nullptr) return false;
+	auto& m = iter->second;
+	auto* layout = m.layout;
+	auto* hwnd = window->hwnd();
+	if (layout == nullptr || layout->tree->kind() != tiling::Kind::Dwindle || m.fullscreen() || m.offscreen
+	    || this->stateOf(m) != State::Tiled || IsZoomed(hwnd) || IsHungAppWindow(hwnd))
+		return false;
+
+	const auto shown = this->managedFrame(m);
+	const auto point = cursorPos();
+	const auto tile = this->tileRect(layout, window);
+	if (shown.isEmpty() || tile.isEmpty()) return false;
+	const auto size = QSizeF(tile.size()) * DETACHED_SIZE;
+	const auto across = qBound(0.0, static_cast<double>(point.x() - shown.left()) / shown.width(), 1.0);
+	const auto down = qBound(0.0, static_cast<double>(point.y() - shown.top()) / shown.height(), 1.0);
+
+	this->restoreTinyCorners(m);
+	this->detached = window;
+	DwindleScene::setDuringDrag(true);
+	this->detachedOverride = m.override;
+	m.override = Override::Float;
+	m.fresh = false;
+	layout->animateRearrangement = true;
+	this->takeOut(m);
+	setFrame(
+	    hwnd,
+	    QRect(
+	        point - QPoint(qRound(across * size.width()), qRound(down * size.height())),
+	        size.toSize().expandedTo(QSize(1, 1))
+	    ),
+	    false,
+	    nullptr,
+	    true
+	);
+	return true;
+}
+
+bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint& cursor) {
+	const auto point = POINT {cursor.x(), cursor.y()};
+	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
+	if (IsEqualGUID(desktop, SPECIAL_DESKTOP)) screen = screenForMonitor(Scratchpad::instance()->monitor());
+	auto* layout = this->layoutAt(desktop, screen, true);
+	if (layout == nullptr || layout->tree->kind() != tiling::Kind::Dwindle) return false;
+
+	const auto frame = this->managedFrame(m);
+	if (m.layout != nullptr) {
+		m.layout->animateRearrangement = true;
+		this->takeOut(m);
+	}
+	layout->animateRearrangement = true;
+	this->insertInto(m, layout, nullptr, &cursor);
+	m.dropped = false;
+	m.floated = false;
+	m.target = frame;
+	m.fullscreenToggled = true;
+	return true;
+}
+
 bool TilingManager::beginGestureMove(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end() || iter->second.fullscreen() || this->dragging != nullptr) return false;
@@ -3840,6 +3922,7 @@ void TilingManager::endGestureMove(TrackedWindow* window, std::optional<Edge> di
 void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	auto* from = m.layout;
 	auto self = idOf(m.window);
+	if (from->tree->kind() == tiling::Kind::Dwindle && this->insertAtCursor(m, from->desktop, cursor)) return;
 
 	for (auto& [key, layout]: this->layouts) {
 		if (!IsEqualGUID(layout->desktop, from->desktop) || !this->layoutAlive(layout.get())) {
