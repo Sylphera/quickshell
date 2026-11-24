@@ -2092,7 +2092,7 @@ void takeBackKept(HMONITOR monitor) {
 float DwindleScene::cornerRadius(HWND window) { return windowRadius(window); }
 
 bool DwindleScene::enabled() {
-	static const auto enabled = qEnvironmentVariableIntValue("II_DWINDLE_SCENE") == 1;
+	static const auto enabled = !qEnvironmentVariableIsSet("II_DWINDLE_SCENE") || qEnvironmentVariableIntValue("II_DWINDLE_SCENE") != 0;
 	return enabled;
 }
 
