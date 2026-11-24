@@ -1750,7 +1750,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 				    || this->stateOf(found->second) != State::Tiled)
 					return;
 				qCDebug(logTiling) << "Restoring remembered fullscreen for" << fullscreenKey(tracked.data());
-				this->toggleFullscreen(tracked.data());
+				this->toggleFullscreen(tracked.data(), false);
 			});
 		}
 		if (pacedOpening) {
@@ -4563,7 +4563,7 @@ void TilingManager::restoreLeftFullscreen(TrackedWindow* window) {
 	if (mark == static_cast<int>(LeftMark::FullscreenOverMaximized)) ShowWindowAsync(hwnd, SW_MAXIMIZE);
 }
 
-bool TilingManager::toggleFullscreen(TrackedWindow* window) {
+bool TilingManager::toggleFullscreen(TrackedWindow* window, bool follow) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return false;
 	auto& m = iter->second;
@@ -4613,7 +4613,7 @@ bool TilingManager::toggleFullscreen(TrackedWindow* window) {
 		this->updateFullscreenLook(m);
 		if (m.fullscreenTileRadius.has_value()) WinPanelWindow::prepareFullscreenBarHandoff(monitor);
 		this->markLayout(m.layout);
-		window->activate();
+		window->activate(follow);
 		rememberFullscreen(window, true);
 	} else {
 		this->leaveFullscreen(m);

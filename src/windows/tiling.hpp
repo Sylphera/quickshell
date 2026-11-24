@@ -127,7 +127,7 @@ public:
 	bool toggleFit(TrackedWindow* window);
 	bool toggleFullWidth(TrackedWindow* window);
 	bool toggleMaximize(TrackedWindow* window);
-	bool toggleFullscreen(TrackedWindow* window);
+	bool toggleFullscreen(TrackedWindow* window, bool follow = true);
 	[[nodiscard]] TrackedWindow* specialFullscreenWindow() const;
 	[[nodiscard]] TrackedWindow* specialMaximizedWindow() const;
 	[[nodiscard]] TrackedWindow* specialCoveringWindow() const;
