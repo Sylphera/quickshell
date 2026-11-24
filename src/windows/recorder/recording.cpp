@@ -328,6 +328,7 @@ bool RecordingJob::record(QString* error) {
 			tick = skipTo;
 		}
 
+		capture.refresh();
 		while (!failed && this->tickTime(tick) <= now) {
 			auto time = this->tickTime(tick);
 			auto duration = this->tickTime(tick + 1) - time;

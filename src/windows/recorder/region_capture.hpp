@@ -22,6 +22,7 @@ public:
 
 	bool start(ID3D11Device* device, const QRect& region, bool cursor, QString* error);
 	void stop();
+	void refresh();
 
 	[[nodiscard]] ID3D11Texture2D* composite() const;
 	[[nodiscard]] bool primed() const;
