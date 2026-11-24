@@ -14,6 +14,7 @@ struct ScreenZoomView {
 ScreenZoomView screenZoomView();
 
 void adjustScreenZoom(bool increase);
+void freezeScreenZoom();
 void resetScreenZoom();
 
 }

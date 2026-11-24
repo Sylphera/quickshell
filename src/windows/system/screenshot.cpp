@@ -37,6 +37,7 @@ QString localPath(const QString& path) {
 	if (path.startsWith("file:", Qt::CaseInsensitive)) return QUrl(path).toLocalFile();
 	return path;
 }
+
 QImage grabScreenshot(HMONITOR monitor, const ScreenZoomView& view) {
 	auto image = capture::CaptureThread::instance()->grabMonitor(monitor, CAPTURE_TIMEOUT_MS);
 	if (image.isNull() || monitor != view.monitor) return image;
@@ -225,6 +226,8 @@ int Screenshot::captureScreenAsync(const QString& screenName, const QString& pat
 
 	return job.id;
 }
+
+void Screenshot::freezeZoom() { freezeScreenZoom(); }
 
 QVariantMap Screenshot::captureZoom(const QString& path) const {
 	const auto capture = this->captures.constFind(QFileInfo(localPath(path)).absoluteFilePath());

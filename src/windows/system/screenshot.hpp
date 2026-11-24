@@ -27,6 +27,7 @@ public:
 
 	Q_INVOKABLE bool captureScreen(const QString& screenName, const QString& path);
 	Q_INVOKABLE int captureScreenAsync(const QString& screenName, const QString& path, bool keepZoom = false);
+	Q_INVOKABLE void freezeZoom();
 	Q_INVOKABLE QVariantMap captureZoom(const QString& path) const;
 	Q_INVOKABLE void finishZoomPreview(const QString& path);
 	Q_INVOKABLE void cancelCapture(int requestId);

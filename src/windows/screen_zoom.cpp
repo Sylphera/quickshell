@@ -321,10 +321,15 @@ public:
 
 	void reset() {
 		this->frames.stop();
+		this->frozen.invalidate();
 		setVisibleView({});
 		this->surface.reset();
 		this->animation.invalidate();
 		this->target = 10;
+	}
+
+	void freeze() {
+		if (this->surface) this->frozen.start();
 	}
 
 private:
@@ -338,6 +343,11 @@ private:
 		    || this->surface->invalid()) {
 			this->reset();
 			return;
+		}
+
+		if (this->frozen.isValid()) {
+			if (!this->frozen.hasExpired(2000)) return;
+			this->frozen.invalidate();
 		}
 
 		const auto zoom = this->level();
@@ -356,6 +366,7 @@ private:
 
 	QTimer frames {this};
 	QElapsedTimer animation;
+	QElapsedTimer frozen;
 	std::unique_ptr<ZoomSurface> surface;
 	float from = 1.0f;
 	int target = 10;
@@ -379,6 +390,11 @@ public:
 		QMetaObject::invokeMethod(this->zoom, [worker = this->zoom, increase] {
 			worker->adjust(increase ? 1 : -1);
 		}, Qt::QueuedConnection);
+	}
+
+	void freeze() {
+		QMetaObject::invokeMethod(this->zoom, [worker = this->zoom] { worker->freeze(); },
+		    Qt::QueuedConnection);
 	}
 
 	void reset() {
@@ -406,6 +422,10 @@ ScreenZoomView screenZoomView() {
 
 void adjustScreenZoom(bool increase) {
 	if (auto* thread = zoomThread(increase)) thread->adjust(increase);
+}
+
+void freezeScreenZoom() {
+	if (auto* thread = zoomThread(false)) thread->freeze();
 }
 
 void resetScreenZoom() {
