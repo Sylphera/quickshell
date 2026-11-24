@@ -19,6 +19,7 @@
 #include <qtypes.h>
 
 #include "../keyboard_hook.hpp"
+#include "../kill_mode.hpp"
 #include "../scratchpad.hpp"
 #include "../tiling.hpp"
 #include "../util.hpp"
@@ -474,6 +475,8 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		this->centerWindow();
 	} else if (name == "togglespecialworkspace") {
 		Scratchpad::instance()->toggle();
+	} else if (name == "kill") {
+		KillMode::instance()->start();
 	} else if (name == "pseudo" || name == "focusmonitor"
 	           || name == "cyclenext" || name == "movecurrentworkspacetomonitor"
 	           || name == "swapnext" || name == "togglegroup" || name == "submap")

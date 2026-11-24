@@ -47,6 +47,7 @@ constexpr UINT WM_SD_STARTED = WM_APP + 1;
 constexpr UINT WM_SD_TILED_RESIZE = WM_APP + 2;
 constexpr UINT WM_SD_ENDED = WM_APP + 3;
 constexpr UINT WM_SD_WHEEL = WM_APP + 4;
+constexpr UINT WM_SD_SPECIAL = WM_APP + 20;
 constexpr UINT WM_SD_WORKSPACE_WHEEL = WM_APP + 5;
 constexpr UINT WM_SD_HOVER = WM_APP + 6;
 constexpr int REFOCUS_AFTER_CLOSE_MS = 100;
@@ -90,6 +91,7 @@ std::atomic<int> gSnapGapsOut = 0;          // NOLINT
 struct HookState {
 	bool active = false;
 	bool resize = false;
+	bool side = false;
 	DWORD elevationPid = 0;
 	DWORD elevationTime = 0;
 	bool elevated = false;
@@ -916,6 +918,19 @@ bool SuperDragManager::onMouseHook(WPARAM message, const MSLLHOOKSTRUCT* info) {
 		}
 	}
 
+	if (message == WM_XBUTTONUP && hook.side && HIWORD(info->mouseData) == XBUTTON1) {
+		hook.side = false;
+		return true;
+	}
+	if (message == WM_XBUTTONDOWN && HIWORD(info->mouseData) == XBUTTON1) {
+		auto* gui = gGuiWindow.load();
+		if (!gEnabled.load(std::memory_order_relaxed) || !superAlone() || gui == nullptr) return false;
+		if (!PostMessageW(gui, WM_SD_SPECIAL, 0, 0)) return false;
+		hook.side = true;
+		hotkeys::KeyboardHook::noteSuperChord();
+		return true;
+	}
+
 	auto resize = message == WM_RBUTTONDOWN;
 	if (message != WM_LBUTTONDOWN && !resize) return false;
 	if (!gEnabled.load(std::memory_order_relaxed) || !superAlone()) return false;
@@ -1011,6 +1026,7 @@ SuperDragManager::messageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 		}
 		return 0;
 	}
+	case WM_SD_SPECIAL: Scratchpad::instance()->toggle(); return 0;
 	case WM_SD_WHEEL:
 		if (auto* tiling = TilingManager::active()) {
 			tiling->focusColumnAt(
