@@ -215,6 +215,7 @@ void HyprlandToplevel::refreshIpcObject() {
 
 	auto* tiling = TilingManager::active();
 	auto floating = tiling != nullptr ? !tiling->isTiled(window) : fullscreen == 0;
+	const auto overviewRect = tiling != nullptr && fullscreen == 0 ? tiling->overviewTileRect(window) : QRect();
 
 	auto special = qs::windows::Scratchpad::instance()->contains(window);
 	auto workspaceObject = special
@@ -230,6 +231,8 @@ void HyprlandToplevel::refreshIpcObject() {
 	    {"hidden", false},
 	    {"at", QVariantList {rect.x(), rect.y()}},
 	    {"size", QVariantList {rect.width(), rect.height()}},
+	    {"overviewAt", overviewRect.isEmpty() ? QVariantList() : QVariantList {overviewRect.x(), overviewRect.y()}},
+	    {"overviewSize", overviewRect.isEmpty() ? QVariantList() : QVariantList {overviewRect.width(), overviewRect.height()}},
 	    {"workspace", workspaceObject},
 	    {"floating", floating},
 	    {"pseudo", false},

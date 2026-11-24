@@ -446,6 +446,18 @@ void Dispatcher::dispatchClassic(const QString& name, const QString& args) {
 		this->moveFocus(args);
 	} else if (name == "cyclenext") {
 		this->cycleFocus(args == "prev");
+	} else if (name == "overviewdrop") {
+		const auto fields = args.split(',');
+		auto* tiling = TilingManager::active();
+		if (fields.size() == 3 && tiling != nullptr && fields.at(0).startsWith("address:")) {
+			bool xOk = false;
+			bool yOk = false;
+			const auto x = fields.at(1).toDouble(&xOk);
+			const auto y = fields.at(2).toDouble(&yOk);
+			auto* window = this->resolveWindow(fields.at(0));
+			if (xOk && yOk && window && tiling->dropOverviewTile(window, QPointF(x, y)))
+				this->ipc->emitEvent("windowgeometry", "");
+		}
 	} else if (name == "movewindow") {
 		this->moveWindow(args);
 	} else if (name == "movewindowpixel") {

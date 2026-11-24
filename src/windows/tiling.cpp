@@ -3871,6 +3871,49 @@ bool TilingManager::detachTile(TrackedWindow* window) {
 	return true;
 }
 
+QRect TilingManager::overviewTileRect(TrackedWindow* window) const {
+	const auto iter = this->managed.find(window);
+	if (!this->mEnabled || iter == this->managed.end()) return {};
+	const auto& m = iter->second;
+	auto* layout = m.layout;
+	if (layout == nullptr || layout->special || !this->layoutAlive(layout)
+	    || m.mode != TileMode::Normal || this->stateOf(m) != State::Tiled
+	    || layout->tree->box(idOf(window)).isEmpty())
+		return {};
+
+	auto* screen = layout->screen.data();
+	const auto rects = monitorRects(monitorForScreen(screen));
+	if (!rects.valid) return {};
+	return ScreenMapper(screen->geometry(), rects.monitor, screen->devicePixelRatio())
+	    .toLogical(this->tileRect(layout, window));
+}
+
+bool TilingManager::dropOverviewTile(TrackedWindow* window, const QPointF& normalized) {
+	if (!(normalized.x() >= 0 && normalized.x() < 1 && normalized.y() >= 0 && normalized.y() < 1)
+	    || this->detached != nullptr || this->dragging != nullptr || this->overviewTileRect(window).isEmpty())
+		return false;
+
+	auto& managed = this->managed.at(window);
+	auto* layout = managed.layout;
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	if (!rects.valid || rects.work.isEmpty() || IsZoomed(window->hwnd()) || IsHungAppWindow(window->hwnd()))
+		return false;
+
+	layout->tree->compute(rects.work);
+	const QPoint point {
+	    rects.work.left() + static_cast<int>(normalized.x() * rects.work.width()),
+	    rects.work.top() + static_cast<int>(normalized.y() * rects.work.height()),
+	};
+	if (layout->tree->box(idOf(window)).contains(point)) return false;
+
+	this->drop(managed, point);
+	layout->tree->compute(rects.work);
+	for (auto id: layout->tree->ids()) {
+		if (auto* affected = this->windowOf(id)) emit this->windowTilingChanged(affected);
+	}
+	return true;
+}
+
 bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint& cursor) {
 	const auto point = POINT {cursor.x(), cursor.y()};
 	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));

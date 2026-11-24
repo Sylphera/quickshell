@@ -141,6 +141,8 @@ public:
 	void restoreLeftFullscreen(TrackedWindow* window);
 
 	bool detachTile(TrackedWindow* window);
+	bool dropOverviewTile(TrackedWindow* window, const QPointF& normalized);
+	[[nodiscard]] QRect overviewTileRect(TrackedWindow* window) const;
 	bool beginGestureMove(TrackedWindow* window);
 	void endGestureMove(TrackedWindow* window, std::optional<Edge> direction);
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
