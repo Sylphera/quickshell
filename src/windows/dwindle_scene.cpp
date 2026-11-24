@@ -24,6 +24,7 @@
 #include <qtimer.h>
 
 #include "dwindle_scene_geometry.hpp"
+#include "inactive_dim.hpp"
 #include "layer_order.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
@@ -328,6 +329,13 @@ struct Thumbnail {
 	}
 };
 
+struct Shade {
+	ComPtr<IDCompositionVisual> visual;
+	ComPtr<IDCompositionEffectGroup> effect;
+	DimLevel level;
+	bool muted = false;
+};
+
 struct AnimatedFrame {
 	QRectF from;
 	QRect target;
@@ -374,6 +382,7 @@ DragScenes& dragScenes() {
 
 struct Tile: AnimatedFrame {
 	Thumbnail source;
+	Shade shade;
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
 	ComPtr<IDCompositionVisual> liveFrame;
@@ -424,6 +433,7 @@ struct FloatingCopy {
 	ComPtr<IDCompositionVisual> container;
 	ComPtr<IDCompositionRectangleClip> clip;
 	ComPtr<IDCompositionEffectGroup> fade;
+	Shade shade;
 	QRect shown;
 	float opacityFrom = 1.0f;
 	float opacityTarget = 1.0f;
@@ -435,6 +445,13 @@ struct FloatingCopy {
 		return std::lerp(this->opacityFrom, this->opacityTarget,
 		                 static_cast<float>(dwindle::ease(elapsed)));
 	}
+};
+
+struct Underlay {
+	Thumbnail source;
+	Shade shade;
+	ComPtr<IDCompositionVisual> frame;
+	ComPtr<IDCompositionRectangleClip> clip;
 };
 
 struct CloseFrame {
@@ -532,6 +549,9 @@ public:
 private:
 	QRect visibleWork;
 	bool prepare(const QList<DwindleTile>& plan);
+	bool addShade(Shade& shade, HWND window, IDCompositionVisual* parent);
+	bool syncShade(Shade& shade, HWND window);
+	void muteUnderlay(bool mute);
 	bool addUnderlay(const QList<DwindleTile>& plan);
 	[[nodiscard]] QList<HWND> floatingWindows(HWND cover) const;
 	void copyFloating(qint64 now, HWND cover, bool uncovering);
@@ -590,7 +610,7 @@ private:
 	Thumbnail backdrop;
 	std::unique_ptr<Thumbnail> fullscreenBar;
 	ComPtr<IDCompositionEffectGroup> fullscreenBarFade;
-	std::map<HWND, std::unique_ptr<Thumbnail>> underlay;
+	std::map<HWND, std::unique_ptr<Underlay>> underlay;
 	std::map<HWND, std::unique_ptr<FloatingCopy>> floats;
 	ComPtr<IDCompositionVisual> dimVisual;
 	ComPtr<IDCompositionEffectGroup> dimFade;
@@ -668,9 +688,6 @@ bool Scene::prepare(const QList<DwindleTile>& plan) {
 }
 
 bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
-	auto image = QImage(1, 1, QImage::Format_RGB32);
-	image.fill(0xff000000);
-	this->dimColor = this->upload(image);
 	D2D_MATRIX_3X2_F stretch {};
 	stretch._11 = static_cast<float>(this->work.width());
 	stretch._22 = static_cast<float>(this->work.height());
@@ -715,13 +732,31 @@ bool Scene::addUnderlay(const QList<DwindleTile>& plan) {
 		if (!GetWindowRect(hwnd, &raw)) continue;
 		const QRect bounds(raw.left, raw.top, raw.right - raw.left, raw.bottom - raw.top);
 		const auto shown = bounds.intersected(this->work);
-		auto thumb = std::make_unique<Thumbnail>();
-		if (!this->addSource(*thumb, hwnd, shown.translated(-bounds.topLeft()))) continue;
-		if (FAILED(thumb->visual->SetOffsetX(static_cast<float>(shown.x() - this->work.x())))
-		    || FAILED(thumb->visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y())))
-		    || FAILED(this->root->AddVisual(thumb->visual.Get(), FALSE, nullptr)))
+		auto under = std::make_unique<Underlay>();
+		if (!this->addSource(under->source, hwnd, shown.translated(-bounds.topLeft()))) continue;
+		const auto visible = frame(hwnd);
+		const auto radius = windowRadius(hwnd);
+		if (FAILED(under->source.visual->SetOffsetX(static_cast<float>(shown.x() - this->work.x())))
+		    || FAILED(under->source.visual->SetOffsetY(static_cast<float>(shown.y() - this->work.y())))
+		    || FAILED(this->root->AddVisual(under->source.visual.Get(), FALSE, nullptr))
+		    || FAILED(this->device->CreateVisual(under->frame.GetAddressOf()))
+		    || FAILED(this->device->CreateRectangleClip(under->clip.GetAddressOf()))
+		    || FAILED(under->frame->SetOffsetX(static_cast<float>(visible.x() - this->work.x())))
+		    || FAILED(under->frame->SetOffsetY(static_cast<float>(visible.y() - this->work.y())))
+		    || FAILED(under->clip->SetLeft(0.0f)) || FAILED(under->clip->SetTop(0.0f))
+		    || FAILED(under->clip->SetRight(static_cast<float>(visible.width())))
+		    || FAILED(under->clip->SetBottom(static_cast<float>(visible.height())))
+		    || FAILED(under->clip->SetTopLeftRadiusX(radius)) || FAILED(under->clip->SetTopLeftRadiusY(radius))
+		    || FAILED(under->clip->SetTopRightRadiusX(radius)) || FAILED(under->clip->SetTopRightRadiusY(radius))
+		    || FAILED(under->clip->SetBottomLeftRadiusX(radius))
+		    || FAILED(under->clip->SetBottomLeftRadiusY(radius))
+		    || FAILED(under->clip->SetBottomRightRadiusX(radius))
+		    || FAILED(under->clip->SetBottomRightRadiusY(radius))
+		    || FAILED(under->frame->SetClip(under->clip.Get()))
+		    || !this->addShade(under->shade, hwnd, under->frame.Get())
+		    || FAILED(this->root->AddVisual(under->frame.Get(), FALSE, nullptr)))
 			return false;
-		this->underlay.emplace(hwnd, std::move(thumb));
+		this->underlay.emplace(hwnd, std::move(under));
 	}
 	return true;
 }
@@ -751,7 +786,42 @@ ComPtr<IDCompositionSurface> Scene::upload(const QImage& image) {
 	return content;
 }
 
+bool Scene::addShade(Shade& shade, HWND window, IDCompositionVisual* parent) {
+	D2D_MATRIX_3X2_F stretch {};
+	stretch._11 = static_cast<float>(this->work.width() + 2);
+	stretch._22 = static_cast<float>(this->work.height() * 2);
+	shade.level = InactiveDim::levelOf(window);
+	return SUCCEEDED(this->device->CreateVisual(shade.visual.GetAddressOf()))
+	    && SUCCEEDED(this->device->CreateEffectGroup(shade.effect.GetAddressOf()))
+	    && InactiveDim::applyLevel(this->device.Get(), shade.effect.Get(), shade.level)
+	    && SUCCEEDED(shade.visual->SetContent(this->dimColor.Get()))
+	    && SUCCEEDED(shade.visual->SetTransform(stretch))
+	    && SUCCEEDED(shade.visual->SetEffect(shade.effect.Get()))
+	    && SUCCEEDED(parent->AddVisual(shade.visual.Get(), FALSE, nullptr));
+}
+
+bool Scene::syncShade(Shade& shade, HWND window) {
+	if (shade.effect == nullptr || shade.muted) return false;
+	const auto level = InactiveDim::levelOf(window);
+	if (level == shade.level) return false;
+	if (!InactiveDim::applyLevel(this->device.Get(), shade.effect.Get(), level)) return false;
+	shade.level = level;
+	return true;
+}
+
+void Scene::muteUnderlay(bool mute) {
+	for (auto& [hwnd, under]: this->underlay) {
+		if (std::exchange(under->shade.muted, mute) == mute) continue;
+		if (mute) under->shade.effect->SetOpacity(0.0f);
+		else InactiveDim::applyLevel(this->device.Get(), under->shade.effect.Get(), under->shade.level);
+	}
+}
+
 bool Scene::makeTileColor() {
+	auto black = QImage(1, 1, QImage::Format_RGB32);
+	black.fill(0xff000000);
+	this->dimColor = this->upload(black);
+	if (this->dimColor == nullptr) return false;
 	auto image = QImage(1, 1, QImage::Format_RGB32);
 	image.fill(0xff202020);
 	this->tileColor = this->upload(image);
@@ -872,6 +942,7 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 	    || FAILED(this->device->CreateEffectGroup(tile.fade.GetAddressOf()))
 	    || FAILED(tile.fade->SetOpacity(1.0f))
 	    || FAILED(tile.container->SetEffect(tile.fade.Get()))
+	    || !this->addShade(tile.shade, placement.window, tile.container.Get())
 	    || FAILED(this->root->AddVisual(tile.container.Get(), FALSE, nullptr)))
 		return false;
 
@@ -898,6 +969,12 @@ bool Scene::setTileContent(Tile& tile, IDCompositionVisual* content) {
 		return false;
 	}
 	tile.visibleContent = content;
+	const auto muted = content != nullptr && content == tile.retained.Get();
+	if (muted != tile.shade.muted && tile.shade.effect != nullptr) {
+		tile.shade.muted = muted;
+		if (muted) tile.shade.effect->SetOpacity(0.0f);
+		else InactiveDim::applyLevel(this->device.Get(), tile.shade.effect.Get(), tile.shade.level);
+	}
 	return true;
 }
 
@@ -1274,6 +1351,9 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused, bool instant) {
 	if (!this->prepare(plan)) return false;
 	if (!this->showFront()) return false;
+	this->muteUnderlay(false);
+	for (auto& [hwnd, tile]: this->tiles) this->syncShade(tile->shade, hwnd);
+	for (auto& [hwnd, under]: this->underlay) this->syncShade(under->shade, hwnd);
 	if (this->dim != nullptr) {
 		auto* scratchpad = Scratchpad::instance();
 		for (auto it = this->underlay.begin(); it != this->underlay.end();) {
@@ -1281,7 +1361,9 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 				++it;
 				continue;
 			}
-			if (FAILED(this->root->RemoveVisual(it->second->visual.Get()))) return false;
+			if (FAILED(this->root->RemoveVisual(it->second->source.visual.Get()))
+			    || FAILED(this->root->RemoveVisual(it->second->frame.Get())))
+				return false;
 			it = this->underlay.erase(it);
 		}
 	}
@@ -1488,6 +1570,7 @@ void Scene::hideFront() {
 	if (this->hiddenFront == this->focused) return;
 	auto found = this->tiles.find(this->focused);
 	if (found == this->tiles.end() || FAILED(found->second->fade->SetOpacity(0.0f))) return;
+	this->muteUnderlay(true);
 	if (SUCCEEDED(this->device->Commit())) this->hiddenFront = this->focused;
 }
 
@@ -1579,6 +1662,7 @@ void Scene::copyFloating(qint64 now, HWND cover, bool uncovering) {
 			    || FAILED(copy->container->SetEffect(copy->fade.Get()))
 			    || FAILED(copy->container->SetClip(copy->clip.Get()))
 			    || FAILED(copy->container->AddVisual(copy->source.visual.Get(), FALSE, nullptr))
+			    || !this->addShade(copy->shade, hwnd, copy->container.Get())
 			    || !this->followFloating(hwnd, *copy))
 				continue;
 			found = this->floats.emplace(hwnd, std::move(copy)).first;
@@ -1783,6 +1867,9 @@ void Scene::refresh() {
 		this->stranger = nullptr;
 	}
 	bool changed = this->removeFinishedClosingTiles(now);
+	for (auto& [hwnd, under]: this->underlay) changed |= this->syncShade(under->shade, hwnd);
+	for (auto& [hwnd, copy]: this->floats) changed |= this->syncShade(copy->shade, hwnd);
+	for (auto& [hwnd, tile]: this->tiles) changed |= this->syncShade(tile->shade, hwnd);
 	for (auto& [hwnd, copy]: this->floats) {
 		if (IsWindow(hwnd) && frame(hwnd) != copy->shown) changed |= this->followFloating(hwnd, *copy);
 	}
@@ -1923,7 +2010,10 @@ void Scene::hide() {
 	this->focused = nullptr;
 	this->hiddenFront = nullptr;
 	this->coveredFloats.clear();
-	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
+	if (this->host != nullptr && IsWindowVisible(this->host)) {
+		ShowWindow(this->host, SW_HIDE);
+		QTimer::singleShot(0, InactiveDim::instance(), &InactiveDim::comeBack);
+	}
 	this->release();
 	this->finishing = false;
 	this->hurrying = false;

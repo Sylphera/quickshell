@@ -1,5 +1,6 @@
 #include "inactive_dim.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -14,7 +15,6 @@
 #include <wrl/client.h>
 
 #include <qcoreapplication.h>
-#include <qelapsedtimer.h>
 #include <qlist.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -48,6 +48,65 @@ constexpr double FADE_SECONDS = 0.8;
 constexpr int FADE_STEPS = 24;
 constexpr int REFRESH_MS = 8;
 constexpr int BUSY_MS = 30;
+
+qint64 nowMs() {
+	using namespace std::chrono;
+	return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+HWND shadeSource() {
+	static auto* source = []() -> HWND {
+		constexpr auto* name = L"QuickshellDimShade";
+		constexpr int size = 16;
+		WNDCLASSW cls {};
+		cls.hInstance = GetModuleHandleW(nullptr);
+		cls.lpfnWndProc = &DefWindowProcW;
+		cls.lpszClassName = name;
+		RegisterClassW(&cls);
+		auto x = GetSystemMetrics(SM_XVIRTUALSCREEN) - (size * 4);
+		auto y = GetSystemMetrics(SM_YVIRTUALSCREEN) - (size * 4);
+		auto* window = CreateWindowExW(
+		    WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+		    name,
+		    L"",
+		    WS_POPUP,
+		    x,
+		    y,
+		    size,
+		    size,
+		    nullptr,
+		    nullptr,
+		    cls.hInstance,
+		    nullptr
+		);
+		if (window == nullptr) return nullptr;
+		auto* screen = GetDC(nullptr);
+		BITMAPINFO info {};
+		info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		info.bmiHeader.biWidth = size;
+		info.bmiHeader.biHeight = -size;
+		info.bmiHeader.biPlanes = 1;
+		info.bmiHeader.biBitCount = 32;
+		void* raw = nullptr;
+		auto* bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &raw, nullptr, 0);
+		auto* memory = CreateCompatibleDC(screen);
+		auto* previous = SelectObject(memory, bitmap);
+		std::fill_n(static_cast<uint32_t*>(raw), size * size, 0xff000000);
+		GdiFlush();
+		POINT origin {x, y};
+		SIZE extent {size, size};
+		POINT from {0, 0};
+		BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+		UpdateLayeredWindow(window, screen, &origin, &extent, memory, &from, 0, &blend, ULW_ALPHA);
+		SelectObject(memory, previous);
+		DeleteDC(memory);
+		DeleteObject(bitmap);
+		ReleaseDC(nullptr, screen);
+		ShowWindow(window, SW_SHOWNOACTIVATE);
+		return window;
+	}();
+	return source;
+}
 
 QRect virtualScreen() {
 	return {
@@ -97,17 +156,9 @@ struct InactiveDim::Scene {
 		QRect rect;
 		QRegion region;
 		float radius = -1;
-		float from = 0;
-		float to = 0;
-		QElapsedTimer since;
+		DimLevel level;
 
-		[[nodiscard]] float opacity() const {
-			if (!this->since.isValid()) return this->to;
-			auto progress = static_cast<double>(this->since.elapsed()) / (FADE_SECONDS * 1000);
-			return this->from + (this->to - this->from) * static_cast<float>(dimCurve(progress));
-		}
-
-		[[nodiscard]] bool gone() const { return this->to == 0 && this->opacity() == 0; }
+		[[nodiscard]] bool gone() const { return this->level.to == 0 && this->level.now() == 0; }
 	};
 
 	~Scene() {
@@ -116,9 +167,8 @@ struct InactiveDim::Scene {
 
 	bool create();
 	bool makeColor();
-	bool fade(Shade& shade, float goal);
 	bool shape(HWND hwnd, Shade& shade, const DimArea& area);
-	bool update(const QList<DimArea>& areas);
+	bool update(const QList<DimArea>& areas, const std::map<HWND, DimLevel>& levels);
 	void clear();
 	void place(const QList<HWND>& windows);
 
@@ -226,33 +276,6 @@ bool InactiveDim::Scene::makeColor() {
 	return SUCCEEDED(this->color->EndDraw()) && copied;
 }
 
-bool InactiveDim::Scene::fade(Shade& shade, float goal) {
-	if (shade.to == goal) return true;
-	auto from = shade.opacity();
-	ComPtr<IDCompositionAnimation> animation;
-	if (FAILED(this->device->CreateAnimation(animation.GetAddressOf()))) return false;
-
-	auto span = goal - from;
-	for (auto i = 0; i < FADE_STEPS; i++) {
-		auto begin = static_cast<double>(i) / FADE_STEPS;
-		auto end = static_cast<double>(i + 1) / FADE_STEPS;
-		auto value = from + span * static_cast<float>(dimCurve(begin));
-		auto next = from + span * static_cast<float>(dimCurve(end));
-		auto slope = (next - value) / static_cast<float>((end - begin) * FADE_SECONDS);
-		if (FAILED(animation->AddCubic(begin * FADE_SECONDS, value, slope, 0, 0))) return false;
-	}
-	if (FAILED(animation->End(FADE_SECONDS, goal))
-	    || FAILED(shade.effect->SetOpacity(animation.Get())))
-	{
-		return false;
-	}
-
-	shade.from = from;
-	shade.to = goal;
-	shade.since.start();
-	return true;
-}
-
 bool InactiveDim::Scene::shape(HWND hwnd, Shade& shade, const DimArea& area) {
 	if (shade.visual == nullptr) {
 		if (FAILED(this->device->CreateVisual(shade.visual.GetAddressOf()))
@@ -308,12 +331,19 @@ bool InactiveDim::Scene::shape(HWND hwnd, Shade& shade, const DimArea& area) {
 	return true;
 }
 
-bool InactiveDim::Scene::update(const QList<DimArea>& areas) {
+bool InactiveDim::Scene::update(
+    const QList<DimArea>& areas,
+    const std::map<HWND, DimLevel>& levels
+) {
+	auto levelOf = [&levels](HWND hwnd) {
+		auto found = levels.find(hwnd);
+		return found == levels.end() ? DimLevel() : found->second;
+	};
 	for (auto it = this->shades.begin(); it != this->shades.end();) {
 		auto listed = std::ranges::any_of(areas, [hwnd = it->first](const auto& area) {
 			return area.id == reinterpret_cast<quintptr>(hwnd);
 		});
-		if (listed && !it->second.gone()) {
+		if (listed && !(it->second.level == levelOf(it->first) && it->second.gone())) {
 			++it;
 			continue;
 		}
@@ -323,13 +353,17 @@ bool InactiveDim::Scene::update(const QList<DimArea>& areas) {
 
 	for (const auto& area: areas) {
 		auto* hwnd = reinterpret_cast<HWND>(area.id); // NOLINT(performance-no-int-to-ptr)
+		auto level = levelOf(hwnd);
 		auto found = this->shades.find(hwnd);
 		if (found == this->shades.end()) {
-			if (!area.dimmed) continue;
+			if (level.to == 0 && level.now() == 0) continue;
 			found = this->shades.try_emplace(hwnd).first;
 		}
-		if (!this->shape(hwnd, found->second, area)) return false;
-		if (!this->fade(found->second, area.dimmed ? STRENGTH : 0.0f)) return false;
+		auto& shade = found->second;
+		if (!this->shape(hwnd, shade, area)) return false;
+		if (shade.level == level) continue;
+		if (!InactiveDim::applyLevel(this->device.Get(), shade.effect.Get(), level)) return false;
+		shade.level = level;
 	}
 	return SUCCEEDED(this->device->Commit());
 }
@@ -393,6 +427,7 @@ void InactiveDim::setEnabled(bool enabled) {
 	} else {
 		this->timer.stop();
 		this->scene.reset();
+		this->levels.clear();
 	}
 	emit this->enabledChanged();
 }
@@ -417,9 +452,77 @@ void InactiveDim::schedule(int delay) {
 	this->timer.start(delay);
 }
 
-bool InactiveDim::animating() {
-	return DesktopSlide::instance()->busy() || DwindleScene::animating()
-	    || Scratchpad::instance()->moving();
+float DimLevel::now() const {
+	auto progress = static_cast<double>(nowMs() - this->start) / (FADE_SECONDS * 1000);
+	return this->from + (this->to - this->from) * static_cast<float>(dimCurve(progress));
+}
+
+DimLevel DimLevel::toward(float goal) const {
+	if (this->to == goal) return *this;
+	return {.from = this->now(), .to = goal, .start = nowMs()};
+}
+
+DimLevel InactiveDim::levelOf(HWND hwnd) {
+	auto* dim = InactiveDim::instance();
+	if (!dim->mEnabled) return {};
+	auto found = dim->levels.find(hwnd);
+	return found == dim->levels.end() ? DimLevel() : found->second;
+}
+
+bool InactiveDim::applyLevel(
+    IDCompositionDevice* device,
+    IDCompositionEffectGroup* effect,
+    const DimLevel& level
+) {
+	auto begin = static_cast<double>(nowMs() - level.start) / (FADE_SECONDS * 1000);
+	if (begin >= 1 || level.from == level.to) return SUCCEEDED(effect->SetOpacity(level.to));
+
+	ComPtr<IDCompositionAnimation> animation;
+	if (FAILED(device->CreateAnimation(animation.GetAddressOf()))) return false;
+	auto span = level.to - level.from;
+	auto length = 1.0 - begin;
+	for (auto i = 0; i < FADE_STEPS; i++) {
+		auto at = begin + length * i / FADE_STEPS;
+		auto next = begin + length * (i + 1) / FADE_STEPS;
+		auto value = level.from + span * static_cast<float>(dimCurve(at));
+		auto after = level.from + span * static_cast<float>(dimCurve(next));
+		auto slope = (after - value) / static_cast<float>((next - at) * FADE_SECONDS);
+		if (FAILED(animation->AddCubic((at - begin) * FADE_SECONDS, value, slope, 0, 0))) return false;
+	}
+	return SUCCEEDED(animation->End(length * FADE_SECONDS, level.to))
+	    && SUCCEEDED(effect->SetOpacity(animation.Get()));
+}
+
+HTHUMBNAIL InactiveDim::shadeThumbnail(HWND destination, float level) {
+	auto opacity = std::clamp(qRound(level * 255), 0, 255);
+	auto* source = shadeSource();
+	HTHUMBNAIL thumbnail = nullptr;
+	if (source == nullptr || FAILED(DwmRegisterThumbnail(destination, source, &thumbnail))) return nullptr;
+	DWM_THUMBNAIL_PROPERTIES props {};
+	props.dwFlags = DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_VISIBLE;
+	props.rcSource = {4, 4, 12, 12};
+	props.opacity = static_cast<BYTE>(opacity);
+	props.fVisible = FALSE;
+	DwmUpdateThumbnailProperties(thumbnail, &props);
+	return thumbnail;
+}
+
+void InactiveDim::stepAside() {
+	if (this->scene != nullptr && IsWindowVisible(this->scene->host)) ShowWindow(this->scene->host, SW_HIDE);
+}
+
+void InactiveDim::comeBack() {
+	if (this->mEnabled && this->watching) this->refresh();
+}
+
+void InactiveDim::updateLevels(const QList<HWND>& shown) {
+	std::erase_if(this->levels, [](const auto& entry) { return !IsWindow(entry.first); });
+	if (!shown.contains(this->focused)) return;
+	for (auto* hwnd: shown) {
+		auto goal = hwnd == this->focused ? 0.0f : STRENGTH;
+		auto [entry, added] = this->levels.try_emplace(hwnd, DimLevel {.from = goal, .to = goal});
+		if (!added) entry->second = entry->second.toward(goal);
+	}
 }
 
 void InactiveDim::hide() {
@@ -435,32 +538,34 @@ void InactiveDim::refresh() {
 		this->schedule(FADE_STEPS * BUSY_MS);
 		return;
 	}
-	if (InactiveDim::animating()) {
-		this->hide();
-		this->schedule(BUSY_MS);
-		return;
-	}
-
 	const auto screen = virtualScreen();
 	QList<DimWindow> windows;
 	QList<HWND> handles;
+	QList<HWND> shown;
 	auto* foreground = GetForegroundWindow();
 	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
 		if (!isShown(hwnd)) continue;
+		shown.append(hwnd);
+		if (hwnd == foreground) this->focused = hwnd;
 		auto rect = visibleFrame(hwnd).intersected(screen);
 		if (rect.isEmpty()) continue;
 		windows.append({.id = reinterpret_cast<quintptr>(hwnd), .rect = rect});
 		handles.append(hwnd);
-		if (hwnd == foreground) this->focused = hwnd;
+	}
+	this->updateLevels(shown);
+
+	if (DesktopSlide::instance()->busy()) {
+		this->stepAside();
+		this->schedule(BUSY_MS);
+		return;
 	}
 
 	auto areas = planDim(windows, reinterpret_cast<quintptr>(this->focused));
-	auto dims = std::ranges::any_of(areas, &DimArea::dimmed);
-	auto fading = this->scene != nullptr
-	           && std::ranges::any_of(this->scene->shades, [](const auto& entry) {
-		              return !entry.second.gone();
-	              });
-	if (!dims && !fading) {
+	auto dims = std::ranges::any_of(handles, [](HWND hwnd) {
+		auto level = InactiveDim::levelOf(hwnd);
+		return level.to != 0 || level.now() != 0;
+	});
+	if (!dims) {
 		this->hide();
 		return;
 	}
@@ -474,15 +579,21 @@ void InactiveDim::refresh() {
 			return;
 		}
 	}
-	if (!this->scene->update(areas)) {
+	if (!this->scene->update(areas, this->levels)) {
 		qCWarning(logDim) << "Could not update the dim overlay";
 		this->scene.reset();
 		return;
 	}
-	this->scene->place(handles);
-	qCDebug(logDim) << "Dimming" << this->scene->shades.size() << "of" << handles.length()
+	const auto animating = DwindleScene::animating() || Scratchpad::instance()->moving();
+	if (animating) this->schedule(REFRESH_MS);
+	else this->scene->place(handles);
+	if (!animating) qCDebug(logDim) << "Dimming" << this->scene->shades.size() << "of" << handles.length()
 	                << "windows, focused" << this->focused;
-	if (!dims) this->schedule(static_cast<int>(FADE_SECONDS * 1000) + REFRESH_MS);
+	const auto fading = std::ranges::any_of(handles, [](HWND hwnd) {
+		auto level = InactiveDim::levelOf(hwnd);
+		return level.to == 0 && level.now() != 0;
+	});
+	if (fading) this->schedule(static_cast<int>(FADE_SECONDS * 1000) + REFRESH_MS);
 }
 
 }

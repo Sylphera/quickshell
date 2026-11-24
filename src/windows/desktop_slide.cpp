@@ -21,6 +21,8 @@
 #include <qstringlist.h>
 #include <qtimer.h>
 
+#include "dim_plan.hpp"
+#include "inactive_dim.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
 #include "tiling.hpp"
@@ -410,6 +412,7 @@ bool DesktopSlide::start(qsizetype from, qsizetype to) {
 	this->carryPanels();
 	this->layoutThumbs(0);
 	ShowWindow(this->overlay, SW_SHOWNOACTIVATE);
+	InactiveDim::instance()->stepAside();
 	DwmFlush();
 	if (this->panelsCarried) {
 		WinPanelWindow::setCoverOverPanels(true);
@@ -731,6 +734,33 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		    .fullscreen = fullscreen,
 		});
 	}
+	QList<DimWindow> stack;
+	for (auto i = added.size() - 1; i >= 0; i--)
+	{
+		RECT bounds {};
+		auto rect = added[i].rect;
+		if (SUCCEEDED(DwmGetWindowAttribute(
+		        added[i].window,
+		        DWMWA_EXTENDED_FRAME_BOUNDS,
+		        &bounds,
+		        sizeof(bounds)
+		    )))
+		{
+			rect &= QRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top)
+			            .translated(-this->monitor.topLeft());
+		}
+		stack.append({.id = reinterpret_cast<quintptr>(added[i].window), .rect = rect});
+	}
+	for (const auto& area: planDim(stack, 0)) {
+		auto* hwnd = reinterpret_cast<HWND>(area.id); // NOLINT(performance-no-int-to-ptr)
+		auto level = InactiveDim::levelOf(hwnd).to;
+		if (level == 0) continue;
+		for (const auto& part: area.region) {
+			auto thumbnail = InactiveDim::shadeThumbnail(this->overlay, level);
+			if (thumbnail == nullptr) continue;
+			added.append({.thumbnail = thumbnail, .rect = part, .desktop = desktop});
+		}
+	}
 	auto lock = std::lock_guard(this->mutex);
 	this->thumbs.append(added);
 	return complete;
@@ -998,6 +1028,9 @@ void DesktopSlide::finish() {
 	}
 	if (this->overlay != nullptr) {
 		ShowWindow(this->overlay, SW_HIDE);
+		this->overlay = nullptr;
+		InactiveDim::instance()->comeBack();
+		this->overlay = this->liveOverlay;
 		DwmFlush();
 	}
 	for (const auto& thumb: this->thumbs) this->releaseThumb(thumb);

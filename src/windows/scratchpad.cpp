@@ -582,6 +582,7 @@ void Scratchpad::openCover(bool show) {
 		if (this->containsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd)) stack.prepend(hwnd);
 	}
 	QList<CoverThumb> thumbs;
+	auto* focus = this->focusCandidate();
 	for (auto* hwnd: stack) {
 		if (maximized != nullptr && hwnd != maximized->hwnd() && frames.contains(hwnd)) continue;
 		QRect frame;
@@ -597,7 +598,10 @@ void Scratchpad::openCover(bool show) {
 		}
 		HTHUMBNAIL thumbnail = nullptr;
 		if (FAILED(DwmRegisterThumbnail(this->cover, hwnd, &thumbnail))) continue;
-		thumbs.append({hwnd, thumbnail, frame});
+		auto level = InactiveDim::levelOf(hwnd);
+		if (show && hwnd == focus) level = level.toward(0);
+		auto* shade = level.now() == 0 ? nullptr : InactiveDim::shadeThumbnail(this->cover, level.now());
+		thumbs.append({hwnd, thumbnail, frame, shade, level});
 	}
 	{
 		auto lock = std::lock_guard(this->slideMutex);
@@ -642,6 +646,13 @@ void Scratchpad::layoutCover(double offset) {
 		props.fVisible = TRUE;
 		props.fSourceClientAreaOnly = FALSE;
 		DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
+		if (thumb.shade == nullptr) continue;
+		DWM_THUMBNAIL_PROPERTIES shade {};
+		shade.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY;
+		shade.opacity = static_cast<BYTE>(std::clamp(std::lround(thumb.level.now() * 255), 0L, 255L));
+		shade.rcDestination = props.rcDestination;
+		shade.fVisible = TRUE;
+		DwmUpdateThumbnailProperties(thumb.shade, &shade);
 	}
 }
 
@@ -704,18 +715,23 @@ void Scratchpad::onSlideDone() {
 			props.dwFlags = DWM_TNP_VISIBLE;
 			props.fVisible = FALSE;
 			DwmUpdateThumbnailProperties(thumb.thumbnail, &props);
+			if (thumb.shade != nullptr) DwmUpdateThumbnailProperties(thumb.shade, &props);
 		}
 	}
 	this->jumpReal(0);
 	this->closeCover();
 	this->handle(ScratchpadEvent::Settled);
+	InactiveDim::instance()->comeBack();
 }
 
 void Scratchpad::closeCover() {
 	this->slideStop.store(true);
 	if (this->slideWorker.joinable()) this->slideWorker.join();
 	auto lock = std::lock_guard(this->slideMutex);
-	for (const auto& thumb: this->coverThumbs) DwmUnregisterThumbnail(thumb.thumbnail);
+	for (const auto& thumb: this->coverThumbs) {
+		DwmUnregisterThumbnail(thumb.thumbnail);
+		if (thumb.shade != nullptr) DwmUnregisterThumbnail(thumb.shade);
+	}
 	this->coverThumbs.clear();
 	this->slideDoneSent = false;
 	if (this->cover != nullptr) {

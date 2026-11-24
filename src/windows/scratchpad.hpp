@@ -17,6 +17,7 @@
 #include <qtimer.h>
 #include <qtmetamacros.h>
 
+#include "inactive_dim.hpp"
 #include "scratchpad_phase.hpp"
 
 namespace qs::windows {
@@ -114,6 +115,8 @@ private:
 		HWND hwnd = nullptr;
 		HTHUMBNAIL thumbnail = nullptr;
 		QRect frame;
+		HTHUMBNAIL shade = nullptr;
+		DimLevel level;
 	};
 	HWND cover = nullptr;
 	QPoint coverOrigin;
