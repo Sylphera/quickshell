@@ -7,6 +7,7 @@
 #include <qt_windows.h>
 
 #include "tiling.hpp"
+#include "util.hpp"
 #include "window_tracker.hpp"
 
 namespace qs::windows {
@@ -16,18 +17,31 @@ constexpr double TILED_FACTOR = 0.5;
 constexpr double TILED_LIMIT = 100;
 constexpr double MINIMUM_DISTANCE = 0.1;
 constexpr qint64 IN_FLIGHT_MS = 50;
+
+HWND focusedDialog() {
+	auto* hwnd = GetAncestor(GetForegroundWindow(), GA_ROOT);
+	if (hwnd == nullptr || isOwnProcessWindow(hwnd)) return nullptr;
+	auto* owner = GetWindow(hwnd, GW_OWNER);
+	auto captioned = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
+	return owner != nullptr && captioned ? hwnd : nullptr;
+}
 }
 
 bool TouchpadMove::begin() {
 	this->started = true;
 	this->tiled = false;
-	this->window = WindowTracker::instance()->activeWindow();
-	if (this->window == nullptr) return false;
+	auto* tracker = WindowTracker::instance();
+	auto* dialog = focusedDialog();
+	this->window = dialog != nullptr ? tracker->windowFor(dialog) : tracker->activeWindow();
+	this->hwnd = this->window != nullptr ? this->window->hwnd() : dialog;
+	if (this->hwnd == nullptr) return false;
 
-	auto* hwnd = this->window->hwnd();
-	auto movable = !IsIconic(hwnd) && !IsZoomed(hwnd) && !IsHungAppWindow(hwnd)
-	            && !this->window->fullscreen() && !this->window->borderlessFullscreen();
-	if (movable) {
+	auto* hwnd = this->hwnd;
+	auto movable = !IsIconic(hwnd) && !IsZoomed(hwnd) && !IsHungAppWindow(hwnd);
+	if (movable && this->window != nullptr) {
+		movable = !this->window->fullscreen() && !this->window->borderlessFullscreen();
+	}
+	if (movable && this->window != nullptr) {
 		auto* tiling = TilingManager::active();
 		if (tiling != nullptr && tiling->isTiled(this->window)) {
 			this->tiled = tiling->beginGestureMove(this->window);
@@ -39,6 +53,7 @@ bool TouchpadMove::begin() {
 	if (!movable || !GetWindowRect(hwnd, &rect)) {
 		if (this->tiled) TilingManager::instance()->endGestureMove(this->window, std::nullopt);
 		this->window = nullptr;
+		this->hwnd = nullptr;
 		return false;
 	}
 	this->origin = {.x = rect.left, .y = rect.top};
@@ -50,7 +65,7 @@ bool TouchpadMove::begin() {
 }
 
 void TouchpadMove::moveTo(double dx, double dy, bool force) {
-	auto* hwnd = this->window->hwnd();
+	if (!IsWindow(this->hwnd)) return;
 	auto target = POINT {
 	    .x = this->origin.x + std::lround(dx * this->scale),
 	    .y = this->origin.y + std::lround(dy * this->scale),
@@ -58,7 +73,8 @@ void TouchpadMove::moveTo(double dx, double dy, bool force) {
 	if (target.x == this->sent.x && target.y == this->sent.y) return;
 
 	RECT rect {};
-	auto arrived = GetWindowRect(hwnd, &rect) && rect.left == this->sent.x && rect.top == this->sent.y;
+	auto arrived = GetWindowRect(this->hwnd, &rect) && rect.left == this->sent.x
+	            && rect.top == this->sent.y;
 	auto waiting = !arrived && this->sentAt.isValid() && this->sentAt.elapsed() < IN_FLIGHT_MS;
 	if (waiting && !force) return;
 
@@ -66,12 +82,12 @@ void TouchpadMove::moveTo(double dx, double dy, bool force) {
 	this->sentAt.start();
 	constexpr UINT flags =
 	    SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
-	SetWindowPos(hwnd, nullptr, target.x, target.y, 0, 0, flags);
+	SetWindowPos(this->hwnd, nullptr, target.x, target.y, 0, 0, flags);
 }
 
 void TouchpadMove::update(double dx, double dy) {
 	if (!this->started && !this->begin()) return;
-	if (this->window == nullptr) return;
+	if (this->hwnd == nullptr) return;
 	if (this->tiled) {
 		dx = std::clamp(dx * TILED_FACTOR, -TILED_LIMIT, TILED_LIMIT);
 		dy = std::clamp(dy * TILED_FACTOR, -TILED_LIMIT, TILED_LIMIT);
@@ -81,16 +97,14 @@ void TouchpadMove::update(double dx, double dy) {
 
 void TouchpadMove::end(double dx, double dy, bool cancelled) {
 	if (!std::exchange(this->started, false)) return;
-	auto window = std::exchange(this->window, nullptr);
+	auto* moved = this->window.data();
+	this->window = nullptr;
 	auto wasTiled = std::exchange(this->tiled, false);
-	if (window == nullptr) return;
-
-	if (!wasTiled) {
-		this->window = window;
+	if (!wasTiled && this->hwnd != nullptr) {
 		this->moveTo(cancelled ? 0 : dx, cancelled ? 0 : dy, true);
-		this->window = nullptr;
-		return;
 	}
+	this->hwnd = nullptr;
+	if (!wasTiled || moved == nullptr) return;
 
 	using Edge = TilingManager::Edge;
 	std::optional<Edge> edge;
@@ -98,7 +112,7 @@ void TouchpadMove::end(double dx, double dy, bool cancelled) {
 		if (std::abs(dx) > std::abs(dy)) edge = dx > 0 ? Edge::Right : Edge::Left;
 		else edge = dy > 0 ? Edge::Bottom : Edge::Top;
 	}
-	TilingManager::instance()->endGestureMove(window, edge);
+	TilingManager::instance()->endGestureMove(moved, edge);
 }
 
 }

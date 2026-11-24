@@ -19,6 +19,7 @@ private:
 
 	bool started = false;
 	bool tiled = false;
+	HWND hwnd = nullptr;
 	QPointer<TrackedWindow> window;
 	double scale = 1;
 	POINT origin {};
