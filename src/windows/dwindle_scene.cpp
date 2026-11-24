@@ -542,6 +542,8 @@ private:
 	void refresh();
 	void settle();
 	bool raise();
+	void hideFront();
+	bool showFront();
 	[[nodiscard]] HWND coveringHost() const;
 	[[nodiscard]] QList<HWND> occludingTiles() const;
 	bool parkOccluders(qint64 now);
@@ -549,6 +551,7 @@ private:
 
 	HWND host = nullptr;
 	HWND focused = nullptr;
+	HWND hiddenFront = nullptr;
 	HWND backdropWindow = nullptr;
 	HMONITOR barMonitor = nullptr;
 	ComPtr<IDCompositionDesktopDevice> desktopDevice;
@@ -1232,6 +1235,7 @@ bool Scene::matches(const QList<DwindleTile>& plan) const {
 
 bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused) {
 	if (!this->prepare(plan)) return false;
+	if (!this->showFront()) return false;
 	if (this->dim != nullptr) {
 		auto* scratchpad = Scratchpad::instance();
 		for (auto it = this->underlay.begin(); it != this->underlay.end();) {
@@ -1416,6 +1420,25 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 	this->idle.start(static_cast<int>((plan.isEmpty() ? PopOutDuration : Duration) * 1000) + SettleMs);
 	this->sample.start();
 	qCDebug(logDwindleScene) << "Animating" << plan.size() << "tiles in" << this->work;
+	return true;
+}
+
+void Scene::hideFront() {
+	if (this->hiddenFront == this->focused) return;
+	auto found = this->tiles.find(this->focused);
+	if (found == this->tiles.end() || FAILED(found->second->fade->SetOpacity(0.0f))) return;
+	if (SUCCEEDED(this->device->Commit())) this->hiddenFront = this->focused;
+}
+
+bool Scene::showFront() {
+	auto* window = std::exchange(this->hiddenFront, nullptr);
+	auto found = this->tiles.find(window);
+	if (window == nullptr || found == this->tiles.end()) return true;
+	if (FAILED(found->second->fade->SetOpacity(1.0f)) || FAILED(this->device->Commit())) return false;
+	found->second->opacityFrom = 1.0f;
+	found->second->opacityTarget = 1.0f;
+	found->second->opacityStart = 0;
+	DwmFlush();
 	return true;
 }
 
@@ -1710,6 +1733,7 @@ void Scene::settle() {
 			SetWindowPos(this->host, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
 		if (GetWindow(this->focused, GW_HWNDNEXT) != this->host)
 			SetWindowPos(this->host, this->focused, 0, 0, 0, 0, flags);
+		this->hideFront();
 		this->sample.stop();
 		this->idle.start(250);
 		return;
@@ -1726,6 +1750,7 @@ void Scene::hide() {
 	this->idle.stop();
 	this->sample.stop();
 	this->focused = nullptr;
+	this->hiddenFront = nullptr;
 	if (this->host != nullptr) ShowWindow(this->host, SW_HIDE);
 	this->release();
 	this->finishing = false;
@@ -1772,6 +1797,19 @@ HWND underlayDim(HMONITOR monitor) {
 auto& scenes() {
 	static auto* byMonitor = new std::map<HMONITOR, std::unique_ptr<Scene>>();
 	return *byMonitor;
+}
+
+auto& keptScenes() {
+	static auto* byMonitor = new std::map<HMONITOR, std::unique_ptr<Scene>>();
+	return *byMonitor;
+}
+
+void takeBackKept(HMONITOR monitor) {
+	auto kept = keptScenes().find(monitor);
+	if (kept == keptScenes().end() || underlayDim(monitor) != nullptr) return;
+	auto scene = std::move(kept->second);
+	keptScenes().erase(kept);
+	if (scene->held()) scenes()[monitor] = std::move(scene);
 }
 
 }
@@ -1891,6 +1929,7 @@ bool DwindleScene::hasClosingTile(HMONITOR monitor, const QRect& work) {
 
 void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles, bool changed,
                           HWND focused) {
+	takeBackKept(monitor);
 	auto found = scenes().find(monitor);
 	const auto closing = DwindleScene::hasClosingTile(monitor, work);
 	if (work.isEmpty() || (tiles.isEmpty() && !closing)) {
@@ -1914,6 +1953,7 @@ void DwindleScene::present(HMONITOR monitor, const QRect& work, const QList<Dwin
 
 void DwindleScene::cover(HMONITOR monitor, const QRect& work, const QList<DwindleTile>& tiles) {
 	if (work.isEmpty()) return;
+	takeBackKept(monitor);
 	auto& scene = scenes()[monitor];
 	const auto viewport = sceneViewport(monitor, work);
 	if (scene != nullptr && scene->visible() && scene->work == viewport) {
@@ -1998,8 +2038,19 @@ bool DwindleScene::holdsSpecial() {
 	return false;
 }
 
-void DwindleScene::dismissAll() { scenes().clear(); }
+void DwindleScene::dismissAll() {
+	scenes().clear();
+	keptScenes().clear();
+}
 
-void DwindleScene::drop(HMONITOR monitor) { scenes().erase(monitor); }
+void DwindleScene::drop(HMONITOR monitor) {
+	auto found = scenes().find(monitor);
+	if (found == scenes().end()) return;
+	auto scene = std::move(found->second);
+	scenes().erase(found);
+	if (scene != nullptr && scene->held() && scene->dim == nullptr) {
+		keptScenes()[monitor] = std::move(scene);
+	}
+}
 
 }
