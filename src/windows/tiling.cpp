@@ -4752,6 +4752,12 @@ bool TilingManager::beginEdgeDrag(TrackedWindow* window, bool left, bool top) {
 	drag.window = window;
 	drag.layout = layout;
 	drag.box = layout->tree->box(id);
+	if (layout->tree->kind() == tiling::Kind::Dwindle) {
+		const auto& tree = static_cast<const tiling::DwindleLayout&>(*layout->tree);
+		drag.horizontal = tree.nearestEdge(id, true);
+		drag.vertical = tree.nearestEdge(id, false);
+		return true;
+	}
 	drag.horizontal = left ? pick(Edge::Left, Edge::Right) : pick(Edge::Right, Edge::Left);
 	drag.vertical = top ? pick(Edge::Top, Edge::Bottom) : pick(Edge::Bottom, Edge::Top);
 	return true;

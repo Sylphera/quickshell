@@ -271,32 +271,40 @@ bool DwindleLayout::hasEdge(Id id, Edge edge) const {
 	return leaf != nullptr && this->dividerAncestor(leaf, edge) != nullptr;
 }
 
+std::optional<Edge> DwindleLayout::nearestEdge(Id id, bool horizontal) const {
+	auto* leaf = this->find(id);
+	if (leaf == nullptr) return std::nullopt;
+
+	const auto leading = horizontal ? Edge::Left : Edge::Top;
+	const auto trailing = horizontal ? Edge::Right : Edge::Bottom;
+	auto* before = this->dividerAncestor(leaf, leading);
+	auto* after = this->dividerAncestor(leaf, trailing);
+	for (auto* node = leaf->parent; node != nullptr; node = node->parent) {
+		if (node == after) return trailing;
+		if (node == before) return leading;
+	}
+	return std::nullopt;
+}
+
 bool DwindleLayout::resize(Id id, int dx, int dy) {
 	auto* leaf = this->find(id);
 	if (leaf == nullptr) return false;
 
 	auto changed = false;
-
-	auto grow = [&](int delta, Edge trailing, Edge leading) {
+	auto move = [&](int delta, bool horizontal) {
 		if (delta == 0) return;
-
-		auto divider = [](const Node* node) {
-			const auto& box = node->box;
-			return node->splitTop ? box.top() + splitExtent(box.height(), node->ratio)
-			                      : box.left() + splitExtent(box.width(), node->ratio);
-		};
-
-		if (auto* node = this->dividerAncestor(leaf, trailing)) {
-			DwindleLayout::setDivider(node, divider(node) + delta);
-			changed = true;
-		} else if (auto* node = this->dividerAncestor(leaf, leading)) {
-			DwindleLayout::setDivider(node, divider(node) - delta);
-			changed = true;
-		}
+		const auto edge = this->nearestEdge(id, horizontal);
+		if (!edge) return;
+		auto* node = this->dividerAncestor(leaf, *edge);
+		const auto& box = node->box;
+		const auto divider = node->splitTop ? box.top() + splitExtent(box.height(), node->ratio)
+		                                    : box.left() + splitExtent(box.width(), node->ratio);
+		DwindleLayout::setDivider(node, divider + delta);
+		changed = true;
 	};
 
-	grow(dx, Edge::Right, Edge::Left);
-	grow(dy, Edge::Bottom, Edge::Top);
+	move(dx, true);
+	move(dy, false);
 	return changed;
 }
 

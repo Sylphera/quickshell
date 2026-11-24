@@ -106,6 +106,7 @@ public:
 
 	bool moveEdge(Id id, Edge edge, int position) override;
 	[[nodiscard]] bool hasEdge(Id id, Edge edge) const override;
+	[[nodiscard]] std::optional<Edge> nearestEdge(Id id, bool horizontal) const;
 	bool resize(Id id, int dx, int dy) override;
 
 	void configure(const Options& options) override;
