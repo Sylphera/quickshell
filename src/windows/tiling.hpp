@@ -254,6 +254,8 @@ private:
 		bool floatMoving = false;
 		bool floatOpening = false;
 		bool wasTopmost = false;
+		int unmaximized = 0;
+		qint64 unmaximizedAt = 0;
 		bool floated = false;
 		QRect floatSeen;
 		qint64 coveredAt = 0;
@@ -287,6 +289,7 @@ private:
 	void updateEarlyParking();
 	void sync();
 	void syncWindow(TrackedWindow* window);
+	static bool ignoreMaximize(Managed& m);
 	void insertInto(Managed& m, Layout* layout, TrackedWindow* target, const QPoint* cursor);
 	void takeOut(Managed& m);
 	void clearMaximized(Layout* layout, const TrackedWindow* except, bool animate);

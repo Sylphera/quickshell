@@ -120,6 +120,9 @@ constexpr int VERIFY_DELAY_MS = 150;
 constexpr int DEADLINE_MS = 2000;
 constexpr int HUNG_RETRY_MS = 500;
 constexpr int HEAL_MS = 500;
+constexpr int UNMAXIMIZE_LIMIT = 6;
+constexpr qint64 UNMAXIMIZE_RESET_MS = 500;
+constexpr int UNMAXIMIZE_SETTLE_MS = 400;
 constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
@@ -1584,12 +1587,35 @@ void rememberFullscreen(const TrackedWindow* window, bool fullscreen) {
 
 }
 
+bool TilingManager::ignoreMaximize(Managed& m) {
+	auto* window = m.window;
+	auto* hwnd = window->hwnd();
+	if (!window->maximized() || window->minimized() || m.elevated || m.maximizedTile || m.maximizePending
+	    || !startup::settled() || (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
+		return false;
+	const auto now = QDateTime::currentMSecsSinceEpoch();
+	if (now - m.unmaximizedAt > UNMAXIMIZE_RESET_MS) m.unmaximized = 0;
+	if (m.unmaximized >= UNMAXIMIZE_LIMIT) return false;
+	m.unmaximized++;
+	m.unmaximizedAt = now;
+	qCDebug(logTiling) << "Window" << window->addressHex() << window->appId() << "maximized itself; restoring it";
+	BOOL still = TRUE;
+	DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &still, sizeof(still));
+	ShowWindowAsync(hwnd, SW_RESTORE);
+	QTimer::singleShot(UNMAXIMIZE_SETTLE_MS, window, [hwnd] {
+		BOOL animate = FALSE;
+		DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &animate, sizeof(animate));
+	});
+	return true;
+}
+
 void TilingManager::syncWindow(TrackedWindow* window) {
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
 	auto& m = iter->second;
 
 	if (window == this->dragging) return;
+	if (ignoreMaximize(m)) return;
 	if (m.layout == nullptr && m.focusMaximized() && (window->minimized() || window->maximized())) {
 		if (!m.fullscreenRestore.isNull()) restorePlacement(window->hwnd(), m.fullscreenRestore);
 		this->forgetFloat(m);
