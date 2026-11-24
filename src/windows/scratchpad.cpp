@@ -236,23 +236,16 @@ Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 	);
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::currentChanged, this, [this]() {
 		auto* desktops = VirtualDesktops::instance();
-		if (this->mShown && desktops->currentIndex() != this->openedDesktop) this->hideNow();
+		if (this->shown() && desktops->currentIndex() != this->openedDesktop) this->hideNow();
 	});
 	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::shownChanged, this, [this]() {
-		if (this->mShown && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
+		if (this->shown() && VirtualDesktops::instance()->shownIndex() != this->openedDesktop)
 			this->hideNow();
 	});
 }
 
 void Scratchpad::hideNow() {
-	if (!this->mShown) return;
-	this->preparing = false;
-	this->slideGeneration++;
-	this->dimTimer.stop();
-	this->dimAlpha = 0;
-	this->dimTarget = 0;
-	if (this->dim != nullptr) ShowWindow(this->dim, SW_HIDE);
-	this->finishHide();
+	this->handle(ScratchpadEvent::HideNow);
 }
 
 bool Scratchpad::contains(const TrackedWindow* window) const {
@@ -269,7 +262,7 @@ bool Scratchpad::containsWindow(HWND hwnd) const {
 
 void Scratchpad::toggle() {
 	this->prune();
-	this->setShown(!this->mShown || this->hiding);
+	this->handle(toggleEvent(this->phase));
 }
 
 void Scratchpad::add(TrackedWindow* window, bool follow) {
@@ -286,7 +279,7 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		remember(hwnd, entry.rect);
 		emit this->membershipChanged();
 
-		if (this->mShown) {
+		if (this->shown()) {
 			this->relayout();
 			forceForegroundWindow(hwnd);
 		} else if (!follow) {
@@ -295,7 +288,7 @@ void Scratchpad::add(TrackedWindow* window, bool follow) {
 		}
 	}
 
-	if (follow) this->setShown(true);
+	if (follow) this->handle(ScratchpadEvent::Show);
 }
 
 void Scratchpad::remove(TrackedWindow* window) {
@@ -313,56 +306,63 @@ void Scratchpad::remove(TrackedWindow* window) {
 	}
 }
 
-void Scratchpad::setShown(bool shown) {
-	if (shown && this->hiding) {
-		this->hiding = false;
-		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
-		this->shownAt = GetTickCount64();
-		auto* focus = this->focusCandidate();
-		this->showDim();
-		this->slide(true);
-		if (focus != nullptr) forceForegroundWindow(focus);
+bool Scratchpad::handle(ScratchpadEvent event) {
+	auto from = this->phase;
+	auto to = nextPhase(from, event);
+	if (to == from) return false;
+	this->phase = to;
+	qCDebug(logScratchpad) << "Special goes from" << static_cast<int>(from) << "to"
+	                       << static_cast<int>(to);
+
+	switch (to) {
+	case ScratchpadPhase::Preparing: this->prepare(); break;
+	case ScratchpadPhase::Entering: this->enter(); break;
+	case ScratchpadPhase::Shown: this->order(); break;
+	case ScratchpadPhase::Leaving: this->leave(); break;
+	case ScratchpadPhase::Hidden: this->finishHide(); break;
+	}
+	return true;
+}
+
+void Scratchpad::prepare() {
+	POINT cursor {};
+	GetCursorPos(&cursor);
+	this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+	this->openedDesktop = VirtualDesktops::instance()->shownIndex();
+	this->shownAt = GetTickCount64();
+	auto* desktops = VirtualDesktops::instance();
+	for (const auto& entry: this->entries) {
+		if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd))
+			desktops->pinWindow(entry.hwnd, true);
+	}
+	this->slideOffset = this->slideDistance();
+	this->moveReal(this->slideOffset);
+	this->relayout();
+	this->waitForTakeoff(++this->slideGeneration, 0);
+	emit this->shownChanged();
+}
+
+void Scratchpad::enter() {
+	this->openedDesktop = VirtualDesktops::instance()->shownIndex();
+	this->shownAt = GetTickCount64();
+	auto* focus = this->focusCandidate();
+	this->showDim();
+	this->slide(true);
+	if (focus != nullptr) forceForegroundWindow(focus);
+	if (TilingManager::active() == nullptr) this->handle(ScratchpadEvent::Settled);
+}
+
+void Scratchpad::leave() {
+	this->hideDim();
+	if (TilingManager::active() == nullptr || this->entries.isEmpty()) {
+		this->handle(ScratchpadEvent::Settled);
 		return;
 	}
-	if (shown == this->mShown || (!shown && this->hiding)) return;
-
-	if (shown) {
-		POINT cursor {};
-		GetCursorPos(&cursor);
-		this->mMonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
-		this->shownAt = GetTickCount64();
-		this->mShown = true;
-		this->preparing = true;
-		auto* desktops = VirtualDesktops::instance();
-		for (const auto& entry: this->entries) {
-			if (IsWindow(entry.hwnd) && !desktops->isWindowPinned(entry.hwnd))
-				desktops->pinWindow(entry.hwnd, true);
-		}
-		this->slideOffset = this->slideDistance();
-		this->moveReal(this->slideOffset);
-		this->relayout();
-		this->waitForTakeoff(++this->slideGeneration, 0);
-		emit this->shownChanged();
-	} else {
-		if (this->preparing) {
-			this->preparing = false;
-			this->slideGeneration++;
-			this->finishHide();
-			return;
-		}
-		this->hideDim();
-		if (TilingManager::active() == nullptr || this->entries.isEmpty()) {
-			this->finishHide();
-			return;
-		}
-		this->hiding = true;
-		this->slide(false);
-	}
+	this->slide(false);
 }
 
 void Scratchpad::waitForTakeoff(int generation, int tries) {
-	if (generation != this->slideGeneration || !this->preparing || !this->mShown) return;
+	if (generation != this->slideGeneration || this->phase != ScratchpadPhase::Preparing) return;
 	auto* tiling = TilingManager::active();
 	auto frames = tiling != nullptr ? tiling->specialFrames() : QHash<HWND, QRect>();
 	auto ready = tiling != nullptr;
@@ -385,11 +385,7 @@ void Scratchpad::waitForTakeoff(int generation, int tries) {
 		});
 		return;
 	}
-	this->preparing = false;
-	auto* focus = this->focusCandidate();
-	this->showDim();
-	this->slide(true);
-	if (focus != nullptr) forceForegroundWindow(focus);
+	this->handle(ScratchpadEvent::Ready);
 }
 
 QList<HWND> Scratchpad::layerChain() const {
@@ -416,7 +412,7 @@ QList<HWND> Scratchpad::layerChain() const {
 }
 
 void Scratchpad::order() {
-	if (!this->mShown || this->preparing) {
+	if (!this->shown() || this->phase == ScratchpadPhase::Preparing) {
 		this->orderRetries = 0;
 		return;
 	}
@@ -445,7 +441,7 @@ void Scratchpad::focusBelow() {
 }
 
 void Scratchpad::onForeground(HWND hwnd) {
-	if (!this->mShown || this->hiding) return;
+	if (!this->shown() || this->phase == ScratchpadPhase::Leaving) return;
 	if (this->containsWindow(hwnd)) {
 		this->order();
 		return;
@@ -693,7 +689,7 @@ void Scratchpad::onSlideDone() {
 			this->dimAlpha = 0;
 			ShowWindow(this->dim, SW_HIDE);
 		}
-		if (this->hiding) this->finishHide();
+		if (this->phase == ScratchpadPhase::Leaving) this->handle(ScratchpadEvent::Settled);
 		return;
 	}
 	this->slideStop.store(true);
@@ -709,6 +705,7 @@ void Scratchpad::onSlideDone() {
 	}
 	this->jumpReal(0);
 	this->closeCover();
+	this->handle(ScratchpadEvent::Settled);
 }
 
 void Scratchpad::closeCover() {
@@ -725,7 +722,7 @@ void Scratchpad::closeCover() {
 }
 
 void Scratchpad::finishHide() {
-	this->hiding = false;
+	this->slideGeneration++;
 	this->closeCover();
 	this->dimTimer.stop();
 	this->dimTarget = 0;
@@ -734,7 +731,6 @@ void Scratchpad::finishHide() {
 		SetLayeredWindowAttributes(this->dim, 0, 0, LWA_ALPHA);
 		ShowWindow(this->dim, SW_HIDE);
 	}
-	this->mShown = false;
 	this->openedDesktop = -1;
 	this->orderTimer.stop();
 	this->dropLifted();
@@ -766,7 +762,7 @@ void Scratchpad::relayout() {
 	auto* tiling = TilingManager::active();
 	for (auto& entry: this->entries) {
 		if (!IsWindow(entry.hwnd)) continue;
-		if (this->mShown) {
+		if (this->shown()) {
 			if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
 		}
 		if (tiling != nullptr) tiling->markWindow(entry.window);
@@ -776,7 +772,7 @@ void Scratchpad::relayout() {
 		this->order();
 		return;
 	}
-	if (!this->mShown) return;
+	if (!this->shown()) return;
 	auto work = monitorRects(this->mMonitor).work;
 	auto size = QSize(work.width() * 4 / 5, work.height() * 17 / 20);
 	auto rect = QRect(work.center() - QPoint(size.width() / 2, size.height() / 2), size);
@@ -896,7 +892,7 @@ LRESULT CALLBACK Scratchpad::dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 	case WM_MBUTTONDOWN:
 		QMetaObject::invokeMethod(
 		    Scratchpad::instance(),
-		    [] { Scratchpad::instance()->setShown(false); },
+		    [] { Scratchpad::instance()->handle(ScratchpadEvent::Hide); },
 		    Qt::QueuedConnection
 		);
 		return 0;
@@ -905,7 +901,7 @@ LRESULT CALLBACK Scratchpad::dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 }
 
 void Scratchpad::onWindowAdded(TrackedWindow* window) {
-	if (this->mShown) this->add(window, false);
+	if (this->shown()) this->add(window, false);
 }
 
 void Scratchpad::onWindowRemoved(TrackedWindow* window) {
@@ -916,16 +912,16 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 		this->entries.removeAt(i);
 	}
 	this->prune();
-	if (this->mShown && this->entries.isEmpty()) {
-		this->setShown(false);
+	if (this->shown() && this->entries.isEmpty()) {
+		this->handle(ScratchpadEvent::Hide);
 		return;
 	}
 	this->relayout();
-	if (!this->mShown) return;
+	if (!this->shown()) return;
 
 	this->shownAt = GetTickCount64();
 	QTimer::singleShot(0, this, [this]() {
-		if (!this->mShown || this->entries.isEmpty()) return;
+		if (!this->shown() || this->entries.isEmpty()) return;
 		auto* active = WindowTracker::instance()->activeWindow();
 		if (active != nullptr && this->contains(active)) return;
 		if (auto* focus = this->focusCandidate()) forceForegroundWindow(focus);
@@ -933,10 +929,10 @@ void Scratchpad::onWindowRemoved(TrackedWindow* window) {
 }
 
 void Scratchpad::onActiveWindowChanged() {
-	if (!this->mShown || GetTickCount64() - this->shownAt < FOCUS_GRACE_MS) return;
+	if (!this->shown() || GetTickCount64() - this->shownAt < FOCUS_GRACE_MS) return;
 	auto* active = WindowTracker::instance()->activeWindow();
 	if (active == nullptr || this->contains(active)) return;
-	this->setShown(false);
+	this->handle(ScratchpadEvent::Hide);
 }
 
 void Scratchpad::releaseAll() {

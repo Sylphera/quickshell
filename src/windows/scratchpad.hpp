@@ -17,6 +17,8 @@
 #include <qtimer.h>
 #include <qtmetamacros.h>
 
+#include "scratchpad_phase.hpp"
+
 namespace qs::windows {
 
 class TrackedWindow;
@@ -28,7 +30,7 @@ public:
 	static Scratchpad* instance();
 	Q_DISABLE_COPY_MOVE(Scratchpad);
 
-	[[nodiscard]] bool shown() const { return this->mShown; }
+	[[nodiscard]] bool shown() const { return this->phase != ScratchpadPhase::Hidden; }
 	[[nodiscard]] HMONITOR monitor() const { return this->mMonitor; }
 	[[nodiscard]] HWND dimWindow() const { return this->dim; }
 	[[nodiscard]] int dimLevel() const { return this->dimAlpha; }
@@ -57,7 +59,10 @@ private:
 		QRect rect;
 	};
 
-	void setShown(bool shown);
+	bool handle(ScratchpadEvent event);
+	void prepare();
+	void enter();
+	void leave();
 	void hideNow();
 	void slide(bool in);
 	void closeCover();
@@ -91,7 +96,7 @@ private:
 	static LRESULT CALLBACK dimProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 	QList<Entry> entries;
-	bool mShown = false;
+	ScratchpadPhase phase = ScratchpadPhase::Hidden;
 	qsizetype openedDesktop = -1;
 	HMONITOR mMonitor = nullptr;
 	ULONGLONG shownAt = 0;
@@ -120,8 +125,6 @@ private:
 	double slideFrom = 0;
 	double slideTo = 0;
 	bool slideIn = true;
-	bool hiding = false;
-	bool preparing = false;
 	int slideOffset = 0;
 	int slideSpan = 0;
 	[[nodiscard]] bool slideDrivesDim() const;
