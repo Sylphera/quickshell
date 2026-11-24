@@ -15,6 +15,7 @@
 
 #include "desktop_slide.hpp"
 #include "dwindle_scene.hpp"
+#include "layer_order.hpp"
 #include "panel_window.hpp"
 #include "tiling.hpp"
 #include "util.hpp"
@@ -58,6 +59,8 @@ double curve(double x1, double y1, double x2, double y2, double x) {
 	return bezierAt(y1, y2, (lo + hi) / 2);
 }
 constexpr auto* DIM_CLASS = L"QuickshellScratchpadDim";
+constexpr int ORDER_VERIFY_MS = 60;
+constexpr int ORDER_RETRIES = 3;
 
 struct CrashSlot {
 	std::atomic<HWND> hwnd {nullptr};
@@ -114,41 +117,6 @@ void placeAt(HWND hwnd, HWND insertAfter, const QRect& rect) {
 	    rect.height(),
 	    SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
 	);
-}
-
-HWND lowestTopPanel() {
-	const auto panels = WinPanelWindow::aboveWindowHandles();
-	HWND lowest = nullptr;
-	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
-		if (panels.contains(hwnd)) lowest = hwnd;
-	}
-	return lowest;
-}
-
-void raise(HWND hwnd) {
-	SetWindowPos(
-	    hwnd,
-	    HWND_TOPMOST,
-	    0,
-	    0,
-	    0,
-	    0,
-	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
-	);
-	auto* anchor = DwindleScene::specialHost();
-	if (anchor == nullptr) anchor = lowestTopPanel();
-	if (anchor != nullptr) {
-		SetWindowPos(
-		    hwnd,
-		    anchor,
-		    0,
-		    0,
-		    0,
-		    0,
-		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
-		);
-	}
 }
 
 void release(HWND hwnd, const QRect& rect) {
@@ -222,7 +190,7 @@ Scratchpad* Scratchpad::instance() {
 	return SCRATCHPAD.data();
 }
 
-void Scratchpad::raiseWindow(HWND hwnd) { raise(hwnd); }
+void Scratchpad::raiseWindow(HWND /*hwnd*/) { Scratchpad::instance()->order(); }
 
 bool Scratchpad::holds(const TrackedWindow* window) {
 	return !SCRATCHPAD.isNull() && SCRATCHPAD->contains(window);
@@ -247,6 +215,15 @@ Scratchpad::Scratchpad(QObject* parent): QObject(parent) {
 
 	this->dimTimer.setInterval(DIM_FRAME_MS);
 	QObject::connect(&this->dimTimer, &QTimer::timeout, this, &Scratchpad::stepDim);
+	this->orderTimer.setSingleShot(true);
+	this->orderTimer.setInterval(ORDER_VERIFY_MS);
+	QObject::connect(&this->orderTimer, &QTimer::timeout, this, &Scratchpad::order);
+	QObject::connect(
+	    WindowTracker::instance(),
+	    &WindowTracker::foregroundChanged,
+	    this,
+	    &Scratchpad::onForeground
+	);
 
 	auto* tracker = WindowTracker::instance();
 	QObject::connect(tracker, &WindowTracker::windowAdded, this, &Scratchpad::onWindowAdded);
@@ -340,8 +317,11 @@ void Scratchpad::setShown(bool shown) {
 	if (shown && this->hiding) {
 		this->hiding = false;
 		this->openedDesktop = VirtualDesktops::instance()->shownIndex();
+		this->shownAt = GetTickCount64();
+		auto* focus = this->focusCandidate();
 		this->showDim();
 		this->slide(true);
+		if (focus != nullptr) forceForegroundWindow(focus);
 		return;
 	}
 	if (shown == this->mShown || (!shown && this->hiding)) return;
@@ -406,12 +386,87 @@ void Scratchpad::waitForTakeoff(int generation, int tries) {
 		return;
 	}
 	this->preparing = false;
-	for (const auto& entry: this->entries) raise(entry.hwnd);
 	auto* focus = this->focusCandidate();
-	if (focus != nullptr) raise(focus);
 	this->showDim();
 	this->slide(true);
 	if (focus != nullptr) forceForegroundWindow(focus);
+}
+
+QList<HWND> Scratchpad::layerChain() const {
+	QList<HWND> windows;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (this->containsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd)) windows.append(hwnd);
+	}
+
+	auto* first = GetForegroundWindow();
+	if (auto* tiling = TilingManager::active()) {
+		if (auto* fullscreen = tiling->specialFullscreenWindow()) first = fullscreen->hwnd();
+		else if (auto* maximized = tiling->specialMaximizedWindow()) first = maximized->hwnd();
+	}
+	if (windows.removeOne(first)) windows.prepend(first);
+
+	auto* host = DwindleScene::specialHost();
+	if (host != nullptr) {
+		auto held = DwindleScene::holdsSpecial() && !windows.isEmpty();
+		windows.insert(held ? 1 : 0, host);
+	}
+	if (this->cover != nullptr) windows.prepend(this->cover);
+	if (this->dim != nullptr && IsWindowVisible(this->dim)) windows.append(this->dim);
+	return windows;
+}
+
+void Scratchpad::order() {
+	if (!this->mShown || this->preparing) {
+		this->orderRetries = 0;
+		return;
+	}
+	if (!layers::apply(this->layerChain())) {
+		this->orderRetries = 0;
+		return;
+	}
+	if (this->orderRetries++ < ORDER_RETRIES) this->orderTimer.start();
+	else this->orderRetries = 0;
+}
+
+void Scratchpad::focusBelow() {
+	if (!this->containsWindow(GetForegroundWindow())) return;
+	auto* tracker = WindowTracker::instance();
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (this->containsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) continue;
+		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) continue;
+		if (tracker->windowFor(hwnd) == nullptr) continue;
+		DWORD cloaked = 0;
+		DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+		if (cloaked != 0) continue;
+		forceForegroundWindow(hwnd);
+		return;
+	}
+	forceForegroundWindow(GetShellWindow());
+}
+
+void Scratchpad::onForeground(HWND hwnd) {
+	if (!this->mShown || this->hiding) return;
+	if (this->containsWindow(hwnd)) {
+		this->order();
+		return;
+	}
+	if (isOwnProcessWindow(hwnd) || WindowTracker::instance()->windowFor(hwnd) != nullptr) return;
+	auto captioned = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
+	auto topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+	if (!captioned || topmost || IsZoomed(hwnd) || !IsWindowVisible(hwnd)) return;
+
+	this->lifted.insert(hwnd);
+	constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+	SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+	this->orderTimer.start();
+}
+
+void Scratchpad::dropLifted() {
+	constexpr UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+	for (auto* hwnd: std::as_const(this->lifted)) {
+		if (IsWindow(hwnd)) SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+	}
+	this->lifted.clear();
 }
 
 int Scratchpad::slideDistance() const {
@@ -557,26 +612,7 @@ void Scratchpad::openCover(bool show) {
 }
 
 void Scratchpad::placeCover() {
-	if (this->cover == nullptr) return;
-	HWND top = nullptr;
-	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr && top == nullptr;
-	     hwnd = GetWindow(hwnd, GW_HWNDNEXT))
-	{
-		for (const auto& entry: this->entries) {
-			if (entry.hwnd == hwnd) top = hwnd;
-		}
-	}
-	auto* above = top != nullptr ? GetWindow(top, GW_HWNDPREV) : nullptr;
-	if (above == this->cover) return;
-	SetWindowPos(
-	    this->cover,
-	    above != nullptr ? above : HWND_TOPMOST,
-	    0,
-	    0,
-	    0,
-	    0,
-	    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-	);
+	if (this->cover != nullptr) layers::apply(this->layerChain());
 }
 
 void Scratchpad::layoutCover(double offset) {
@@ -700,6 +736,9 @@ void Scratchpad::finishHide() {
 	}
 	this->mShown = false;
 	this->openedDesktop = -1;
+	this->orderTimer.stop();
+	this->dropLifted();
+	this->focusBelow();
 	for (auto& entry: this->entries) this->park(entry);
 	this->relayout();
 	this->slideOffset = 0;
@@ -729,16 +768,12 @@ void Scratchpad::relayout() {
 		if (!IsWindow(entry.hwnd)) continue;
 		if (this->mShown) {
 			if (IsZoomed(entry.hwnd)) ShowWindowAsync(entry.hwnd, SW_SHOWNOACTIVATE);
-			if (!this->preparing) raise(entry.hwnd);
 		}
 		if (tiling != nullptr) tiling->markWindow(entry.window);
 	}
 
 	if (tiling != nullptr) {
-		if (this->mShown && !this->preparing) {
-			if (auto* fullscreen = tiling->specialFullscreenWindow()) raise(fullscreen->hwnd());
-			else if (auto* maximized = tiling->specialMaximizedWindow()) raise(maximized->hwnd());
-		}
+		this->order();
 		return;
 	}
 	if (!this->mShown) return;
@@ -748,8 +783,8 @@ void Scratchpad::relayout() {
 	for (auto& entry: this->entries) {
 		if (!IsWindow(entry.hwnd)) continue;
 		placeAt(entry.hwnd, HWND_TOPMOST, rect);
-		raise(entry.hwnd);
 	}
+	this->order();
 }
 
 HWND Scratchpad::focusCandidate() const {
@@ -795,30 +830,32 @@ void Scratchpad::showDim() {
 		SetLayeredWindowAttributes(this->dim, 0, 0, LWA_ALPHA);
 	}
 
-	auto work = monitorRects(this->mMonitor).work;
-	if (work.isEmpty()) return;
-
 	auto* desktops = VirtualDesktops::instance();
 	desktops->moveWindow(this->dim, desktops->currentIndex());
-	auto* anchor = lowestTopPanel();
-	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
-		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) break;
-		if (std::ranges::any_of(this->entries, [hwnd](const Entry& entry) { return entry.hwnd == hwnd; }))
-			anchor = hwnd;
-	}
-	SetWindowPos(this->dim, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	this->placeDim();
+	this->dimTarget = DIM_ALPHA;
+	if (this->slideDrivesDim()) this->dimTimer.stop();
+	else this->dimTimer.start();
+}
+
+void Scratchpad::placeDim() {
+	auto work = monitorRects(this->mMonitor).work;
+	if (this->dim == nullptr || work.isEmpty()) return;
+
 	SetWindowPos(
 	    this->dim,
-	    anchor != nullptr ? anchor : HWND_TOPMOST,
+	    nullptr,
 	    work.x(),
 	    work.y(),
 	    work.width(),
 	    work.height(),
-	    SWP_NOACTIVATE | SWP_SHOWWINDOW
+	    SWP_NOZORDER | SWP_NOACTIVATE
 	);
-	this->dimTarget = DIM_ALPHA;
-	if (this->slideDrivesDim()) this->dimTimer.stop();
-	else this->dimTimer.start();
+	auto chain = this->layerChain();
+	if (!chain.contains(this->dim)) chain.append(this->dim);
+	layers::apply(chain);
+	ShowWindow(this->dim, SW_SHOWNOACTIVATE);
+	this->order();
 }
 
 void Scratchpad::hideDim() {

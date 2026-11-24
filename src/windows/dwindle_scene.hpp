@@ -46,6 +46,7 @@ public:
 	static void dismissAll();
 	static void drop(HMONITOR monitor);
 	static HWND specialHost();
+	static bool holdsSpecial();
 };
 
 }

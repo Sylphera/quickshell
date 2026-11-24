@@ -20,6 +20,8 @@ qt_add_library(quickshell-windows STATIC
 	window_manager.cpp
 	window_rules.cpp
 	window_snap.cpp
+	layer_order.cpp
+	layer_plan.cpp
 	scratchpad.cpp
 	desktop_slide.cpp
 	desktop_trimmer.cpp

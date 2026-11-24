@@ -11,6 +11,7 @@
 #include <qobject.h>
 #include <qpointer.h>
 #include <qrect.h>
+#include <qset.h>
 #include <qt_windows.h>
 #include <qtclasshelpermacros.h>
 #include <qtimer.h>
@@ -74,6 +75,12 @@ private:
 	void releaseAll();
 	void prune();
 	void showDim();
+	void placeDim();
+	void order();
+	[[nodiscard]] QList<HWND> layerChain() const;
+	void focusBelow();
+	void onForeground(HWND hwnd);
+	void dropLifted();
 	void hideDim();
 	void stepDim();
 	void relayout();
@@ -92,6 +99,9 @@ private:
 	int dimAlpha = 0;
 	int dimTarget = 0;
 	QTimer dimTimer;
+	QTimer orderTimer;
+	QSet<HWND> lifted;
+	int orderRetries = 0;
 	struct CoverThumb {
 		HWND hwnd = nullptr;
 		HTHUMBNAIL thumbnail = nullptr;

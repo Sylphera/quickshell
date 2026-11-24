@@ -24,6 +24,7 @@
 #include <qtimer.h>
 
 #include "dwindle_scene_geometry.hpp"
+#include "layer_order.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
 #include "util.hpp"
@@ -503,6 +504,7 @@ public:
 	[[nodiscard]] QRect frameForDrag(HWND window) const;
 	[[nodiscard]] HWND hostWindow() const { return this->host; }
 	[[nodiscard]] HWND focusedWindow() const { return this->focused; }
+	[[nodiscard]] bool held() const { return this->focused != nullptr && this->released; }
 
 	QRect work;
 	HWND dim = nullptr;
@@ -1418,8 +1420,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused)
 }
 
 bool Scene::staysAbove(HWND hwnd) const {
-	if (hwnd == this->host || this->tiles.contains(hwnd) || isOwnProcessWindow(hwnd)) return false;
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || cloaked(hwnd)) return false;
+	if (hwnd == this->host || this->tiles.contains(hwnd) || !layers::staysAbove(hwnd)) return false;
 	if (Scratchpad::holds(WindowTracker::instance()->windowFor(hwnd))) return false;
 	return frame(hwnd).intersects(this->visibleWork);
 }
@@ -1988,6 +1989,13 @@ HWND DwindleScene::specialHost() {
 		if (scene != nullptr && scene->visible() && scene->dim != nullptr) return scene->hostWindow();
 	}
 	return nullptr;
+}
+
+bool DwindleScene::holdsSpecial() {
+	for (const auto& [monitor, scene]: scenes()) {
+		if (scene != nullptr && scene->visible() && scene->dim != nullptr) return scene->held();
+	}
+	return false;
 }
 
 void DwindleScene::dismissAll() { scenes().clear(); }

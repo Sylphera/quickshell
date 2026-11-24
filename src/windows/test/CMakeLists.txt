@@ -68,3 +68,11 @@ qt_add_executable(window_snap_test
 
 target_include_directories(window_snap_test PRIVATE ${QS_WINDOWS_SRC})
 target_link_libraries(window_snap_test PRIVATE Qt6::Core Qt6::Test)
+
+qt_add_executable(layer_plan_test
+	layer_plan_test.cpp
+	${QS_WINDOWS_SRC}/layer_plan.cpp
+)
+
+target_include_directories(layer_plan_test PRIVATE ${QS_WINDOWS_SRC})
+target_link_libraries(layer_plan_test PRIVATE Qt6::Core Qt6::Test)
