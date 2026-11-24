@@ -103,6 +103,12 @@ bool framelessCover(HWND hwnd) {
 }
 
 constexpr int SYNC_DELAY_MS = 30;
+constexpr int FLOATING_TOLERANCE = 5;
+constexpr int NOTICE_MINIMUM = 40;
+constexpr int NOTICE_SETTLE_MS = 150;
+constexpr double FLOATING_WIDTH = 0.6;
+constexpr double FLOATING_HEIGHT = 0.65;
+constexpr double FLOATING_MAXIMUM = 0.9;
 constexpr int DWINDLE_FIRST_OPENING_INTERVAL_MS = 72;
 constexpr int DWINDLE_OPENING_INTERVAL_MS = 28;
 constexpr int VERIFY_DELAY_MS = 150;
@@ -432,6 +438,12 @@ TilingManager::TilingManager() {
 	this->syncTimer.setSingleShot(true);
 	this->syncTimer.setInterval(SYNC_DELAY_MS);
 	QObject::connect(&this->syncTimer, &QTimer::timeout, this, &TilingManager::sync);
+	this->restackTimer.setSingleShot(true);
+	this->restackTimer.setInterval(0);
+	QObject::connect(&this->restackTimer, &QTimer::timeout, this, &TilingManager::restack);
+	QObject::connect(this, &TilingManager::windowTilingChanged, this, [this] {
+		this->restackTimer.start();
+	});
 
 	this->verifyTimer.setSingleShot(true);
 	this->verifyTimer.setInterval(VERIFY_DELAY_MS);
@@ -1035,6 +1047,12 @@ bool TilingManager::start() {
 	c.append(QObject::connect(
 	    this->tracker, &WindowTracker::windowCreated, this, &TilingManager::coverNewWindow
 	));
+	c.append(QObject::connect(this->tracker, &WindowTracker::foregroundChanged, this, [this] {
+		this->restackTimer.start();
+	}));
+	c.append(QObject::connect(this->tracker, &WindowTracker::windowCreated, this, [this] {
+		QTimer::singleShot(NOTICE_SETTLE_MS, this, [this] { this->restackTimer.start(); });
+	}));
 	c.append(QObject::connect(
 	    this->tracker,
 	    &WindowTracker::activeWindowChanged,
@@ -1142,6 +1160,7 @@ void TilingManager::stop() {
 	this->dragging = nullptr;
 	this->edgeDragState = EdgeDrag();
 	this->syncTimer.stop();
+	this->restackTimer.stop();
 	this->verifyTimer.stop();
 	this->deadlineTimer.stop();
 
@@ -1289,7 +1308,7 @@ bool TilingManager::floatsByRule(const Managed& m) const {
 	    WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_DLGMODALFRAME;
 	if ((exStyle & FLOATING_EX) != 0) return true;
 
-	if ((style & WS_THICKFRAME) == 0) return true;
+	if ((style & WS_THICKFRAME) == 0 || (style & WS_MAXIMIZEBOX) == 0) return true;
 
 	if (windowClass(hwnd) == QStringLiteral("#32770")) return true;
 
@@ -1527,7 +1546,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 
 		auto floated = !window->minimized() && window->desktop() >= 0 && !m.elevated;
 		this->takeOut(m);
-		if (floated) this->restoreFloating(m);
+		if (floated) this->restoreFloating(m, m.override == Override::Float);
 		else this->unpark(m);
 		return;
 	}
@@ -2404,7 +2423,144 @@ void TilingManager::armDeadline() {
 	this->deadlineTimer.start(static_cast<int>(remaining));
 }
 
-void TilingManager::restoreFloating(Managed& m) {
+namespace {
+
+enum class Layer : quint8 { Ignored, Floating, Blocking };
+
+Layer untiledLayer(HWND hwnd, bool tracked) {
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || isOwnProcessWindow(hwnd)) return Layer::Ignored;
+
+	DWORD cloaked = 0;
+	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+	if (cloaked != 0) return Layer::Ignored;
+
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	constexpr auto PASSIVE = WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+	if ((exStyle & PASSIVE) != 0) return Layer::Ignored;
+
+	BYTE alpha = 255;
+	DWORD flags = 0;
+	if ((exStyle & WS_EX_LAYERED) != 0 && GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags)
+	    && (flags & LWA_ALPHA) != 0 && alpha == 0)
+	{
+		return Layer::Ignored;
+	}
+
+	static const auto shellClasses = QSet<QString> {
+	    QStringLiteral("Progman"),
+	    QStringLiteral("WorkerW"),
+	    QStringLiteral("Shell_TrayWnd"),
+	    QStringLiteral("Shell_SecondaryTrayWnd"),
+	};
+	if (!tracked && shellClasses.contains(windowClass(hwnd))) return Layer::Ignored;
+
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return Layer::Ignored;
+	auto width = rect.right - rect.left;
+	auto height = rect.bottom - rect.top;
+	if (width < NOTICE_MINIMUM || height < NOTICE_MINIMUM) return Layer::Ignored;
+
+	auto work = monitorRects(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).work;
+	auto covers = width > work.width() * FLOATING_MAXIMUM && height > work.height() * FLOATING_MAXIMUM;
+	if (IsZoomed(hwnd) || (covers && !tracked)) return Layer::Blocking;
+	return Layer::Floating;
+}
+
+}
+
+QRect TilingManager::floatingRect(const QRect& tile, const QRect& previous, const QRect& work) {
+	auto size = previous.size();
+	auto sameAsTile = std::abs(size.width() - tile.width()) < FLOATING_TOLERANCE
+	               && std::abs(size.height() - tile.height()) < FLOATING_TOLERANCE;
+	auto fillsScreen = size.width() > work.width() * FLOATING_MAXIMUM
+	                && size.height() > work.height() * FLOATING_MAXIMUM;
+	if (previous.isNull() || sameAsTile || fillsScreen) {
+		size = QSize(
+		    qRound(work.width() * FLOATING_WIDTH),
+		    qRound(work.height() * FLOATING_HEIGHT)
+		);
+		size = size.boundedTo(QSize(
+		    qRound(qMax(tile.width(), work.width() / 2) * FLOATING_MAXIMUM),
+		    qRound(qMax(tile.height(), work.height() / 2) * FLOATING_MAXIMUM)
+		));
+	}
+	auto rect = QRect(QPoint(), size);
+	rect.moveCenter(tile.center());
+	return clampInto(rect, work);
+}
+
+void TilingManager::collectLayers(
+    QSet<HWND>& blocking,
+    QSet<HWND>& tiled,
+    QSet<HWND>& skipped
+) const {
+	for (const auto& [window, m]: this->managed) {
+		auto* hwnd = window->hwnd();
+		if (window->desktop() != this->desktops->currentIndex() || Scratchpad::holds(window)) continue;
+		if (window->minimized() || !IsWindowVisible(hwnd)) continue;
+		if (window->fullscreen() || window->borderlessFullscreen() || m.fullscreen) {
+			blocking.insert(hwnd);
+			continue;
+		}
+		if (m.layout == nullptr) continue;
+		auto settled = !m.staged && !m.offscreen && !m.popping && !IsHungAppWindow(hwnd);
+		if (settled && this->stateOf(m) == State::Tiled) tiled.insert(hwnd);
+		else skipped.insert(hwnd);
+	}
+}
+
+void TilingManager::restack() {
+	if (!this->mEnabled || this->tracker == nullptr || this->dragging != nullptr) return;
+	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return;
+
+	QSet<HWND> blocking;
+	QSet<HWND> tiled;
+	QSet<HWND> skipped;
+	this->collectLayers(blocking, tiled, skipped);
+	if (tiled.isEmpty()) return;
+
+	struct Search {
+		const QSet<HWND>& blocking;
+		const QSet<HWND>& tiled;
+		const QSet<HWND>& skipped;
+		const WindowTracker* tracker;
+		QList<HWND> pending;
+		QList<HWND> above;
+		HWND lowest = nullptr;
+	};
+	auto search = Search {.blocking = blocking, .tiled = tiled, .skipped = skipped, .tracker = this->tracker};
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    auto* search = reinterpret_cast<Search*>(param);
+		    if (search->blocking.contains(hwnd)) return FALSE;
+		    if (search->skipped.contains(hwnd)) return TRUE;
+		    if (search->tiled.contains(hwnd)) {
+			    search->pending.append(hwnd);
+			    return TRUE;
+		    }
+		    auto* window = search->tracker->windowFor(hwnd);
+		    if (Scratchpad::holds(window)) return TRUE;
+		    auto layer = untiledLayer(hwnd, window != nullptr);
+		    if (layer == Layer::Blocking) return FALSE;
+		    if (layer == Layer::Floating) {
+			    search->lowest = hwnd;
+			    search->above.append(search->pending);
+			    search->pending.clear();
+		    }
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&search)
+	);
+
+	for (auto* hwnd: search.above) {
+		qCDebug(logTiling) << "Keeping" << hwnd << "under" << search.lowest << windowClass(search.lowest);
+		constexpr UINT flags =
+		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+		SetWindowPos(hwnd, search.lowest, 0, 0, 0, 0, flags);
+	}
+}
+
+void TilingManager::restoreFloating(Managed& m, bool besideTile) {
 	this->restoreTinyCorners(m);
 	auto* hwnd = m.window->hwnd();
 	auto previous = m.preTiling;
@@ -2418,9 +2574,9 @@ void TilingManager::restoreFloating(Managed& m) {
 	}
 
 	if (previous.isNull()) previous = parkedAt;
-	if (previous.isNull()) return;
+	if (previous.isNull() && !besideTile) return;
 
-	if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+	if (!previous.isNull() && (IsIconic(hwnd) || IsZoomed(hwnd))) {
 		restorePlacement(hwnd, onScreen(previous));
 		return;
 	}
@@ -2429,6 +2585,13 @@ void TilingManager::restoreFloating(Managed& m) {
 	QRect frame;
 	if (!readFrame(hwnd, raw, frame)) return;
 	if (!parkedAt.isNull()) raw = parkedAt;
+
+	if (besideTile) {
+		auto tileRect = toRECT(raw);
+		auto work = monitorRects(MonitorFromRect(&tileRect, MONITOR_DEFAULTTONEAREST)).work;
+		setRawRect(hwnd, floatingRect(raw, previous, work));
+		return;
+	}
 
 	auto rect = previous;
 	auto previousRect = toRECT(previous);
@@ -2783,6 +2946,7 @@ void TilingManager::onActiveWindowChanged() {
 	auto* window = this->tracker->activeWindow();
 	auto iter = this->managed.find(window);
 	if (iter == this->managed.end()) return;
+	this->restackTimer.start();
 
 	auto& m = iter->second;
 	m.focusStamp = ++this->focusCounter;

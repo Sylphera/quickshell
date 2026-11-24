@@ -294,7 +294,10 @@ private:
 	bool needsNativeFrameRefresh(Managed& m);
 	void send(Managed& m, const QRect& frame, bool refreshNativeFrame = false);
 	void armDeadline();
-	void restoreFloating(Managed& m);
+	void restoreFloating(Managed& m, bool besideTile = false);
+	[[nodiscard]] static QRect floatingRect(const QRect& tile, const QRect& previous, const QRect& work);
+	void restack();
+	void collectLayers(QSet<HWND>& blocking, QSet<HWND>& tiled, QSet<HWND>& skipped) const;
 
 	[[nodiscard]] static tiling::ScrollingLayout* scrollingOf(const Layout* layout);
 	[[nodiscard]] tiling::ScrollingLayout* scrollingFor(TrackedWindow* window, Layout** layout);
@@ -374,6 +377,7 @@ private:
 
 	HANDLE ownerMutex = nullptr;
 	QTimer syncTimer;
+	QTimer restackTimer;
 	QTimer verifyTimer;
 	QTimer deadlineTimer;
 	QTimer closeCacheTimer;
