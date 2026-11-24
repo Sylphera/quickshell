@@ -8,6 +8,7 @@
 #include <qlist.h>
 #include <qobject.h>
 #include <qpoint.h>
+#include <qpointer.h>
 #include <qproperty.h>
 #include <qrect.h>
 #include <qscreen.h>
@@ -102,6 +103,7 @@ private:
 	void refreshTitle();
 	void refreshState();
 	void refreshDesktop(bool askShell);
+	void raise();
 
 	WindowTracker* tracker;
 	HWND mHwnd;
@@ -148,6 +150,8 @@ public:
 	void rescan();
 	void refreshForeground();
 	void noteMoveSize(HWND hwnd, bool started);
+	void activateAfterSwitch(TrackedWindow* window, qsizetype desktop);
+	[[nodiscard]] bool activationPending() const { return this->activationDesktop >= 0; }
 
 signals:
 	void windowAdded(TrackedWindow* window);
@@ -198,6 +202,10 @@ private:
 	QSet<HWND> moving;
 	QHash<HWND, bool> cloakSettling;
 	QTimer cloakSettleTimer;
+	QPointer<TrackedWindow> activation;
+	qsizetype activationDesktop = -1;
+	QTimer activationTimer;
+	void finishActivation();
 	bool foregroundDirty = false;
 	QTimer foregroundRetryTimer;
 	int foregroundRetries = 0;

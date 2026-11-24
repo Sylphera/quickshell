@@ -55,6 +55,7 @@ constexpr int MOVING_FLUSH_MS = 50;
 constexpr int SWEEP_INTERVAL_MS = 10000;
 constexpr int CLOAK_SETTLE_MS = 250;
 constexpr int FOREGROUND_RETRY_MS = 100;
+constexpr int ACTIVATION_LIMIT_MS = 2000;
 constexpr int FOREGROUND_RETRIES = 20;
 
 std::mutex gEventMutex;                       // NOLINT
@@ -451,24 +452,37 @@ void TrackedWindow::refreshDesktop(bool askShell) {
 void TrackedWindow::activate() {
 	auto* desktops = this->tracker->desktops();
 	auto desktop = desktops->windowDesktopIndex(this->mHwnd);
-	auto switched = false;
-
-	if (desktop != -1 && desktop != desktops->currentIndex()) {
-		switched = desktops->switchTo(desktop);
+	if (desktop == -1 || desktop == desktops->currentIndex()) {
+		this->raise();
+	} else if (desktops->accessorLoaded()) {
+		this->tracker->activateAfterSwitch(this, desktop);
+	} else if (desktops->switchTo(desktop)) {
+		QTimer::singleShot(400, this, &TrackedWindow::raise);
+	} else {
+		this->raise();
 	}
+}
 
+void TrackedWindow::raise() {
 	if (IsIconic(this->mHwnd)) ShowWindowAsync(this->mHwnd, SW_RESTORE);
-
 	auto* target = GetLastActivePopup(this->mHwnd);
 	if (target == nullptr || !IsWindowVisible(target)) target = this->mHwnd;
+	forceForegroundWindow(target);
+}
 
-	auto raise = [target]() { forceForegroundWindow(target); };
+void WindowTracker::activateAfterSwitch(TrackedWindow* window, qsizetype desktop) {
+	this->activation = window;
+	this->activationDesktop = desktop;
+	this->activationTimer.start();
+	this->mDesktops->switchToAsync(desktop);
+}
 
-	if (switched && !desktops->accessorLoaded()) {
-		QTimer::singleShot(400, this, raise);
-	} else {
-		raise();
-	}
+void WindowTracker::finishActivation() {
+	this->activationTimer.stop();
+	auto desktop = std::exchange(this->activationDesktop, -1);
+	auto* window = this->activation.data();
+	this->activation = nullptr;
+	if (window != nullptr && desktop == this->mDesktops->currentIndex()) window->raise();
 }
 
 void TrackedWindow::close() {
@@ -630,6 +644,12 @@ WindowTracker::WindowTracker() {
 	    &WindowTracker::onDesktopsChanged
 	);
 
+	this->activationTimer.setSingleShot(true);
+	this->activationTimer.setInterval(ACTIVATION_LIMIT_MS);
+	QObject::connect(&this->activationTimer, &QTimer::timeout, this, &WindowTracker::finishActivation);
+	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, [this]() {
+		if (this->activationDesktop >= 0) this->finishActivation();
+	});
 	QObject::connect(this->mDesktops, &VirtualDesktops::currentChanged, this, [this]() {
 		for (auto* window: this->mWindows) {
 			auto* hwnd = window->hwnd();
