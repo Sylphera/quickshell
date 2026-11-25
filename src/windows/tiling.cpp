@@ -1056,7 +1056,6 @@ bool TilingManager::occupiesDwindleTile(HWND hwnd) const {
 		    && !(m.window->fullscreen() && framelessCover(hwnd));
 	}
 	if (m.layout == nullptr || (m.layout->special && !this->sceneShows(m.layout, 0))
-	    || m.layout->tree->kind() == tiling::Kind::Master
 	    || m.fullscreen() || m.offscreen || m.staged() || m.target.isEmpty()
 	    || this->stateOf(m) != State::Tiled || m.window->borderlessFullscreen())
 		return false;
@@ -1297,7 +1296,7 @@ void TilingManager::unmanage(TrackedWindow* window) {
 	const auto hwnd = window->hwnd();
 	auto closing = false;
 	if (DwindleScene::enabled() && this->mAnimateMoves && from != nullptr
-	    && this->layoutAlive(from) && from->tree->kind() != tiling::Kind::Master
+	    && this->layoutAlive(from)
 	    && !iter->second.fullscreen() && !iter->second.offscreen && !window->minimized()
 	    && this->sceneShows(from, this->desktops->shownIndex())
 	    && this->desktops->shownIndex() == this->desktops->currentIndex()
@@ -1726,8 +1725,7 @@ void TilingManager::syncWindow(TrackedWindow* window) {
 	    && m.preTiling.isNull() && this->mAnimateMoves && DwindleScene::enabled() && startup::settled()
 	    && this->dragging == nullptr && this->edgeDragState.window == nullptr
 	    && this->sceneShows(want, this->desktops->currentIndex())
-	    && (special || (index == this->desktops->currentIndex() && index == this->desktops->shownIndex()))
-	    && want->tree->kind() != tiling::Kind::Master && isEarlyParked(window->hwnd());
+	    && (special || (index == this->desktops->currentIndex() && index == this->desktops->shownIndex())) && isEarlyParked(window->hwnd());
 	if (pacedOpening && !want->nextOpening.hasExpired()) {
 		const auto rects = monitorRects(monitorForScreen(want->screen));
 		QRect raw;
@@ -1787,8 +1785,7 @@ void TilingManager::insertInto(
 
 	const auto newOpening = m.fresh && m.preTiling.isNull()
 	    && (!layout->special || this->sceneShows(layout, 0))
-	    && this->mAnimateMoves && DwindleScene::enabled()
-	    && layout->tree->kind() != tiling::Kind::Master;
+	    && this->mAnimateMoves && DwindleScene::enabled();
 	if (m.preTiling.isNull()) {
 		QRect raw;
 		QRect frame;
@@ -1904,7 +1901,6 @@ void TilingManager::prepareClose(TrackedWindow* window) {
 	}
 	auto* layout = m.layout;
 	if (layout == nullptr || !this->layoutAlive(layout)
-	    || layout->tree->kind() == tiling::Kind::Master
 	    || !this->sceneShows(layout, this->desktops->currentIndex())
 	    || this->stateOf(m) != State::Tiled || m.fullscreen() || m.offscreen
 	    || m.target.isEmpty() || this->moving.contains(window))
@@ -1952,7 +1948,6 @@ void TilingManager::cacheNextCloseFrame() {
 		}
 		auto* layout = m.layout;
 		if (layout == nullptr || !this->layoutAlive(layout)
-		    || layout->tree->kind() == tiling::Kind::Master
 		    || !this->sceneShows(layout, this->desktops->shownIndex())
 		    || this->stateOf(m) != State::Tiled || m.fullscreen() || m.offscreen || m.staged()
 		    || m.target.isEmpty() || this->moving.contains(window)) continue;
@@ -2218,7 +2213,7 @@ bool TilingManager::openFloat(Managed& m) {
 	    || !this->floats(m))
 		return false;
 	auto* home = this->floatHome(m, true);
-	if (home == nullptr || home->tree->kind() == tiling::Kind::Master
+	if (home == nullptr
 	    || !this->sceneShows(home, this->desktops->currentIndex()))
 		return false;
 	auto raw = takeEarlyPark(hwnd);
@@ -2243,7 +2238,7 @@ void TilingManager::prepareFloatClose(Managed& m) {
 	auto* window = m.window;
 	auto* hwnd = window->hwnd();
 	auto* home = this->floatHome(m, true);
-	if (home == nullptr || home->tree->kind() == tiling::Kind::Master || m.fullscreen() || m.staged()
+	if (home == nullptr || m.fullscreen() || m.staged()
 	    || !this->sceneShows(home, this->desktops->currentIndex())
 	    || (!home->special && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0))
 		return;
@@ -2283,7 +2278,7 @@ bool TilingManager::closeFloat(Managed& m) {
 	auto* home = special
 	               ? this->layoutAt(SPECIAL_DESKTOP, screen, true)
 	               : this->layoutAt(this->desktops->desktops().at(this->desktops->currentIndex()).id, screen, true);
-	if (home == nullptr || home->tree->kind() == tiling::Kind::Master
+	if (home == nullptr
 	    || !this->sceneShows(home, this->desktops->currentIndex()))
 		return false;
 	auto* monitor = monitorForScreen(screen);
@@ -2491,8 +2486,7 @@ bool TilingManager::dwindlePlan(
     bool still
 ) {
 	if (!this->mAnimateMoves || this->dragging != nullptr || this->edgeDragState.window != nullptr
-	    || !startup::settled() || this->desktops->shownIndex() != this->desktops->currentIndex()
-	    || layout->tree->kind() == tiling::Kind::Master)
+	    || !startup::settled() || this->desktops->shownIndex() != this->desktops->currentIndex())
 		return false;
 	QSet<HWND> participants;
 	auto* scroll = TilingManager::scrollingOf(layout);
@@ -3916,7 +3910,7 @@ bool TilingManager::detachTile(TrackedWindow* window) {
 	auto& m = iter->second;
 	auto* layout = m.layout;
 	auto* hwnd = window->hwnd();
-	if (layout == nullptr || layout->tree->kind() == tiling::Kind::Master || m.fullscreen() || m.offscreen
+	if (layout == nullptr || m.fullscreen() || m.offscreen
 	    || this->stateOf(m) != State::Tiled || IsZoomed(hwnd) || IsHungAppWindow(hwnd))
 		return false;
 
@@ -3997,7 +3991,7 @@ bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint
 	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
 	if (IsEqualGUID(desktop, SPECIAL_DESKTOP)) screen = screenForMonitor(Scratchpad::instance()->monitor());
 	auto* layout = this->layoutAt(desktop, screen, true);
-	if (layout == nullptr || layout->tree->kind() == tiling::Kind::Master) return false;
+	if (layout == nullptr) return false;
 
 	const auto frame = this->managedFrame(m);
 	if (m.layout != nullptr) {
@@ -4005,7 +3999,7 @@ bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint
 		this->takeOut(m);
 	}
 	layout->animateRearrangement = true;
-	if (auto* scroll = TilingManager::scrollingOf(layout)) scroll->dropNextAt(cursor);
+	layout->tree->dropNextAt(cursor);
 	this->insertInto(m, layout, nullptr, &cursor);
 	m.dropped = false;
 	m.floated = false;
@@ -4049,7 +4043,7 @@ void TilingManager::endGestureMove(TrackedWindow* window, std::optional<Edge> di
 void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	auto* from = m.layout;
 	auto self = idOf(m.window);
-	if (from->tree->kind() != tiling::Kind::Master && this->insertAtCursor(m, from->desktop, cursor)) return;
+	if (this->insertAtCursor(m, from->desktop, cursor)) return;
 
 	for (auto& [key, layout]: this->layouts) {
 		if (!IsEqualGUID(layout->desktop, from->desktop) || !this->layoutAlive(layout.get())) {
@@ -4543,8 +4537,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	auto& m = iter->second;
 	if (this->floats(m)) return this->toggleFloatMaximize(m);
 	if (m.fullscreen() && m.layout != nullptr && !window->minimized()
-	    && this->stateOf(m) == State::Tiled && !m.elevated
-	    && m.layout->tree->kind() != tiling::Kind::Master && DwindleScene::enabled()
+	    && this->stateOf(m) == State::Tiled && !m.elevated && DwindleScene::enabled()
 	    && this->mAnimateMoves && this->sceneShows(m.layout, this->desktops->currentIndex())) {
 		m.fullscreenWasMaximized = false;
 		this->leaveFullscreen(m);
@@ -4561,7 +4554,7 @@ bool TilingManager::toggleMaximize(TrackedWindow* window) {
 	if (m.layout == nullptr || m.fullscreen() || m.elevated || window->minimized()
 	    || this->stateOf(m) != State::Tiled)
 		return false;
-	if (DwindleScene::enabled() && m.layout->tree->kind() != tiling::Kind::Master
+	if (DwindleScene::enabled()
 	    && this->mAnimateMoves && this->sceneShows(m.layout, this->desktops->currentIndex())) {
 		if (!m.focusMaximized()) this->yieldFullscreenTo(m);
 		this->clearMaximized(m.layout, window, false);

@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -429,10 +430,39 @@ LayoutEngine::Id MasterLayout::firstInStack() const {
 	return index == -1 ? 0 : this->entries[index].id;
 }
 
+bool MasterLayout::insertDropped(const Entry& entry, const QPoint& point) {
+	auto best = qsizetype(-1);
+	auto bestDistance = std::numeric_limits<qint64>::max();
+	for (qsizetype i = 0; i < this->entries.length(); i++) {
+		const auto& box = this->entries[i].box;
+		if (box.isEmpty() || this->hidden.contains(this->entries[i].id)) continue;
+		const auto dx = qint64(point.x() - std::clamp(point.x(), box.left(), box.right()));
+		const auto dy = qint64(point.y() - std::clamp(point.y(), box.top(), box.bottom()));
+		const auto distance = dx * dx + dy * dy;
+		if (distance < bestDistance) {
+			best = i;
+			bestDistance = distance;
+		}
+	}
+	if (best == -1) return false;
+
+	if (best == this->firstVisible(0)) {
+		this->entries.prepend(entry);
+		return true;
+	}
+	const auto& box = this->entries[best].box;
+	const auto horizontal = this->effective == Orientation::Top || this->effective == Orientation::Bottom;
+	const auto after = this->effective != Orientation::Center
+	                && (horizontal ? point.x() > box.center().x() : point.y() > box.center().y());
+	this->entries.insert(after ? best + 1 : best, entry);
+	return true;
+}
+
 void MasterLayout::insert(Id id, Id target, const QPoint* /*cursor*/) {
 	if (this->contains(id)) return;
 
 	auto entry = Entry {.id = id, .weight = 1.0, .box = QRect()};
+	if (auto point = std::exchange(this->dropPoint, std::nullopt); point && this->insertDropped(entry, *point)) return;
 
 	if (this->entries.isEmpty()) {
 		this->entries.append(entry);

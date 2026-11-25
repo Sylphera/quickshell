@@ -77,6 +77,7 @@ public:
 	[[nodiscard]] virtual QRect area() const = 0;
 	[[nodiscard]] virtual QRect box(Id id) const = 0;
 	[[nodiscard]] virtual bool isParked(Id /*id*/) const { return false; }
+	virtual void dropNextAt(const QPoint& /*point*/) {}
 
 	[[nodiscard]] static std::unique_ptr<LayoutEngine> create(Kind kind);
 };
@@ -189,8 +190,10 @@ public:
 
 	[[nodiscard]] Id master() const;
 	[[nodiscard]] Id firstInStack() const;
+	void dropNextAt(const QPoint& point) override { this->dropPoint = point; }
 
 private:
+
 	struct Entry {
 		Id id = 0;
 		double weight = 1.0;
@@ -207,6 +210,7 @@ private:
 
 	[[nodiscard]] qsizetype indexOf(Id id) const;
 	[[nodiscard]] qsizetype firstVisible(qsizetype from) const;
+	bool insertDropped(const Entry& entry, const QPoint& point);
 	[[nodiscard]] std::optional<Divider> dividerAt(Id id, Edge edge) const;
 	void moveDivider(const Divider& divider, int position);
 	void layoutColumn(const QList<qsizetype>& column, const QRect& rect, bool vertical);
@@ -224,6 +228,7 @@ private:
 	Orientation effective = Orientation::Left;
 	QList<QList<qsizetype>> columns;
 	QList<Edge> columnSides;
+	std::optional<QPoint> dropPoint;
 };
 
 class ScrollingLayout: public LayoutEngine {
@@ -295,7 +300,7 @@ public:
 	bool toggleFullWidth(Id id);
 
 	[[nodiscard]] static const QList<double>& presets();
-	void dropNextAt(const QPoint& point) { this->dropPoint = point; }
+	void dropNextAt(const QPoint& point) override { this->dropPoint = point; }
 
 private:
 	bool insertDropped(Id id, const QPoint& point);
