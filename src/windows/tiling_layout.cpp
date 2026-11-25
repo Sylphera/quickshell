@@ -871,6 +871,11 @@ ScrollingLayout::Metrics ScrollingLayout::metrics() const {
 	auto cumulative = 0.0;
 	auto previous = 0;
 	auto any = false;
+	auto shown = 0;
+	for (qsizetype i = 0; i < this->columns.length(); i++) {
+		if (this->columnVisible(i)) shown++;
+	}
+	const auto single = this->mFullscreenOnOneColumn && shown == 1;
 
 	for (qsizetype i = 0; i < this->columns.length(); i++) {
 		m.x.append(previous);
@@ -880,7 +885,7 @@ ScrollingLayout::Metrics ScrollingLayout::metrics() const {
 			continue;
 		}
 
-		cumulative += this->columns[i].width;
+		cumulative += single ? 1.0 : this->columns[i].width;
 		auto next = static_cast<int>(std::lround(cumulative * m.base));
 		auto pitch = qMax(2 * this->gapsIn + 1, next - previous);
 		m.width.append(pitch - 2 * this->gapsIn);
@@ -1202,6 +1207,7 @@ void ScrollingLayout::setHidden(Id id, bool hidden) {
 void ScrollingLayout::configure(const Options& options) {
 	this->defaultWidth = clampWidth(options.columnWidth);
 	this->mCenterMode = options.centerMode;
+	this->mFullscreenOnOneColumn = options.fullscreenOnOneColumn;
 
 	QList<double> widths;
 	for (auto width: options.widthPresets) widths.append(clampWidth(width));

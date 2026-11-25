@@ -34,6 +34,7 @@ struct Options {
 	Orientation orientation = Orientation::Left;
 	double mfact = 0.55;
 	double columnWidth = 0.5;
+	bool fullscreenOnOneColumn = true;
 	QList<double> widthPresets;
 	CenterMode centerMode = CenterMode::Overflow;
 };
@@ -358,6 +359,7 @@ private:
 	double defaultWidth = 0.5;
 	QList<double> widthPresets = ScrollingLayout::presets();
 	CenterMode mCenterMode = CenterMode::Overflow;
+	bool mFullscreenOnOneColumn = true;
 	Id activeId = 0;
 	Id openedChild = 0;
 	Id openedParent = 0;

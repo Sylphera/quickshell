@@ -15,6 +15,7 @@
 #include "desktop_slide.hpp"
 #include "desktop_trimmer.hpp"
 #include "scratchpad.hpp"
+#include "tiling.hpp"
 #include "util.hpp"
 #include "virtual_desktops.hpp"
 #include "window_decorations.hpp"
@@ -417,6 +418,10 @@ void WorkspaceBehavior::warpCursor(HWND hwnd) {
 	RECT frame {};
 	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) {
 		if (!GetWindowRect(hwnd, &frame)) return;
+	}
+	if (auto* tiling = TilingManager::active()) {
+		const auto goal = tiling->goalFrame(hwnd);
+		if (!goal.isEmpty()) frame = {goal.left(), goal.top(), goal.left() + goal.width(), goal.top() + goal.height()};
 	}
 
 	POINT cursor {};

@@ -337,6 +337,11 @@ private:
 	void yieldFullscreenTo(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout = false) const;
 	[[nodiscard]] QRect stripTile(const Layout* layout, TrackedWindow* window) const;
+
+public:
+	[[nodiscard]] QRect goalFrame(HWND hwnd) const;
+
+private:
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
 	void cacheNextCloseFrame();

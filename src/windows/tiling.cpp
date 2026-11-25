@@ -2593,6 +2593,22 @@ void TilingManager::coverNewWindow(HWND hwnd) {
 		DwindleScene::cover(monitor, rects.work, plan);
 }
 
+QRect TilingManager::goalFrame(HWND hwnd) const {
+	if (!this->mEnabled || this->tracker == nullptr) return {};
+	auto* window = this->tracker->windowFor(hwnd);
+	auto found = this->managed.find(window);
+	if (found == this->managed.end()) return {};
+	const auto& m = found->second;
+	if (m.layout == nullptr || m.layout->screen == nullptr || this->stateOf(m) != State::Tiled || m.fullscreen()
+	    || m.focusMaximized())
+		return {};
+	auto tile = TilingManager::scrollingOf(m.layout) != nullptr ? this->stripTile(m.layout, window)
+	          : m.target.isNull()                               ? this->tileRect(m.layout, window)
+	                                                            : m.target;
+	const auto rects = monitorRects(monitorForScreen(m.layout->screen));
+	return rects.valid ? tile.intersected(rects.work) : tile;
+}
+
 QRect TilingManager::stripTile(const Layout* layout, TrackedWindow* window) const {
 	auto* scroll = TilingManager::scrollingOf(layout);
 	if (scroll == nullptr) return this->tileRect(layout, window);

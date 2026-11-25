@@ -193,6 +193,10 @@ void warpToWindow(HWND hwnd) {
 	if (hwnd == nullptr || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame)))) {
 		return;
 	}
+	if (auto* tiling = TilingManager::active()) {
+		const auto goal = tiling->goalFrame(hwnd);
+		if (!goal.isEmpty()) frame = {goal.left(), goal.top(), goal.left() + goal.width(), goal.top() + goal.height()};
+	}
 	POINT cursor {};
 	if (GetCursorPos(&cursor) && PtInRect(&frame, cursor)) return;
 	SetCursorPos((frame.left + frame.right) / 2, (frame.top + frame.bottom) / 2);
