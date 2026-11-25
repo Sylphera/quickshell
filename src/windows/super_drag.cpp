@@ -817,6 +817,7 @@ void SuperDragManager::onHover(POINT point, bool byLayout) {
 	auto* desktops = VirtualDesktops::instance();
 	if (desktops->shownIndex() != desktops->currentIndex()) return;
 
+	if (tiling != nullptr) tiling->noteHoverFocus(root);
 	forceForegroundWindow(root);
 }
 

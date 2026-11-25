@@ -133,6 +133,7 @@ constexpr int CHROMIUM_CORNER_LIMIT = 256;
 constexpr int SYSTEM_CAPTION_MIN = 8;
 constexpr int TINY_CORNER_RADIUS = 12;
 constexpr qint32 SPECIAL_GAPS_OUT = 30;
+constexpr double FOLLOW_MIN_VISIBLE = 0.4;
 constexpr GUID SPECIAL_DESKTOP = {0x5ec1a100, 0x0000, 0x0000, {0x73, 0x70, 0x65, 0x63, 0x69, 0x61, 0x6c, 0x00}};
 constexpr std::size_t TINY_CORNER_SLOTS = 256;
 constexpr auto* TINY_CORNER_PROP = L"QuickshellTilingTinyRounded";
@@ -3646,10 +3647,26 @@ void TilingManager::onActiveWindowChanged() {
 
 	m.layout->lastFocused = window;
 
+	const auto hovered = this->hoverFocus == window->hwnd() && GetTickCount() - this->hoverFocusAt < 1000;
+	this->hoverFocus = nullptr;
 	if (auto* scroll = TilingManager::scrollingOf(m.layout)) {
 		this->prepareScrolling(m.layout);
+		if (hovered && this->visibleFraction(m) < FOLLOW_MIN_VISIBLE) return;
 		if (scroll->activate(idOf(window))) this->markLayout(m.layout);
 	}
+}
+
+void TilingManager::noteHoverFocus(HWND hwnd) {
+	this->hoverFocus = hwnd;
+	this->hoverFocusAt = GetTickCount();
+}
+
+double TilingManager::visibleFraction(const Managed& m) const {
+	if (m.layout == nullptr || m.layout->screen == nullptr) return 1.0;
+	const auto tile = this->stripTile(m.layout, m.window);
+	const auto rects = monitorRects(monitorForScreen(m.layout->screen));
+	if (!rects.valid || tile.width() <= 0) return 1.0;
+	return static_cast<double>(tile.intersected(rects.work).width()) / tile.width();
 }
 
 void TilingManager::hold(Managed& m, const QRect& tile) {

@@ -337,9 +337,13 @@ private:
 	void yieldFullscreenTo(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout = false) const;
 	[[nodiscard]] QRect stripTile(const Layout* layout, TrackedWindow* window) const;
+	[[nodiscard]] double visibleFraction(const Managed& m) const;
+	HWND hoverFocus = nullptr;
+	DWORD hoverFocusAt = 0;
 
 public:
 	[[nodiscard]] QRect goalFrame(HWND hwnd) const;
+	void noteHoverFocus(HWND hwnd);
 
 private:
 	void place(Managed& m, const QRect& tile);
