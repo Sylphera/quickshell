@@ -295,8 +295,11 @@ public:
 	bool toggleFullWidth(Id id);
 
 	[[nodiscard]] static const QList<double>& presets();
+	void dropNextAt(const QPoint& point) { this->dropPoint = point; }
 
 private:
+	bool insertDropped(Id id, const QPoint& point);
+
 	struct Window {
 		Id id = 0;
 		double weight = 1.0;
@@ -360,6 +363,7 @@ private:
 	QList<double> widthPresets = ScrollingLayout::presets();
 	CenterMode mCenterMode = CenterMode::Overflow;
 	bool mFullscreenOnOneColumn = true;
+	std::optional<QPoint> dropPoint;
 	Id activeId = 0;
 	Id openedChild = 0;
 	Id openedParent = 0;

@@ -1073,8 +1073,35 @@ void ScrollingLayout::insertColumn(qsizetype index, const Window& window, double
 	this->columns.insert(qBound(qsizetype(0), index, this->columns.length()), column);
 }
 
+bool ScrollingLayout::insertDropped(Id id, const QPoint& point) {
+	constexpr double EDGE = 0.3;
+	for (auto it = this->visible.cbegin(); it != this->visible.cend(); ++it) {
+		const auto& box = it.value();
+		if (!box.contains(point) || this->hidden.contains(it.key())) continue;
+		auto at = this->find(it.key());
+		if (at.column == -1) continue;
+
+		if (point.x() <= box.left() + box.width() * EDGE) {
+			this->insertColumn(at.column, Window {.id = id, .weight = 1.0}, this->defaultWidth);
+		} else if (point.x() >= box.left() + box.width() * (1.0 - EDGE)) {
+			this->insertColumn(at.column + 1, Window {.id = id, .weight = 1.0}, this->defaultWidth);
+		} else {
+			auto& column = this->columns[at.column];
+			const auto top = point.y() < box.center().y();
+			column.windows.insert(top ? at.row : at.row + 1, Window {.id = id, .weight = 1.0});
+			column.focused = id;
+		}
+		this->activeId = id;
+		this->openedChild = 0;
+		this->openedParent = 0;
+		return true;
+	}
+	return false;
+}
+
 void ScrollingLayout::insert(Id id, Id target, const QPoint* /*cursor*/) {
 	if (this->contains(id)) return;
+	if (auto point = std::exchange(this->dropPoint, std::nullopt); point && this->insertDropped(id, *point)) return;
 
 	auto anchor = this->find(target).column;
 	if (anchor == -1) anchor = this->activeColumn();

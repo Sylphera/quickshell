@@ -3899,7 +3899,7 @@ bool TilingManager::detachTile(TrackedWindow* window) {
 	auto& m = iter->second;
 	auto* layout = m.layout;
 	auto* hwnd = window->hwnd();
-	if (layout == nullptr || layout->tree->kind() != tiling::Kind::Dwindle || m.fullscreen() || m.offscreen
+	if (layout == nullptr || layout->tree->kind() == tiling::Kind::Master || m.fullscreen() || m.offscreen
 	    || this->stateOf(m) != State::Tiled || IsZoomed(hwnd) || IsHungAppWindow(hwnd))
 		return false;
 
@@ -3980,7 +3980,7 @@ bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint
 	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
 	if (IsEqualGUID(desktop, SPECIAL_DESKTOP)) screen = screenForMonitor(Scratchpad::instance()->monitor());
 	auto* layout = this->layoutAt(desktop, screen, true);
-	if (layout == nullptr || layout->tree->kind() != tiling::Kind::Dwindle) return false;
+	if (layout == nullptr || layout->tree->kind() == tiling::Kind::Master) return false;
 
 	const auto frame = this->managedFrame(m);
 	if (m.layout != nullptr) {
@@ -3988,6 +3988,7 @@ bool TilingManager::insertAtCursor(Managed& m, const GUID& desktop, const QPoint
 		this->takeOut(m);
 	}
 	layout->animateRearrangement = true;
+	if (auto* scroll = TilingManager::scrollingOf(layout)) scroll->dropNextAt(cursor);
 	this->insertInto(m, layout, nullptr, &cursor);
 	m.dropped = false;
 	m.floated = false;
@@ -4031,7 +4032,7 @@ void TilingManager::endGestureMove(TrackedWindow* window, std::optional<Edge> di
 void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	auto* from = m.layout;
 	auto self = idOf(m.window);
-	if (from->tree->kind() == tiling::Kind::Dwindle && this->insertAtCursor(m, from->desktop, cursor)) return;
+	if (from->tree->kind() != tiling::Kind::Master && this->insertAtCursor(m, from->desktop, cursor)) return;
 
 	for (auto& [key, layout]: this->layouts) {
 		if (!IsEqualGUID(layout->desktop, from->desktop) || !this->layoutAlive(layout.get())) {
