@@ -359,6 +359,7 @@ private:
 	void restoreFloating(Managed& m, bool besideTile = false);
 	[[nodiscard]] static QRect floatingRect(const QRect& tile, QSize size, const QRect& work);
 	void restack();
+	void syncFloatTopmost();
 	void collectLayers(QSet<HWND>& blocking, QSet<HWND>& tiled, QSet<HWND>& skipped) const;
 
 	[[nodiscard]] static tiling::ScrollingLayout* scrollingOf(const Layout* layout);

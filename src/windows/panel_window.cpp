@@ -365,9 +365,20 @@ public:
 	}
 
 	[[nodiscard]] bool fullscreenAppActive() const {
-		if (!this->mFullscreenApp || !DwindleScene::enabled()) return this->mFullscreenApp;
+		if (!this->mFullscreenApp) return false;
+		auto* foreground = GetForegroundWindow();
+		RECT frame {};
+		MONITORINFO monitor {.cbSize = sizeof(MONITORINFO)};
+		if (foreground == nullptr || !GetWindowRect(foreground, &frame)
+		    || !GetMonitorInfoW(MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST), &monitor))
+			return false;
+		const auto& screen = monitor.rcMonitor;
+		if (frame.left > screen.left || frame.top > screen.top || frame.right < screen.right
+		    || frame.bottom < screen.bottom)
+			return false;
+		if (!DwindleScene::enabled()) return true;
 		auto* tiling = TilingManager::active();
-		return tiling == nullptr || !tiling->occupiesDwindleTile(GetForegroundWindow());
+		return tiling == nullptr || !tiling->occupiesDwindleTile(foreground);
 	}
 	[[nodiscard]] bool shellFullscreen(HWND hwnd) const {
 		return this->mShellFullscreen.contains(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));

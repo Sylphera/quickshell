@@ -444,6 +444,29 @@ QRect frameFor(HWND hwnd, const QRect& wanted) {
 
 constexpr const wchar_t* FLOAT_SIZE_PROP = L"qs.floatsize2";
 constexpr const wchar_t* TOPMOST_PROP = L"qs.topmost";
+constexpr const wchar_t* FLOAT_TOPMOST_PROP = L"qs.floatTopmost";
+
+HWND lowestTopPanel() {
+	const auto panels = WinPanelWindow::aboveWindowHandles();
+	HWND lowest = nullptr;
+	for (auto* hwnd = GetTopWindow(nullptr); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDNEXT)) {
+		if (panels.contains(hwnd) && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) lowest = hwnd;
+	}
+	return lowest;
+}
+
+void raiseFloat(HWND hwnd, HWND under) {
+	if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) return;
+	SetPropW(hwnd, FLOAT_TOPMOST_PROP, reinterpret_cast<HANDLE>(1)); // NOLINT(performance-no-int-to-ptr)
+	SetWindowPos(hwnd, under != nullptr ? under : HWND_TOPMOST, 0, 0, 0, 0,
+	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+}
+
+void lowerFloat(HWND hwnd) {
+	if (RemovePropW(hwnd, FLOAT_TOPMOST_PROP) == nullptr) return;
+	SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+	             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+}
 
 void rememberFloatSize(HWND hwnd, const QSize& size) {
 	if (size.width() < FLOATING_TOLERANCE || size.height() < FLOATING_TOLERANCE) return;
@@ -1195,6 +1218,7 @@ void TilingManager::stop() {
 	this->stopMotions();
 	QList<TrackedWindow*> tiled;
 	for (auto& [window, m]: this->managed) {
+		lowerFloat(window->hwnd());
 		if (m.fullscreen()) {
 			this->leaveFullscreen(m);
 			setFullscreenLook(window->hwnd(), false);
@@ -2984,8 +3008,15 @@ namespace {
 
 enum class Layer : quint8 { Ignored, Floating, Blocking };
 
+bool ownAppWindow(HWND hwnd) {
+	const auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	const auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	return (style & WS_THICKFRAME) != 0 && (exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)) == 0;
+}
+
 Layer untiledLayer(HWND hwnd, bool tracked) {
-	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || isOwnProcessWindow(hwnd)) return Layer::Ignored;
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return Layer::Ignored;
+	if (isOwnProcessWindow(hwnd) && !ownAppWindow(hwnd)) return Layer::Ignored;
 
 	DWORD cloaked = 0;
 	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
@@ -3058,9 +3089,33 @@ void TilingManager::collectLayers(
 	}
 }
 
+void TilingManager::syncFloatTopmost() {
+	auto* under = lowestTopPanel();
+	for (const auto& [window, m]: this->managed) {
+		auto* hwnd = window->hwnd();
+		const auto wanted = this->floatsFreely(window) && !window->minimized() && !Scratchpad::holds(window)
+		                 && !m.focusMaximized() && !window->maximized() && IsWindowVisible(hwnd);
+		if (wanted) raiseFloat(hwnd, under);
+		else lowerFloat(hwnd);
+	}
+	struct Own {
+		HWND under;
+	};
+	auto own = Own {.under = under};
+	EnumWindows(
+	    [](HWND hwnd, LPARAM param) -> BOOL {
+		    if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && isOwnProcessWindow(hwnd) && ownAppWindow(hwnd))
+			    raiseFloat(hwnd, reinterpret_cast<Own*>(param)->under);
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&own)
+	);
+}
+
 void TilingManager::restack() {
 	if (!this->mEnabled || this->tracker == nullptr || this->dragging != nullptr) return;
 	if (this->desktops->shownIndex() != this->desktops->currentIndex()) return;
+	this->syncFloatTopmost();
 
 	QSet<HWND> blocking;
 	QSet<HWND> tiled;
