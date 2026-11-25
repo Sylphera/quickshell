@@ -3,6 +3,7 @@ qt_add_library(quickshell-windows STATIC
 	startup.cpp
 	appbar.cpp
 	input_mask.cpp
+	focus_on_activate.cpp
 	panel_window.cpp
 	panel_animation.cpp
 	panel_effects.cpp

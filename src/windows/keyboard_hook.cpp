@@ -317,6 +317,9 @@ LRESULT CALLBACK hookProc(int code, WPARAM wParam, LPARAM lParam) {
 
 	auto* info = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam); // NOLINT(performance-no-int-to-ptr)
 	qs::windows::noteHookDelay(true, info->time);
+	if ((wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) && (info->flags & LLKHF_INJECTED) == 0) {
+		qs::windows::notePress(info->time);
+	}
 
 	if ((info->flags & LLKHF_INJECTED) != 0 && info->dwExtraInfo == KeyboardHook::INJECTION_MARKER) {
 		return CallNextHookEx(nullptr, code, wParam, lParam);

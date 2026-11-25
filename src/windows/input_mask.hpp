@@ -17,6 +17,9 @@
 namespace qs::windows {
 
 void noteHookDelay(bool keyboard, DWORD eventTime);
+void notePress(DWORD eventTime);
+[[nodiscard]] DWORD lastPressTime();
+[[nodiscard]] HWND lastPressForeground();
 
 class InputMaskTracker: public QObject {
 	Q_OBJECT;

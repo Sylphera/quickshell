@@ -155,6 +155,20 @@ void noteHookDelay(bool keyboard, DWORD eventTime) {
 	while (delay > worst && !worstLateMs.compare_exchange_weak(worst, delay)) {}
 }
 
+namespace {
+std::atomic<DWORD> gLastPress = 0;            // NOLINT
+std::atomic<HWND> gPressForeground = nullptr; // NOLINT
+}
+
+void notePress(DWORD eventTime) {
+	gPressForeground.store(GetForegroundWindow(), std::memory_order_relaxed);
+	gLastPress.store(eventTime == 0 ? 1 : eventTime, std::memory_order_relaxed);
+}
+
+DWORD lastPressTime() { return gLastPress.load(std::memory_order_relaxed); }
+
+HWND lastPressForeground() { return gPressForeground.load(std::memory_order_relaxed); }
+
 InputMaskTracker* InputMaskTracker::instance() {
 	static QPointer<InputMaskTracker> tracker; // NOLINT
 
@@ -536,6 +550,7 @@ LRESULT CALLBACK InputMaskTracker::mouseHookProc(int code, WPARAM wParam, LPARAM
 
 		auto button = wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN
 		           || wParam == WM_XBUTTONDOWN;
+		if (button && (info->flags & LLMHF_INJECTED) == 0) notePress(info->time);
 
 		if (button && buttonWatchers.load() > 0) {
 			if (auto* target = hookTarget.load()) {

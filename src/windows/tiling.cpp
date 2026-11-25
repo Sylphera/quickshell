@@ -37,6 +37,7 @@
 #include <qtypes.h>
 
 #include "dwindle_scene.hpp"
+#include "focus_on_activate.hpp"
 #include "panel_window.hpp"
 #include "scratchpad.hpp"
 #include "super_drag.hpp"
@@ -539,6 +540,7 @@ void TilingManager::setEnabled(bool enabled) {
 		this->stop();
 		setWindowShadowsSuppressed(false);
 	}
+	focus_on_activate::setEnabled(enabled);
 
 	this->syncWheel();
 	emit this->enabledChanged();
