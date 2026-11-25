@@ -3342,6 +3342,7 @@ void TilingManager::markOffscreen(Managed& m, bool offscreen, const QRect& resto
 		m.offscreen = false;
 		m.restore = QRect();
 		forgetParked(hwnd);
+		this->restackTimer.start();
 		return;
 	}
 
