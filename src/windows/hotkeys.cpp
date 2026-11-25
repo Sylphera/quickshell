@@ -70,6 +70,17 @@ QChar punctuationChar(const QString& name) {
 	return chars.value(name.toLower());
 }
 
+uint8_t physicalVkForName(const QString& name, HKL layout) {
+	static const QHash<QString, UINT> scans = {
+	    {"slash", 0x35},       {"period", 0x34},       {"comma", 0x33},     {"minus", 0x0C},
+	    {"equal", 0x0D},       {"plus", 0x0D},         {"bracketleft", 0x1A}, {"bracketright", 0x1B},
+	    {"semicolon", 0x27},   {"apostrophe", 0x28},   {"grave", 0x29},     {"backslash", 0x2B},
+	};
+	auto scan = scans.value(name.toLower(), 0);
+	if (scan == 0) return 0;
+	return static_cast<uint8_t>(MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK, layout));
+}
+
 bool dependsOnLayout(const QString& keys) {
 	return std::ranges::any_of(keys.split('+'), [](const QString& part) {
 		return !punctuationChar(part.trimmed()).isNull();
@@ -468,6 +479,8 @@ bool parseKeys(const QString& text, KeyCombo& combo, QString& error) {
 					mods |= ModShift;
 					modCount++;
 				}
+			} else if (auto physical = physicalVkForName(token, activeKeyboardLayout()); physical != 0) {
+				vk = physical;
 			}
 		}
 
