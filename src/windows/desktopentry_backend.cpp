@@ -139,6 +139,68 @@ void WindowsDesktopEntryBackend::install() {
 	DesktopEntryManager::installBackend(&backend);
 }
 
+namespace {
+
+constexpr UINT WM_QS_APPS_CHANGED = WM_APP + 0x41;
+constexpr auto* APPS_WATCH_CLASS = L"QuickshellAppsWatch";
+
+std::function<void()> gAppsChanged; // NOLINT
+
+LRESULT CALLBACK appsWatchProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+	if (message != WM_QS_APPS_CHANGED) return DefWindowProcW(hwnd, message, wParam, lParam);
+	PIDLIST_ABSOLUTE* items = nullptr;
+	LONG event = 0;
+	auto* lock = SHChangeNotification_Lock(reinterpret_cast<HANDLE>(wParam), static_cast<DWORD>(lParam), &items, &event); // NOLINT(performance-no-int-to-ptr)
+	if (lock != nullptr) SHChangeNotification_Unlock(lock);
+	qCDebug(logAppsFolder) << "Shell reported an app change, event" << Qt::hex << event;
+	if (gAppsChanged) gAppsChanged();
+	return 0;
+}
+
+} // namespace
+
+void WindowsDesktopEntryBackend::watchChanges(std::function<void()> changed) {
+	static bool watching = false; // NOLINT
+	gAppsChanged = std::move(changed);
+	if (watching) return;
+
+	auto* instance = GetModuleHandleW(nullptr);
+	WNDCLASSEXW wc {};
+	wc.cbSize = sizeof(wc);
+	wc.lpfnWndProc = appsWatchProc;
+	wc.hInstance = instance;
+	wc.lpszClassName = APPS_WATCH_CLASS;
+	if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+	auto* hwnd = CreateWindowExW(0, APPS_WATCH_CLASS, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, nullptr);
+	if (hwnd == nullptr) return;
+
+	static QList<PIDLIST_ABSOLUTE> folders; // NOLINT
+	QList<SHChangeNotifyEntry> entries;
+	for (const auto& id: {FOLDERID_Programs, FOLDERID_CommonPrograms, FOLDERID_AppsFolder}) {
+		PIDLIST_ABSOLUTE pidl = nullptr;
+		if (FAILED(SHGetKnownFolderIDList(id, KF_FLAG_DEFAULT, nullptr, &pidl)) || pidl == nullptr) continue;
+		folders.append(pidl);
+		entries.append({pidl, TRUE});
+	}
+	if (entries.isEmpty()) return;
+
+	constexpr LONG events = SHCNE_CREATE | SHCNE_DELETE | SHCNE_RENAMEITEM | SHCNE_MKDIR | SHCNE_RMDIR
+	                      | SHCNE_RENAMEFOLDER | SHCNE_UPDATEDIR | SHCNE_UPDATEITEM;
+	const auto id = SHChangeNotifyRegister(
+	    hwnd,
+	    SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery,
+	    events,
+	    WM_QS_APPS_CHANGED,
+	    static_cast<int>(entries.size()),
+	    entries.constData()
+	);
+	if (id == 0) {
+		qCWarning(logAppsFolder) << "SHChangeNotifyRegister failed for the apps folders";
+		return;
+	}
+	watching = true;
+}
+
 QStringList WindowsDesktopEntryBackend::watchPaths() {
 	auto paths = QStringList();
 

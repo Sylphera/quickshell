@@ -53,6 +53,12 @@ DesktopEntryMonitor::DesktopEntryMonitor(QObject* parent): QObject(parent) {
 	);
 
 	this->startMonitoring();
+
+	if (auto* backend = DesktopEntryManager::backend()) {
+		backend->watchChanges([guard = QPointer(this)] {
+			if (guard != nullptr) guard->debounceTimer.start();
+		});
+	}
 }
 
 void DesktopEntryMonitor::startMonitoring() {

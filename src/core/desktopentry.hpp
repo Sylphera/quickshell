@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <utility>
 
 #include <qcontainerfwd.h>
@@ -57,6 +58,8 @@ public:
 	virtual void execute(const QVector<QString>& command, const QString& workingDirectory) = 0;
 
 	virtual QString aliasFor(const QString& /*name*/) { return QString(); }
+
+	virtual void watchChanges(std::function<void()> /*changed*/) {}
 };
 
 /// A desktop entry. See @@DesktopEntries for details.

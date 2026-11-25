@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <qhash.h>
 #include <qlist.h>
 #include <qmutex.h>
@@ -17,6 +19,7 @@ public:
 	QStringList watchPaths() override;
 	void execute(const QVector<QString>& command, const QString& workingDirectory) override;
 	QString aliasFor(const QString& name) override;
+	void watchChanges(std::function<void()> changed) override;
 
 	static void install();
 
