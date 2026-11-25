@@ -14,7 +14,7 @@ qs_add_module_deps_light(quickshell-windows-upower Quickshell)
 
 install_qml_module(quickshell-windows-upower)
 
-target_link_libraries(quickshell-windows-upower PRIVATE Qt::Quick quickshell-windows-services powrprof)
+target_link_libraries(quickshell-windows-upower PRIVATE Qt::Quick quickshell-windows-services powrprof setupapi)
 
 qs_module_pch(quickshell-windows-upower SET large)
 

@@ -1,10 +1,18 @@
 #include "device.hpp"
 
+#include <cmath>
+#include <vector>
+
 #include <qt_windows.h>
 
 #include <qobject.h>
 #include <qstring.h>
 #include <qtypes.h>
+
+#include <winioctl.h>
+
+#include <batclass.h>
+#include <setupapi.h>
 
 namespace qs::service::upower {
 
@@ -56,6 +64,79 @@ QString UPowerDeviceType::toString(UPowerDeviceType::Enum type) {
 	}
 }
 
+namespace {
+
+struct BatteryReading {
+	bool ok = false;
+	qreal energyWh = 0;
+	qreal fullWh = 0;
+	qreal designWh = 0;
+	qreal rateW = 0;
+};
+
+void readBattery(HDEVINFO devices, SP_DEVICE_INTERFACE_DATA& data, BatteryReading& reading) {
+	DWORD size = 0;
+	SetupDiGetDeviceInterfaceDetailW(devices, &data, nullptr, 0, &size, nullptr);
+	if (size == 0) return;
+	std::vector<BYTE> buffer(size);
+	auto* detail = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_W>(buffer.data());
+	detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+	if (!SetupDiGetDeviceInterfaceDetailW(devices, &data, detail, size, &size, nullptr)) return;
+
+	auto* battery = CreateFileW(
+	    detail->DevicePath,
+	    GENERIC_READ | GENERIC_WRITE,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE,
+	    nullptr,
+	    OPEN_EXISTING,
+	    FILE_ATTRIBUTE_NORMAL,
+	    nullptr
+	);
+	if (battery == INVALID_HANDLE_VALUE) return;
+
+	DWORD wait = 0;
+	DWORD written = 0;
+	BATTERY_QUERY_INFORMATION query {};
+	if (DeviceIoControl(battery, IOCTL_BATTERY_QUERY_TAG, &wait, sizeof(wait), &query.BatteryTag, sizeof(query.BatteryTag), &written, nullptr)
+	    && query.BatteryTag != 0)
+	{
+		BATTERY_INFORMATION info {};
+		query.InformationLevel = BatteryInformation;
+		if (DeviceIoControl(battery, IOCTL_BATTERY_QUERY_INFORMATION, &query, sizeof(query), &info, sizeof(info), &written, nullptr)
+		    && (info.Capabilities & BATTERY_SYSTEM_BATTERY) != 0 && (info.Capabilities & BATTERY_CAPACITY_RELATIVE) == 0)
+		{
+			BATTERY_WAIT_STATUS waitStatus {};
+			waitStatus.BatteryTag = query.BatteryTag;
+			BATTERY_STATUS status {};
+			if (DeviceIoControl(battery, IOCTL_BATTERY_QUERY_STATUS, &waitStatus, sizeof(waitStatus), &status, sizeof(status), &written, nullptr)) {
+				reading.ok = true;
+				reading.designWh += info.DesignedCapacity / 1000.0;
+				reading.fullWh += info.FullChargedCapacity / 1000.0;
+				if (status.Capacity != BATTERY_UNKNOWN_CAPACITY) reading.energyWh += status.Capacity / 1000.0;
+				if (static_cast<ULONG>(status.Rate) != BATTERY_UNKNOWN_RATE) reading.rateW += status.Rate / 1000.0;
+			}
+		}
+	}
+	CloseHandle(battery);
+}
+
+BatteryReading readBatteries() {
+	static const GUID batteryClass = {0x72631e54, 0x78a4, 0x11d0, {0xbc, 0xf7, 0x00, 0xaa, 0x00, 0xb7, 0xb3, 0x2a}};
+	auto reading = BatteryReading();
+	auto* devices = SetupDiGetClassDevsW(&batteryClass, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+	if (devices == INVALID_HANDLE_VALUE) return reading;
+	for (DWORD index = 0; index < 8; index++) {
+		SP_DEVICE_INTERFACE_DATA data {};
+		data.cbSize = sizeof(data);
+		if (!SetupDiEnumDeviceInterfaces(devices, nullptr, &batteryClass, index, &data)) break;
+		readBattery(devices, data, reading);
+	}
+	SetupDiDestroyDeviceInfoList(devices);
+	return reading;
+}
+
+} // namespace
+
 UPowerDevice::UPowerDevice(QObject* parent): QObject(parent) {
 	this->bIsLaptopBattery.setBinding([this]() {
 		return this->bType == UPowerDeviceType::Battery && this->bPowerSupply.value();
@@ -105,6 +186,24 @@ void UPowerDevice::updateFromSystemPowerStatus() {
 	this->bTimeToEmpty =
 	    (present && !onAc && !lifeTimeUnknown) ? qreal(status.BatteryLifeTime) : 0.0;
 	this->bTimeToFull = 0.0;
+
+	auto battery = present ? readBatteries() : BatteryReading();
+	if (battery.ok) {
+		this->bEnergy = battery.energyWh;
+		this->bEnergyCapacity = battery.fullWh;
+		this->bChangeRate = std::abs(battery.rateW);
+		this->bHealthSupported = battery.designWh > 0;
+		this->bHealthPercentage = battery.designWh > 0 ? battery.fullWh / battery.designWh * 100.0 : 100.0;
+		if (state == UPowerDeviceState::Charging && battery.rateW > 0.1 && battery.fullWh > battery.energyWh) {
+			this->bTimeToFull = (battery.fullWh - battery.energyWh) / battery.rateW * 3600.0;
+		}
+		if (state == UPowerDeviceState::Discharging && battery.rateW < -0.1 && this->bTimeToEmpty.value() <= 0) {
+			this->bTimeToEmpty = battery.energyWh / -battery.rateW * 3600.0;
+		}
+	} else {
+		this->bChangeRate = 0.0;
+		this->bHealthSupported = false;
+	}
 
 	this->bIconName = present
 	    ? (charging ? QStringLiteral("battery-good-charging-symbolic")
