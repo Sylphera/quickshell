@@ -217,6 +217,7 @@ private:
 		bool elevated = false;
 		bool autoFloat = false;
 		QRect target;
+		QRect stripTile;
 		QRect openingFrame;
 		QRect before;
 		QRect accepted;
@@ -335,6 +336,7 @@ private:
 	void updateFullscreenLook(Managed& m);
 	void yieldFullscreenTo(Managed& m);
 	[[nodiscard]] QRect tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout = false) const;
+	[[nodiscard]] QRect stripTile(const Layout* layout, TrackedWindow* window) const;
 	void place(Managed& m, const QRect& tile);
 	void hold(Managed& m, const QRect& tile);
 	void cacheNextCloseFrame();

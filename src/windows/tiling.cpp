@@ -1827,7 +1827,10 @@ void TilingManager::insertInto(
 		this->prepareScrolling(layout);
 		auto focused = this->tracker->activeWindow() == window
 		            || GetForegroundWindow() == window->hwnd();
-		if (focused) scroll->activate(idOf(window));
+		if (focused) {
+			scroll->activate(idOf(window));
+			layout->lastFocused = window;
+		}
 	}
 
 	m.layout = layout;
@@ -2043,6 +2046,7 @@ void TilingManager::apply(Layout* layout) {
 		}
 
 		auto parked = scroll != nullptr && scroll->isParked(id);
+		m.stripTile = scroll != nullptr ? this->stripTile(layout, window) : QRect();
 		auto restore = QRect();
 		if (parked) restore = clampInto(scroll->visibleBox(id).adjusted(in, in, -in, -in), rects.work);
 		this->markOffscreen(m, parked, restore);
@@ -2487,9 +2491,10 @@ bool TilingManager::dwindlePlan(
 ) {
 	if (!this->mAnimateMoves || this->dragging != nullptr || this->edgeDragState.window != nullptr
 	    || !startup::settled() || this->desktops->shownIndex() != this->desktops->currentIndex()
-	    || layout->tree->kind() != tiling::Kind::Dwindle)
+	    || layout->tree->kind() == tiling::Kind::Master)
 		return false;
 	QSet<HWND> participants;
+	auto* scroll = TilingManager::scrollingOf(layout);
 	for (auto id: layout->tree->ids()) {
 		auto* window = this->windowOf(id);
 		if (window == nullptr) continue;
@@ -2498,28 +2503,31 @@ bool TilingManager::dwindlePlan(
 		if (this->stateOf(m) != State::Tiled || m.maximizedTile || m.elevated
 		    || this->moving.contains(window))
 			return false;
-		auto tile = this->tileRect(layout, window);
+		auto tile = this->stripTile(layout, window);
 		if (m.focusMaximized()) tile = this->tileRect(layout, window, true);
 		if (m.fullscreen()) {
 			const auto rects = monitorRects(monitorForScreen(layout->screen));
 			if (!rects.valid) return false;
 			tile = fullscreenFrame(window->hwnd(), rects.monitor);
 			if (layout->special) tile.translate(0, this->mSpecialOffset);
-		} else if (!work.contains(tile)) {
+		} else if (scroll == nullptr && !work.contains(tile)) {
 			return false;
 		}
+		const auto placed = scroll != nullptr && m.offscreen ? m.stripTile : m.target;
 		if (still) {
-			if (m.target != tile) return false;
+			if (placed != tile) return false;
 			plan.append({window->hwnd(), tile, tile, true, {},
 			             m.fullscreen() ? DwindleFullscreen::Active : DwindleFullscreen::None,
 			             m.fullscreen() ? std::optional(0.0f) : std::nullopt});
 		} else {
-			auto previous = m.target.isEmpty() && !m.dropped && !m.startupMove ? QRect() : this->managedFrame(m);
-			auto settled = m.dropped || (!previous.isEmpty() && std::abs(previous.left() - m.target.left()) <= 4
-			                             && std::abs(previous.top() - m.target.top()) <= 4
-			                             && std::abs(previous.right() - m.target.right()) <= 4
-			                             && std::abs(previous.bottom() - m.target.bottom()) <= 4);
-			changed |= tile != m.target;
+			auto previous = m.target.isEmpty() && !m.dropped && !m.startupMove ? QRect()
+			              : scroll != nullptr && m.offscreen ? m.stripTile
+			                                                 : this->managedFrame(m);
+			auto settled = m.dropped || (!previous.isEmpty() && std::abs(previous.left() - placed.left()) <= 4
+			                             && std::abs(previous.top() - placed.top()) <= 4
+			                             && std::abs(previous.right() - placed.right()) <= 4
+			                             && std::abs(previous.bottom() - placed.bottom()) <= 4);
+			changed |= tile != placed;
 			const auto leaving = !m.fullscreen() && m.fullscreenLookPending;
 			const auto radius = m.fullscreen() ? std::optional(0.0f)
 			                   : leaving ? m.fullscreenTileRadius : std::nullopt;
@@ -2583,6 +2591,16 @@ void TilingManager::coverNewWindow(HWND hwnd) {
 	bool changed = false;
 	if (this->dwindlePlan(layout, rects.work, plan, changed, true))
 		DwindleScene::cover(monitor, rects.work, plan);
+}
+
+QRect TilingManager::stripTile(const Layout* layout, TrackedWindow* window) const {
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr) return this->tileRect(layout, window);
+	auto in = toPhysical(this->mGapsIn, layout->screen->devicePixelRatio());
+	auto shift = layout->special ? this->mSpecialOffset : 0;
+	auto box = scroll->visibleBox(idOf(window));
+	if (box.isEmpty()) return this->tileRect(layout, window);
+	return QRect(box.left() + in, box.top() + in + shift, qMax(1, box.width() - 2 * in), qMax(1, box.height() - 2 * in));
 }
 
 QRect TilingManager::tileRect(const Layout* layout, TrackedWindow* window, bool fillLayout) const {

@@ -1953,9 +1953,9 @@ void Scene::settle() {
 		this->idle.start(static_cast<int>((this->holdUntil - now) * 1000 / frequency()) + 1);
 		return;
 	}
-	const auto placed = std::all_of(this->tiles.begin(), this->tiles.end(), [](const auto& pair) {
+	const auto placed = std::all_of(this->tiles.begin(), this->tiles.end(), [this](const auto& pair) {
 		const auto& [hwnd, tile] = pair;
-		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) return true;
+		if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || !tile->target.intersects(this->work)) return true;
 		const auto actual = frame(hwnd);
 		const auto target = tile->target.adjusted(-2, -2, 2, 2);
 		return !actual.isEmpty() && target.contains(actual)
@@ -1986,7 +1986,8 @@ void Scene::settle() {
 	}
 	const auto arrived = std::all_of(this->tiles.begin(), this->tiles.end(), [this](const auto& pair) {
 		const auto& [hwnd, tile] = pair;
-		return !IsWindow(hwnd) || !IsWindowVisible(hwnd) || frame(hwnd).intersects(this->work);
+		return !IsWindow(hwnd) || !IsWindowVisible(hwnd) || !tile->target.intersects(this->work)
+		    || frame(hwnd).intersects(this->work);
 	});
 	if ((!arrived && this->retries < ArrivalRetries)
 	    || (!placed && !this->hurrying && this->retries < ReleaseRetries)) {
