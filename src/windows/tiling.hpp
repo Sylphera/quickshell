@@ -444,6 +444,7 @@ private:
 	TrackedWindow* dragging = nullptr;
 	QRect dragOrigin;
 	QPointer<TrackedWindow> detached;
+	QSet<HWND> looseFloats;
 	QPointer<TrackedWindow> tapeWindow;
 	int tapeStart = 0;
 	int tapeMoved = 0;

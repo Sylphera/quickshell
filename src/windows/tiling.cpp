@@ -3058,6 +3058,25 @@ Layer untiledLayer(HWND hwnd, bool tracked) {
 	return Layer::Floating;
 }
 
+bool looseFloating(HWND hwnd) {
+	if (isOwnProcessWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd)) return false;
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	auto ours = GetPropW(hwnd, FLOAT_TOPMOST_PROP) != nullptr;
+	if ((exStyle & WS_EX_TOPMOST) != 0 && !ours) return false;
+	if ((exStyle & (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) != 0) return false;
+	DWORD cloaked = 0;
+	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+	if (cloaked != 0) return false;
+	if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION) return false;
+	RECT rect {};
+	if (!GetWindowRect(hwnd, &rect)) return false;
+	auto width = rect.right - rect.left;
+	auto height = rect.bottom - rect.top;
+	if (width < NOTICE_MINIMUM || height < NOTICE_MINIMUM) return false;
+	auto work = monitorRects(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).work;
+	return !(width > work.width() * FLOATING_MAXIMUM && height > work.height() * FLOATING_MAXIMUM);
+}
+
 }
 
 QRect TilingManager::floatingRect(const QRect& tile, QSize size, const QRect& work) {
@@ -3104,16 +3123,30 @@ void TilingManager::syncFloatTopmost() {
 	}
 	struct Own {
 		HWND under;
+		const TilingManager* tiling;
+		QSet<HWND> loose;
 	};
-	auto own = Own {.under = under};
+	auto own = Own {.under = under, .tiling = this, .loose = {}};
 	EnumWindows(
 	    [](HWND hwnd, LPARAM param) -> BOOL {
-		    if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && isOwnProcessWindow(hwnd) && ownAppWindow(hwnd))
-			    raiseFloat(hwnd, reinterpret_cast<Own*>(param)->under);
+		    auto* own = reinterpret_cast<Own*>(param);
+		    if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && isOwnProcessWindow(hwnd) && ownAppWindow(hwnd)) {
+			    raiseFloat(hwnd, own->under);
+			    return TRUE;
+		    }
+		    auto* window = own->tiling->tracker->windowFor(hwnd);
+		    if (window != nullptr && (own->tiling->managed.contains(window) || Scratchpad::holds(window))) return TRUE;
+		    if (!looseFloating(hwnd)) return TRUE;
+		    own->loose.insert(hwnd);
+		    raiseFloat(hwnd, own->under);
 		    return TRUE;
 	    },
 	    reinterpret_cast<LPARAM>(&own)
 	);
+	for (auto* hwnd: std::as_const(this->looseFloats)) {
+		if (!own.loose.contains(hwnd) && IsWindow(hwnd)) lowerFloat(hwnd);
+	}
+	this->looseFloats = own.loose;
 }
 
 void TilingManager::restack() {
