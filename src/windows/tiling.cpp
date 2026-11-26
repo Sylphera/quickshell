@@ -501,6 +501,8 @@ tiling::CenterMode centerModeOf(const QString& value) {
 
 } // namespace
 
+bool floatsAboveTiles(HWND hwnd) { return GetPropW(hwnd, FLOAT_TOPMOST_PROP) != nullptr; }
+
 TilingManager* TilingManager::instance() {
 	static auto* instance = new TilingManager(); // NOLINT
 	return instance;

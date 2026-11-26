@@ -1700,7 +1700,8 @@ void Scene::dropFloating() {
 }
 
 bool Scene::staysAbove(HWND hwnd) const {
-	if (hwnd == this->host || this->tiles.contains(hwnd) || !layers::staysAbove(hwnd)) return false;
+	if (hwnd == this->host || this->tiles.contains(hwnd)) return false;
+	if (!layers::staysAbove(hwnd) && !floatsAboveTiles(hwnd)) return false;
 	if (Scratchpad::holds(WindowTracker::instance()->windowFor(hwnd))) return false;
 	return frame(hwnd).intersects(this->visibleWork);
 }

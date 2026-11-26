@@ -552,4 +552,6 @@ signals:
 	void scrollingCenterChanged();
 };
 
+[[nodiscard]] bool floatsAboveTiles(HWND hwnd);
+
 } // namespace qs::windows
