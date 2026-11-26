@@ -436,8 +436,13 @@ QVariantMap Session::osInfo() {
 	if (build.toInt() >= 22000) name.replace("Windows 10", "Windows 11");
 	if (name.isEmpty()) name = "Windows";
 
+	wchar_t uiLanguage[LOCALE_NAME_MAX_LENGTH] {};
+	if (LCIDToLocaleName(MAKELCID(GetUserDefaultUILanguage(), SORT_DEFAULT), uiLanguage, LOCALE_NAME_MAX_LENGTH, 0) == 0)
+		uiLanguage[0] = 0;
+
 	return {
 	    {"name", name},
+	    {"uiLanguage", QString::fromWCharArray(uiLanguage)},
 	    {"version", readString(L"DisplayVersion")},
 	    {"build", hasUbr ? build + "." + QString::number(ubr) : build},
 	    {"edition", readString(L"EditionID")},
