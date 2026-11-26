@@ -142,6 +142,14 @@ bool ownWindow(HWND hwnd) {
 	return pid == GetCurrentProcessId();
 }
 
+bool ownAppWindow(HWND hwnd) {
+	if (!ownWindow(hwnd)) return false;
+	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	return (style & WS_THICKFRAME) != 0 && (style & WS_CAPTION) == WS_CAPTION
+	    && (exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) == 0;
+}
+
 QRect sourceOf(HWND hwnd, const QRect& rect) {
 	RECT box {};
 	auto kind = GetWindowRgnBox(hwnd, &box);
@@ -713,6 +721,12 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 	const auto windows = topLevelWindows();
 	for (auto i = windows.size() - 1; i >= 0; i--) {
 		auto* hwnd = windows[i];
+		if (ownAppWindow(hwnd)) {
+			if (IsIconic(hwnd) || this->stills.contains(hwnd) || existing.contains(hwnd)) continue;
+			if (VirtualDesktops::instance()->windowDesktopIndex(hwnd) != desktop) continue;
+			if (rectOf(hwnd).intersects(this->monitor)) sources.append(hwnd);
+			continue;
+		}
 		if (ownWindow(hwnd)) continue;
 		auto* window = tracker->windowFor(hwnd);
 		if (Scratchpad::holds(window) || this->pinned.contains(hwnd)) continue;
@@ -722,7 +736,8 @@ bool DesktopSlide::addLiveDesktop(qsizetype desktop) {
 		if (this->stills.contains(hwnd)) continue;
 		if (tiling != nullptr && tiling->covers(window)) {
 			sources.removeIf([tracker, window](HWND under) {
-				return tracker->windowFor(under)->screen() == window->screen();
+				auto* covered = tracker->windowFor(under);
+				return covered != nullptr && covered->screen() == window->screen();
 			});
 		}
 		if (!existing.contains(hwnd)) sources.append(hwnd);
@@ -968,7 +983,7 @@ void DesktopSlide::placeUnderPanels() {
 	HWND lowest = nullptr;
 	for (auto* hwnd: topLevelWindows()) {
 		if (hwnd == this->overlay || !topmost(hwnd)) continue;
-		if (ownWindow(hwnd) || this->pinned.contains(hwnd)) lowest = hwnd;
+		if ((ownWindow(hwnd) && !ownAppWindow(hwnd)) || this->pinned.contains(hwnd)) lowest = hwnd;
 	}
 	SetWindowPos(
 	    this->overlay,
@@ -999,6 +1014,13 @@ void DesktopSlide::placeUnderPanels() {
 			over = hwnd;
 			break;
 		}
+	}
+	QList<HWND> floatsAbove;
+	for (auto* hwnd = GetWindow(this->overlay, GW_HWNDPREV); hwnd != nullptr; hwnd = GetWindow(hwnd, GW_HWNDPREV)) {
+		if (IsWindowVisible(hwnd) && (ownAppWindow(hwnd) || floatsAboveTiles(hwnd))) floatsAbove.append(hwnd);
+	}
+	for (auto* hwnd: floatsAbove) {
+		SetWindowPos(hwnd, this->overlay, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 	}
 	qCDebug(logSlide) << "Cover placed under" << lowest << QString::fromWCharArray(lowestClass) << "topmost"
 	                  << topmost(this->overlay) << "plain window over it" << over;
