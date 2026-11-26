@@ -30,6 +30,7 @@
 #include <qregularexpression.h>
 #include <qsavefile.h>
 #include <qscreen.h>
+#include <qscopeguard.h>
 #include <qset.h>
 #include <qstring.h>
 #include <qstringlist.h>
@@ -2015,6 +2016,7 @@ void TilingManager::apply(Layout* layout) {
 
 	auto rects = monitorRects(monitorForScreen(layout->screen));
 	if (!rects.valid) return;
+	const auto applied = qScopeGuard([this]() { emit this->layoutApplied(); });
 
 	layout->tree->configure(this->options());
 	this->prepareScrolling(layout);

@@ -181,6 +181,7 @@ signals:
 	void scrollingPresetsChanged();
 	void scrollingCenterChanged();
 	void windowTilingChanged(TrackedWindow* window);
+	void layoutApplied();
 
 private:
 	explicit TilingManager();

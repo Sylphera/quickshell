@@ -25,6 +25,7 @@
 #include "../input_mask.hpp"
 #include "../scratchpad.hpp"
 #include "../super_drag.hpp"
+#include "../tiling.hpp"
 #include "../util.hpp"
 #include "../virtual_desktops.hpp"
 #include "../window_tracker.hpp"
@@ -44,6 +45,7 @@ Q_LOGGING_CATEGORY(logHyprlandIpcEvents, "quickshell.hyprland.ipc.events", QtWar
 constexpr int GEOMETRY_EVENT_MS = 500;
 constexpr int TITLE_EVENT_MS = 200;
 constexpr int IPC_OBJECT_REFRESH_MS = 100;
+constexpr int LAYOUT_EVENT_MS = 60;
 
 QByteArray workspaceName(HyprlandWorkspace* workspace) {
 	return workspace == nullptr ? QByteArray() : workspace->bindableName().value().toUtf8();
@@ -118,6 +120,16 @@ HyprlandIpc::HyprlandIpc()
     , dispatcher(new Dispatcher(this)) {
 	this->geometryTimer.setSingleShot(true);
 	QObject::connect(&this->geometryTimer, &QTimer::timeout, this, &HyprlandIpc::emitGeometryEvent);
+	this->layoutTimer.setSingleShot(true);
+	this->layoutTimer.setInterval(LAYOUT_EVENT_MS);
+	QObject::connect(&this->layoutTimer, &QTimer::timeout, this, [this]() {
+		this->markFocusOrderDirty(0, this->focusOrder.size());
+		this->geometryTimer.stop();
+		this->emitGeometryEvent();
+	});
+	QObject::connect(TilingManager::instance(), &TilingManager::layoutApplied, this, [this]() {
+		if (!this->layoutTimer.isActive()) this->layoutTimer.start();
+	});
 
 	this->titleTimer.setSingleShot(true);
 	this->titleTimer.setInterval(TITLE_EVENT_MS);

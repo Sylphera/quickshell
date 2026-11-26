@@ -167,6 +167,7 @@ private:
 
 	HyprlandIpcEvent event {this};
 	QTimer geometryTimer;
+	QTimer layoutTimer;
 	bool geometryAfterFlush = false;
 	QTimer titleTimer;
 	QList<QPointer<HyprlandToplevel>> pendingTitles;
