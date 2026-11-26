@@ -766,11 +766,37 @@ bool isMotionCover(HWND hwnd) {
 	return wcscmp(cls, L"QuickshellWindowMotion") == 0 || wcscmp(cls, L"QuickshellWindowPop") == 0
 	    || wcscmp(cls, L"QuickshellMotionSnapshot") == 0;
 }
+
+bool shellAppWindow(HWND hwnd) {
+	if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	return (style & WS_THICKFRAME) != 0 && (style & WS_CAPTION) == WS_CAPTION
+	    && (exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) == 0;
 }
+} // namespace
 
 void SuperDragManager::onHover(POINT point, bool byLayout) {
 	auto* hit = WindowFromPoint(point);
 	auto* root = hit != nullptr ? GetAncestor(hit, GA_ROOT) : nullptr;
+	if (!byLayout && root != nullptr && isOwnProcessWindow(root) && shellAppWindow(root)) {
+		auto* foreground = GetForegroundWindow();
+		if (root == foreground) return;
+		if (foreground != nullptr && !isOwnProcessWindow(foreground)) {
+			GUITHREADINFO gui {.cbSize = sizeof(GUITHREADINFO)};
+			if (GetGUIThreadInfo(GetWindowThreadProcessId(foreground, nullptr), &gui)) {
+				constexpr DWORD busy = GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE;
+				if ((gui.flags & busy) != 0 || gui.hwndCapture != nullptr) return;
+			}
+			auto* tiling = TilingManager::active();
+			auto* focused = WindowTracker::instance()->windowFor(foreground);
+			if (focused != nullptr && (tiling == nullptr || !tiling->isTiled(focused))) return;
+		}
+		auto* desktops = VirtualDesktops::instance();
+		if (desktops->shownIndex() != desktops->currentIndex()) return;
+		forceForegroundWindow(root);
+		return;
+	}
 	if (root != nullptr && isOwnProcessWindow(root) && !isMotionCover(root)) return;
 
 	auto* hitWindow = root != nullptr ? WindowTracker::instance()->windowFor(root) : nullptr;

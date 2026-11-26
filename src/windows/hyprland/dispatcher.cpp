@@ -240,12 +240,9 @@ bool aloneOnDesktop(WindowTracker* tracker, TrackedWindow* window) {
 }
 
 void closeFocused(WindowTracker* tracker) {
+	if (closeShellWindow(GetForegroundWindow())) return;
 	tracker->syncActive();
-	if (auto* window = tracker->activeWindow()) {
-		window->close();
-	} else {
-		closeShellWindow(GetForegroundWindow());
-	}
+	if (auto* window = tracker->activeWindow()) window->close();
 }
 
 } // namespace
