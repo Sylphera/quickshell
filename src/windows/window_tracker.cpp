@@ -472,7 +472,10 @@ void TrackedWindow::activate(bool followDesktop) {
 }
 
 void TrackedWindow::raise() {
-	if (IsIconic(this->mHwnd)) ShowWindowAsync(this->mHwnd, SW_RESTORE);
+	if (IsIconic(this->mHwnd) && !ShowWindowAsync(this->mHwnd, SW_RESTORE)) {
+		SwitchToThisWindow(this->mHwnd, TRUE);
+		return;
+	}
 	auto* target = GetLastActivePopup(this->mHwnd);
 	if (target == nullptr || !IsWindowVisible(target)) target = this->mHwnd;
 	forceForegroundWindow(target);
