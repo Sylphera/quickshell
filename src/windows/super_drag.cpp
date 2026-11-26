@@ -187,12 +187,13 @@ HWND dragTarget(POINT point) {
 	const auto sceneWindow = DwindleScene::windowAt(point, nativeWindow);
 	auto* hwnd = sceneWindow.has_value() ? *sceneWindow : WindowMotion::instance()->windowAt(point);
 	if (!sceneWindow.has_value() && hwnd == nullptr) hwnd = nativeWindow;
-	if (hwnd == nullptr || isOwnProcessWindow(hwnd)) return nullptr;
+	if (hwnd == nullptr) return nullptr;
 	if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return nullptr;
 
 	auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
 	auto exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
 	if ((style & WS_CHILD) != 0) return nullptr;
+	if (isOwnProcessWindow(hwnd) && (exStyle & WS_EX_NOACTIVATE) != 0) return nullptr;
 
 	auto caption = (style & WS_CAPTION) == WS_CAPTION;
 	if (!caption && (style & WS_THICKFRAME) == 0) return nullptr;
