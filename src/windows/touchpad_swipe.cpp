@@ -58,6 +58,8 @@ qsizetype swipeDestination(
 
 TouchpadSwipe::TouchpadSwipe(std::function<bool(int)> canGo): canGo(std::move(canGo)) {}
 
+double TouchpadSwipe::unitsPerMm() { return UNITS_PER_MM; }
+
 TouchpadSwipe::Step TouchpadSwipe::frame(const QList<TouchpadContact>& contacts, double timeMs) {
 	if (contacts.isEmpty()) {
 		auto step = this->finish();

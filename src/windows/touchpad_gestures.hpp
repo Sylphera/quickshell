@@ -43,6 +43,9 @@ signals:
 private:
 	void step();
 	void onFrame(const QList<TouchpadContact>& contacts, double timeMs);
+	void scrollTape(double dx, double timeMs);
+	void pushTape(double delta, double timeMs);
+	[[nodiscard]] double tapeVelocity() const;
 	void cancelSwipe();
 	void onSystemSwipeChanged();
 	void updateRequested();
@@ -51,6 +54,11 @@ private:
 	TouchpadReader reader;
 	TouchpadSwipe swipe;
 	TouchpadMove move;
+	enum class MoveTarget : quint8 { None, Window, Tape, Ignored };
+	MoveTarget moveTarget = MoveTarget::None;
+	double tapeDx = 0;
+	double tapeRaw = 0;
+	QList<QPair<double, double>> tapeHistory;
 	QTimer watchdog;
 	bool mSwipeEnabled = false;
 	bool mMoveEnabled = false;

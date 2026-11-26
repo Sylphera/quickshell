@@ -293,6 +293,11 @@ public:
 	bool center(Id id);
 	bool scrollColumns(int delta);
 	bool scrollBy(int pixels);
+	[[nodiscard]] int viewWidth() const { return this->metrics().view; }
+	void setView(int view);
+	void setFree(bool free) { this->free = free; }
+	[[nodiscard]] qsizetype snapTape(int projected, int direction, qsizetype from, int* view) const;
+	[[nodiscard]] Id focusedAt(qsizetype index) const { return this->focusedIn(index); }
 	bool fit(Id id, FitMode mode);
 	bool setColumnWidth(Id id, double value, bool relative);
 	bool setAllWidths(double value);
@@ -373,6 +378,7 @@ private:
 	Id openedChild = 0;
 	Id openedParent = 0;
 	int offset = 0;
+	bool free = false;
 };
 
 } // namespace qs::windows::tiling

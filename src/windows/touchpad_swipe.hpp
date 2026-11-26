@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <functional>
 
 #include <qlist.h>
@@ -22,6 +23,9 @@ struct TouchpadContact {
 
 class TouchpadSwipe {
 public:
+	[[nodiscard]] static double unitsPerMm();
+	[[nodiscard]] bool movedHorizontally() const { return std::abs(this->totalX) > std::abs(this->totalY); }
+
 	enum class Action : quint8 {
 		None,
 		Update,

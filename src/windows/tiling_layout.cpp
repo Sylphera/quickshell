@@ -1302,7 +1302,7 @@ void ScrollingLayout::compute(const QRect& area) {
 	auto view = this->viewX(m);
 	auto active = this->activeColumn();
 
-	if (active != -1 && this->columnVisible(active) && !this->fullyVisible(m, active, view)) {
+	if (!this->free && active != -1 && this->columnVisible(active) && !this->fullyVisible(m, active, view)) {
 		view = ScrollingLayout::fitView(m, active, view);
 		this->setViewX(m, view);
 	}
@@ -1584,6 +1584,37 @@ bool ScrollingLayout::scrollColumns(int delta) {
 
 	if (target == active) return false;
 	return this->activate(this->focusedIn(target));
+}
+
+void ScrollingLayout::setView(int view) {
+	auto m = this->metrics();
+	this->setViewX(m, this->clampView(m, view));
+}
+
+qsizetype ScrollingLayout::snapTape(int projected, int direction, qsizetype from, int* view) const {
+	auto m = this->metrics();
+	auto best = projected;
+	auto bestDelta = -1;
+	qsizetype bestColumn = from;
+	for (qsizetype c = 0; c < this->columns.length(); c++) {
+		if (!this->columnVisible(c)) continue;
+		for (auto snap: {m.x[c], m.x[c] + m.width[c] - m.view}) {
+			snap = this->clampView(m, snap);
+			const auto delta = std::abs(snap - projected);
+			if (bestDelta == -1 || delta < bestDelta) {
+				best = snap;
+				bestDelta = delta;
+				bestColumn = c;
+			}
+		}
+	}
+	if (view != nullptr) *view = best;
+	auto landed = bestColumn;
+	for (auto c = this->nextVisible(landed, direction, false); c != -1; c = this->nextVisible(c, direction, false)) {
+		if (!this->fullyVisible(m, c, best)) break;
+		landed = c;
+	}
+	return landed;
 }
 
 bool ScrollingLayout::scrollBy(int pixels) {

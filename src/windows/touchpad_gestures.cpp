@@ -1,5 +1,7 @@
 #include "touchpad_gestures.hpp"
 #include <algorithm>
+#include <cmath>
+#include <utility>
 
 #include <qlist.h>
 #include <qlogging.h>
@@ -9,6 +11,7 @@
 
 #include "desktop_slide.hpp"
 #include "system_swipe.hpp"
+#include "tiling.hpp"
 #include "touchpad_reader.hpp"
 #include "touchpad_swipe.hpp"
 
@@ -101,9 +104,24 @@ void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double ti
 	} else if (step.action == TouchpadSwipe::Action::Vertical) {
 		emit this->verticalSwiped();
 	} else if (step.action == TouchpadSwipe::Action::Move) {
-		this->move.update(step.dx, step.dy);
+		if (this->moveTarget == MoveTarget::None) {
+			auto* tiling = TilingManager::active();
+			const auto horizontal = this->swipe.movedHorizontally() && tiling != nullptr && tiling->scrollingHere();
+			if (!horizontal) this->moveTarget = MoveTarget::Window;
+			else this->moveTarget = tiling->beginGestureScroll() ? MoveTarget::Tape : MoveTarget::Ignored;
+			this->tapeHistory.clear();
+			this->tapeDx = 0;
+			this->tapeRaw = 0;
+		}
+		if (this->moveTarget == MoveTarget::Tape) this->scrollTape(step.dx, timeMs);
+		else if (this->moveTarget == MoveTarget::Window) this->move.update(step.dx, step.dy);
 	} else if (step.action == TouchpadSwipe::Action::MoveEnd) {
-		this->move.end(step.dx, step.dy, step.cancelled);
+		const auto target = std::exchange(this->moveTarget, MoveTarget::None);
+		if (target == MoveTarget::Tape) {
+			this->pushTape(0, timeMs);
+			TilingManager::instance()->endGestureScroll(this->tapeVelocity(), step.cancelled);
+		}
+		else if (target == MoveTarget::Window) this->move.end(step.dx, step.dy, step.cancelled);
 	} else if (step.action == TouchpadSwipe::Action::Pinch && !step.cancelled) {
 		emit this->pinched();
 	}
@@ -111,10 +129,53 @@ void TouchpadGestures::onFrame(const QList<TouchpadContact>& contacts, double ti
 	else this->watchdog.stop();
 }
 
+void TouchpadGestures::scrollTape(double dx, double timeMs) {
+	constexpr double BASELINE = 0.9;
+	constexpr double THRESHOLD = 254;
+	constexpr double INCLINE = 0.011;
+	constexpr double MAX_ACCEL = 9;
+	constexpr double SLOW_LIMIT = 7;
+	const auto raw = dx - this->tapeRaw;
+	this->tapeRaw = dx;
+	auto moved = raw;
+	if (!this->tapeHistory.isEmpty() && timeMs > this->tapeHistory.last().second) {
+		const auto seconds = (timeMs - this->tapeHistory.last().second) / 1000.0;
+		const auto speed = std::abs(raw) / TouchpadSwipe::unitsPerMm() / seconds;
+		auto factor = BASELINE;
+		if (speed < SLOW_LIMIT) factor = std::min(BASELINE, 0.1 * speed + 0.3);
+		else if (speed >= THRESHOLD) factor = INCLINE * (speed - THRESHOLD) + BASELINE;
+		moved = raw * std::min(MAX_ACCEL, factor) / BASELINE;
+	}
+	this->pushTape(moved, timeMs);
+	TilingManager::instance()->gestureScroll(this->tapeDx);
+}
+
+void TouchpadGestures::pushTape(double delta, double timeMs) {
+	constexpr double HISTORY_MS = 150;
+	if (!this->tapeHistory.isEmpty() && timeMs < this->tapeHistory.last().second) return;
+	this->tapeHistory.append({delta, timeMs});
+	this->tapeDx += delta;
+	while (!this->tapeHistory.isEmpty() && timeMs > this->tapeHistory.first().second + HISTORY_MS)
+		this->tapeHistory.removeFirst();
+}
+
+double TouchpadGestures::tapeVelocity() const {
+	if (this->tapeHistory.size() < 2) return 0;
+	const auto seconds = (this->tapeHistory.last().second - this->tapeHistory.first().second) / 1000.0;
+	if (seconds <= 0) return 0;
+	auto total = 0.0;
+	for (const auto& [delta, time]: this->tapeHistory) total += delta;
+	return total / seconds;
+}
+
 void TouchpadGestures::cancelSwipe() {
 	this->watchdog.stop();
 	auto swiping = this->swipe.swiping();
-	if (this->swipe.moving()) this->move.end(0, 0, true);
+	if (this->swipe.moving()) {
+		const auto target = std::exchange(this->moveTarget, MoveTarget::None);
+		if (target == MoveTarget::Tape) TilingManager::instance()->endGestureScroll(0, true);
+		else if (target == MoveTarget::Window) this->move.end(0, 0, true);
+	}
 	this->swipe.reset();
 	if (!swiping) return;
 	qCDebug(logGestures) << "Swipe cancelled";

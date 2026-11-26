@@ -4097,6 +4097,76 @@ void TilingManager::endGestureMove(TrackedWindow* window, std::optional<Edge> di
 	this->markLayout(m.layout);
 }
 
+TilingManager::Layout* TilingManager::gestureStrip() {
+	if (auto* m = this->tiledActive()) return TilingManager::scrollingOf(m->layout) != nullptr ? m->layout : nullptr;
+	if (this->tracker == nullptr || this->desktops == nullptr) return nullptr;
+	auto current = this->desktops->currentIndex();
+	if (current < 0 || current >= this->desktops->count()) return nullptr;
+	auto point = POINT {};
+	GetCursorPos(&point);
+	auto* screen = this->tracker->screenFor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST));
+	if (screen == nullptr) screen = focusedScreen();
+	auto* layout = this->layoutAt(this->desktops->desktops().at(current).id, screen, false);
+	return TilingManager::scrollingOf(layout) != nullptr ? layout : nullptr;
+}
+
+bool TilingManager::scrollingHere() { return this->gestureStrip() != nullptr; }
+
+bool TilingManager::beginGestureScroll() {
+	if (this->dragging != nullptr) return false;
+	auto* layout = this->gestureStrip();
+	auto* scroll = TilingManager::scrollingOf(layout);
+	if (scroll == nullptr) return false;
+	this->prepareScrolling(layout);
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	auto* m = this->tiledActive();
+	if (m != nullptr && m->layout == layout && scroll->active() != idOf(m->window)) {
+		scroll->activate(idOf(m->window));
+		if (rects.valid) scroll->compute(rects.work);
+	}
+	auto* window = this->windowOf(scroll->active());
+	if (window == nullptr) return false;
+	this->tapeWindow = window;
+	this->tapeStart = scroll->view();
+	this->tapeMoved = 0;
+	this->tapeColumn = scroll->columnOf(scroll->active());
+	scroll->setFree(true);
+	return true;
+}
+
+void TilingManager::gestureScroll(double dx) {
+	Layout* layout = nullptr;
+	auto* scroll = this->tapeWindow != nullptr ? this->scrollingFor(this->tapeWindow, &layout) : nullptr;
+	if (scroll == nullptr) return;
+	constexpr double GESTURE_SCREEN = 1200;
+	this->tapeMoved = -static_cast<int>(std::lround(dx * scroll->viewWidth() / GESTURE_SCREEN));
+	scroll->setView(this->tapeStart + this->tapeMoved);
+	this->prepareScrolling(layout);
+	auto rects = monitorRects(monitorForScreen(layout->screen));
+	if (rects.valid) scroll->compute(rects.work);
+	this->markLayout(layout);
+}
+
+void TilingManager::endGestureScroll(double velocity, bool cancelled) {
+	auto* window = std::exchange(this->tapeWindow, nullptr).data();
+	Layout* layout = nullptr;
+	auto* scroll = window != nullptr ? this->scrollingFor(window, &layout) : nullptr;
+	if (scroll == nullptr) return;
+	scroll->setFree(false);
+
+	constexpr double GESTURE_SCREEN = 1200;
+	constexpr double DECELERATION = 0.997;
+	const auto width = static_cast<double>(scroll->viewWidth());
+	const auto projection = cancelled ? 0.0 : velocity * width / GESTURE_SCREEN / (1000.0 * -std::log(DECELERATION));
+	const auto moved = std::exchange(this->tapeMoved, 0) - static_cast<int>(std::lround(projection));
+	const auto direction = projection <= 0 ? 1 : -1;
+	auto view = this->tapeStart;
+	const auto landed = scroll->snapTape(this->tapeStart + moved, direction, this->tapeColumn, &view);
+	if (landed != this->tapeColumn) scroll->activate(scroll->focusedAt(landed));
+	scroll->setView(view);
+	this->settle(layout);
+}
+
 void TilingManager::drop(Managed& m, const QPoint& cursor) {
 	auto* from = m.layout;
 	auto self = idOf(m.window);

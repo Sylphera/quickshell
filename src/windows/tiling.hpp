@@ -146,6 +146,10 @@ public:
 	bool beginGestureMove(TrackedWindow* window);
 	[[nodiscard]] bool coversScreen(TrackedWindow* window) const;
 	void endGestureMove(TrackedWindow* window, std::optional<Edge> direction);
+	bool scrollingHere();
+	bool beginGestureScroll();
+	void gestureScroll(double dx);
+	void endGestureScroll(double velocity, bool cancelled);
 	bool beginEdgeDrag(TrackedWindow* window, bool left, bool top);
 	void haltMotion(HWND hwnd, bool resize);
 	void edgeDrag(const QPoint& delta);
@@ -364,6 +368,7 @@ private:
 
 	[[nodiscard]] static tiling::ScrollingLayout* scrollingOf(const Layout* layout);
 	[[nodiscard]] tiling::ScrollingLayout* scrollingFor(TrackedWindow* window, Layout** layout);
+	Layout* gestureStrip();
 	void prepareScrolling(Layout* layout) const;
 	void settle(Layout* layout);
 	void refocus(Layout* layout);
@@ -438,6 +443,10 @@ private:
 	TrackedWindow* dragging = nullptr;
 	QRect dragOrigin;
 	QPointer<TrackedWindow> detached;
+	QPointer<TrackedWindow> tapeWindow;
+	int tapeStart = 0;
+	int tapeMoved = 0;
+	qsizetype tapeColumn = -1;
 	Override detachedOverride = Override::None;
 	QPointer<TrackedWindow> regrab;
 	QSize regrabSize;
