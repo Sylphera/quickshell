@@ -109,7 +109,6 @@ bool framelessCover(HWND hwnd) {
 	    && window.bottom >= screen.bottom;
 }
 
-constexpr qint64 RESTORE_FIGHT_MS = 8000;
 constexpr int SYNC_DELAY_MS = 30;
 constexpr int FLOATING_TOLERANCE = 5;
 constexpr int NOTICE_MINIMUM = 40;
@@ -3810,16 +3809,6 @@ void TilingManager::giveUp(Managed& m, const QRect& frame) {
 	auto bigger = frame.width() > m.target.width() + EDGE_TOLERANCE
 	           || frame.height() > m.target.height() + EDGE_TOLERANCE;
 	auto away = !m.target.contains(frame.center());
-
-	const auto now = QDateTime::currentMSecsSinceEpoch();
-	if ((bigger || away) && now - m.managedAt < RESTORE_FIGHT_MS) {
-		qCDebug(logTiling) << "Window" << m.window->addressHex() << "moved off its tile" << m.target
-		                   << "while starting (is" << frame << "); putting it back.";
-		m.corrections = 0;
-		m.lastCorrection = now;
-		this->send(m, frame);
-		return;
-	}
 
 	if (bigger || away) {
 		qCInfo(logTiling) << "Window" << m.window->addressHex() << m.window->appId()
