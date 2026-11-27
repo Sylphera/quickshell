@@ -129,7 +129,6 @@ constexpr int UNMAXIMIZE_SETTLE_MS = 400;
 constexpr qint32 MAX_CORRECTIONS = 2;
 constexpr qint64 CORRECTION_RESET_MS = 1500;
 constexpr int EDGE_TOLERANCE = 2;
-constexpr int TINY_CORNER_LIMIT = 80;
 constexpr int CHROMIUM_CORNER_LIMIT = 256;
 constexpr int SYSTEM_CAPTION_MIN = 8;
 constexpr int TINY_CORNER_RADIUS = 12;
@@ -165,18 +164,6 @@ void forgetTinyCorners(HWND hwnd) {
 		if (slot.hwnd.load() == hwnd) slot.hwnd.store(nullptr);
 	}
 }
-void rememberTinyBorder(HWND hwnd) {
-	for (auto& slot: gTinyCornerSlots) {
-		if (slot.hwnd.load() == hwnd) slot.borderSuppressed.store(true);
-	}
-}
-
-bool markTinyCornerOwner(HWND hwnd, int preference) {
-	if (preference < 0 || preference > 3) return false;
-	auto value = static_cast<UINT_PTR>(preference + 1);
-	return SetPropW(hwnd, TINY_CORNER_PROP, reinterpret_cast<HANDLE>(value)) != FALSE;
-}
-
 constexpr UINT_PTR TINY_CORNER_NC_DISABLED = 0x100;
 
 bool restoreChromiumCorners(HWND hwnd, bool keepRound = false) {
@@ -2769,117 +2756,7 @@ void TilingManager::updateTinyCorners(Managed& m, const QRect& frame) {
 		return;
 	}
 
-	if (frame.width() >= TINY_CORNER_LIMIT && frame.height() >= TINY_CORNER_LIMIT) {
-		this->restoreTinyCorners(m);
-		return;
-	}
-	if (!m.tinyCornersApplied && hasSystemCaption(hwnd)) {
-		if (m.tinySmallCorners) return;
-		auto previous = DWM_WINDOW_CORNER_PREFERENCE {};
-		if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous)))) {
-			previous = DWMWCP_DEFAULT;
-		}
-		if (!markTinyCornerOwner(hwnd, static_cast<int>(previous))) return;
-		auto smallCorners = DWMWCP_ROUNDSMALL;
-		if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &smallCorners, sizeof(smallCorners)))) {
-			RemovePropW(hwnd, TINY_CORNER_PROP);
-			return;
-		}
-		m.previousCornerPreference = static_cast<int>(previous);
-		m.tinySmallCorners = true;
-		rememberTinyCorners(hwnd, m.previousCornerPreference);
-		return;
-	}
-	QRect raw;
-	QRect visible;
-	if (!readFrame(hwnd, raw, visible)) return;
-
-	if (!m.tinyCornersApplied) {
-		m.tinyFrameInsets = QMargins(
-		    visible.left() - raw.left(),
-		    visible.top() - raw.top(),
-		    rightOf(raw) - rightOf(visible),
-		    bottomOf(raw) - bottomOf(visible)
-		);
-	}
-	auto regionBox = QRect(
-	    m.tinyFrameInsets.left(),
-	    m.tinyFrameInsets.top(),
-	    qMax(1, raw.width() - m.tinyFrameInsets.left() - m.tinyFrameInsets.right()),
-	    qMax(1, raw.height() - m.tinyFrameInsets.top() - m.tinyFrameInsets.bottom())
-	);
-	if (regionBox == m.tinyCornersRect && m.tinyCornersApplied) {
-		auto nativeCorners = DWMWCP_ROUNDSMALL;
-		DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &nativeCorners, sizeof(nativeCorners));
-		auto border = COLORREF(DWMWA_COLOR_NONE);
-		if (SUCCEEDED(DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border)))) {
-			m.tinyBorderSuppressed = true;
-			rememberTinyBorder(hwnd);
-		}
-		return;
-	}
-
-	if (!m.tinyCornersApplied) {
-		auto* probe = CreateRectRgn(0, 0, 0, 0);
-		if (probe == nullptr) return;
-		auto customRegion = GetWindowRgn(hwnd, probe) != ERROR;
-		DeleteObject(probe);
-		if (customRegion) return;
-
-		auto previous = DWM_WINDOW_CORNER_PREFERENCE {};
-		if (FAILED(DwmGetWindowAttribute(
-		        hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous)
-		    ))) return;
-		m.previousCornerPreference = static_cast<int>(previous);
-	}
-
-	auto radius = qMin(TINY_CORNER_RADIUS, qMin(regionBox.width(), regionBox.height()) / 2);
-	auto diameter = qMax(1, 2 * radius);
-	auto* region = CreateRoundRectRgn(
-	    regionBox.left(),
-	    regionBox.top(),
-	    rightOf(regionBox),
-	    bottomOf(regionBox),
-	    diameter,
-	    diameter
-	);
-	if (region == nullptr) return;
-
-	if (!m.tinyCornersApplied) {
-		if (!markTinyCornerOwner(hwnd, m.previousCornerPreference)) {
-			DeleteObject(region);
-			return;
-		}
-		auto nativeCorners = DWMWCP_ROUNDSMALL;
-		if (FAILED(DwmSetWindowAttribute(
-		        hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &nativeCorners, sizeof(nativeCorners)
-		    )))
-		{
-			RemovePropW(hwnd, TINY_CORNER_PROP);
-			DeleteObject(region);
-			return;
-		}
-	}
-
-	if (SetWindowRgn(hwnd, region, TRUE) == 0) {
-		if (!m.tinyCornersApplied) RemovePropW(hwnd, TINY_CORNER_PROP);
-		DeleteObject(region);
-		if (!m.tinyCornersApplied) {
-			auto previous = static_cast<DWM_WINDOW_CORNER_PREFERENCE>(m.previousCornerPreference);
-			DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &previous, sizeof(previous));
-		}
-		return;
-	}
-	if (!m.tinyCornersApplied) rememberTinyCorners(hwnd, m.previousCornerPreference);
-	m.tinyCornersApplied = true;
-	m.tinyCornersRect = regionBox;
-	if (!m.tinyBorderSuppressed) {
-		auto border = COLORREF(DWMWA_COLOR_NONE);
-		if (SUCCEEDED(DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border)))) {
-			m.tinyBorderSuppressed = true;
-			rememberTinyBorder(hwnd);
-		}
-	}
+	this->restoreTinyCorners(m);
 }
 
 void TilingManager::reassertTinyDecorations() {
