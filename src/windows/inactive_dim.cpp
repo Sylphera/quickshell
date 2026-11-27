@@ -122,7 +122,13 @@ QRect visibleFrame(HWND hwnd) {
 	if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
 		GetWindowRect(hwnd, &r);
 	}
-	return {r.left, r.top, r.right - r.left, r.bottom - r.top};
+	auto frame = QRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+	RECT window {};
+	RECT box {};
+	if (GetWindowRgnBox(hwnd, &box) > NULLREGION && GetWindowRect(hwnd, &window)) {
+		frame &= QRect(window.left + box.left, window.top + box.top, box.right - box.left, box.bottom - box.top);
+	}
+	return frame;
 }
 
 bool isDialogOfTracked(HWND hwnd) {
