@@ -3193,14 +3193,11 @@ void TilingManager::restack() {
 	    reinterpret_cast<LPARAM>(&search)
 	);
 
-	const auto lowestTopmost = search.lowest != nullptr
-	                        && ((GetWindowLongPtrW(search.lowest, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0
-	                            || GetPropW(search.lowest, FLOAT_TOPMOST_PROP) != nullptr);
 	for (auto* hwnd: search.above) {
 		qCDebug(logTiling) << "Keeping" << hwnd << "under" << search.lowest << windowClass(search.lowest);
 		constexpr UINT flags =
 		    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-		SetWindowPos(hwnd, lowestTopmost ? HWND_NOTOPMOST : search.lowest, 0, 0, 0, 0, flags);
+		SetWindowPos(hwnd, search.lowest, 0, 0, 0, 0, flags);
 	}
 }
 
