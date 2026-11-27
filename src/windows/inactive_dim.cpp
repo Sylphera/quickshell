@@ -507,12 +507,22 @@ HTHUMBNAIL InactiveDim::shadeThumbnail(HWND destination, float level) {
 	return thumbnail;
 }
 
+bool InactiveDim::showing() const {
+	return this->scene != nullptr && IsWindowVisible(this->scene->host);
+}
+
 void InactiveDim::stepAside() {
 	if (this->scene != nullptr && IsWindowVisible(this->scene->host)) ShowWindow(this->scene->host, SW_HIDE);
 }
 
 void InactiveDim::comeBack() {
 	if (this->mEnabled && this->watching) this->refresh();
+}
+
+void InactiveDim::comeBackNow() {
+	this->ignoreScene = true;
+	this->comeBack();
+	this->ignoreScene = false;
 }
 
 void InactiveDim::updateLevels(const QList<HWND>& shown) {
@@ -554,7 +564,7 @@ void InactiveDim::refresh() {
 	}
 	this->updateLevels(shown);
 
-	if (DesktopSlide::instance()->busy()) {
+	if (DesktopSlide::instance()->busy() || (!this->ignoreScene && DwindleScene::animating())) {
 		this->stepAside();
 		this->schedule(BUSY_MS);
 		return;
@@ -584,7 +594,7 @@ void InactiveDim::refresh() {
 		this->scene.reset();
 		return;
 	}
-	const auto animating = DwindleScene::animating() || Scratchpad::instance()->moving();
+	const auto animating = (!this->ignoreScene && DwindleScene::animating()) || Scratchpad::instance()->moving();
 	if (animating) this->schedule(REFRESH_MS);
 	else this->scene->place(handles);
 	if (!animating) qCDebug(logDim) << "Dimming" << this->scene->shades.size() << "of" << handles.length()

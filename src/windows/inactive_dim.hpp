@@ -42,8 +42,10 @@ public:
 	    const DimLevel& level
 	);
 	[[nodiscard]] static HTHUMBNAIL shadeThumbnail(HWND destination, float level);
+	[[nodiscard]] bool showing() const;
 	void stepAside();
 	void comeBack();
+	void comeBackNow();
 
 signals:
 	void enabledChanged();
@@ -65,6 +67,7 @@ private:
 	QTimer timer;
 	HWND focused = nullptr;
 	bool mEnabled = false;
+	bool ignoreScene = false;
 	bool watching = false;
 };
 

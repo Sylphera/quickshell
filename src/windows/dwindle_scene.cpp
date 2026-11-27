@@ -339,6 +339,7 @@ struct Shade {
 	ComPtr<IDCompositionEffectGroup> effect;
 	DimLevel level;
 	bool muted = false;
+	float baked = 0.0f;
 };
 
 struct AnimatedFrame {
@@ -400,6 +401,7 @@ struct Tile: AnimatedFrame {
 	qint64 closeSourceUntil = 0;
 	ComPtr<IDCompositionVisual> retained;
 	QSize retainedSize;
+	float retainedLevel = 0.0f;
 	float radius = 0;
 	float radiusFrom = 0;
 	[[nodiscard]] float radiusAt(qint64 now) const {
@@ -556,6 +558,7 @@ private:
 	bool prepare(const QList<DwindleTile>& plan);
 	bool addShade(Shade& shade, HWND window, IDCompositionVisual* parent);
 	bool syncShade(Shade& shade, HWND window);
+	bool paintShade(Shade& shade);
 	void muteUnderlay(bool mute);
 	bool addUnderlay(const QList<DwindleTile>& plan);
 	[[nodiscard]] QList<HWND> floatingWindows(HWND cover) const;
@@ -574,7 +577,7 @@ private:
 	bool setTileContent(Tile& tile, IDCompositionVisual* content);
 	bool attachPlaceholder(Tile& tile);
 	bool attachCloseContent(Tile& tile, const CloseFrame& close);
-	void retain(Tile& tile, const DwindleTile& placement, const QImage& before);
+	void retain(Tile& tile, const DwindleTile& placement, const QImage& before, bool dimmed);
 	bool retainedVisible(Tile& tile, bool visible);
 	bool resizeLiveClip(Tile& tile);
 	bool alignLiveReflow(Tile& tile);
@@ -634,6 +637,7 @@ private:
 	qint64 holdUntil = 0;
 	qint64 occlusionStarted = 0;
 	QImage coverFrame;
+	bool beforeDimmed = true;
 	bool released = false;
 	bool finishing = false;
 	bool hurrying = false;
@@ -810,16 +814,22 @@ bool Scene::syncShade(Shade& shade, HWND window) {
 	if (shade.effect == nullptr || shade.muted) return false;
 	const auto level = InactiveDim::levelOf(window);
 	if (level == shade.level) return false;
-	if (!InactiveDim::applyLevel(this->device.Get(), shade.effect.Get(), level)) return false;
 	shade.level = level;
-	return true;
+	return this->paintShade(shade);
+}
+
+bool Scene::paintShade(Shade& shade) {
+	if (shade.effect == nullptr) return false;
+	if (shade.muted) return SUCCEEDED(shade.effect->SetOpacity(0.0f));
+	if (shade.baked <= 0.0f) return InactiveDim::applyLevel(this->device.Get(), shade.effect.Get(), shade.level);
+	const auto extra = std::max(0.0f, (shade.level.to - shade.baked) / (1.0f - shade.baked));
+	return SUCCEEDED(shade.effect->SetOpacity(extra));
 }
 
 void Scene::muteUnderlay(bool mute) {
 	for (auto& [hwnd, under]: this->underlay) {
 		if (std::exchange(under->shade.muted, mute) == mute) continue;
-		if (mute) under->shade.effect->SetOpacity(0.0f);
-		else InactiveDim::applyLevel(this->device.Get(), under->shade.effect.Get(), under->shade.level);
+		this->paintShade(under->shade);
 	}
 }
 
@@ -953,7 +963,7 @@ bool Scene::addTile(Tile& tile, const DwindleTile& placement, const QImage& befo
 		return false;
 
 	if (!tile.waitingForSize) {
-		this->retain(tile, placement, before);
+		this->retain(tile, placement, before, this->beforeDimmed);
 		return this->setTileContent(tile, tile.liveFrame.Get());
 	}
 	return this->awaitSize(tile);
@@ -975,11 +985,10 @@ bool Scene::setTileContent(Tile& tile, IDCompositionVisual* content) {
 		return false;
 	}
 	tile.visibleContent = content;
-	const auto muted = content != nullptr && content == tile.retained.Get();
-	if (muted != tile.shade.muted && tile.shade.effect != nullptr) {
-		tile.shade.muted = muted;
-		if (muted) tile.shade.effect->SetOpacity(0.0f);
-		else InactiveDim::applyLevel(this->device.Get(), tile.shade.effect.Get(), tile.shade.level);
+	const auto baked = content != nullptr && content == tile.retained.Get() ? tile.retainedLevel : 0.0f;
+	if (baked != tile.shade.baked && tile.shade.effect != nullptr) {
+		tile.shade.baked = baked;
+		this->paintShade(tile.shade);
 	}
 	return true;
 }
@@ -1027,7 +1036,7 @@ bool Scene::alignLiveReflow(Tile& tile) {
 	                     [&tile](auto value) { return tile.liveFrame->SetOffsetY(value); });
 }
 
-void Scene::retain(Tile& tile, const DwindleTile& placement, const QImage& before) {
+void Scene::retain(Tile& tile, const DwindleTile& placement, const QImage& before, bool dimmed) {
 	if (before.isNull() || placement.previous.isEmpty()
 	    || placement.previous.size() == placement.target.size()
 	    || !this->work.contains(placement.previous) || frame(placement.window) != placement.previous
@@ -1041,6 +1050,7 @@ void Scene::retain(Tile& tile, const DwindleTile& placement, const QImage& befor
 	    && SUCCEEDED(visual->SetContent(surface.Get()))) {
 		tile.retained = std::move(visual);
 		tile.retainedSize = old.size();
+		tile.retainedLevel = dimmed ? InactiveDim::levelOf(placement.window).now() : 0.0f;
 	}
 }
 
@@ -1401,6 +1411,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 	const auto needFrame = this->tiles.empty() && std::ranges::any_of(plan, [](const auto& tile) {
 		return !tile.previous.isEmpty() && tile.previous.size() != tile.target.size();
 	});
+	this->beforeDimmed = InactiveDim::instance()->showing();
 	const auto before = needFrame ? captureWorkspace(this->work) : QImage();
 	if (!this->coverFrame.isNull()) {
 		for (const auto& placement: plan) {
@@ -1408,7 +1419,7 @@ bool Scene::show(QList<DwindleTile> plan, const QRect& layoutWork, HWND focused,
 			if (found == this->tiles.end()) continue;
 			auto& tile = *found->second;
 			if (tile.target.isEmpty() || tile.retained != nullptr || tile.from != QRectF(tile.target)) continue;
-			this->retain(tile, {placement.window, tile.target, placement.target, true}, this->coverFrame);
+			this->retain(tile, {placement.window, tile.target, placement.target, true}, this->coverFrame, true);
 		}
 	}
 	for (auto placement = plan.begin(); placement != plan.end();) {
@@ -1720,8 +1731,10 @@ bool Scene::raise() {
 		if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) continue;
 		if (panels.contains(hwnd) || this->staysAbove(hwnd)) above = hwnd;
 	}
-	return SetWindowPos(this->host, above, 0, 0, 0, 0,
-	                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+	auto shown = SetWindowPos(this->host, above, 0, 0, 0, 0,
+	                          SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+	if (shown) InactiveDim::instance()->stepAside();
+	return shown;
 }
 
 HWND Scene::coveringHost() const {
@@ -2024,8 +2037,8 @@ void Scene::hide() {
 	this->hiddenFront = nullptr;
 	this->coveredFloats.clear();
 	if (this->host != nullptr && IsWindowVisible(this->host)) {
+		InactiveDim::instance()->comeBackNow();
 		ShowWindow(this->host, SW_HIDE);
-		QTimer::singleShot(0, InactiveDim::instance(), &InactiveDim::comeBack);
 	}
 	this->release();
 	this->finishing = false;
